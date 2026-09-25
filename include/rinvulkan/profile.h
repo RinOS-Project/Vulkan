@@ -17,10 +17,11 @@
      ((uint32_t)(patch)))
 #define RIN_GPU_VK_API_1_3 RIN_GPU_VK_MAKE_VERSION(1u, 3u, 0u)
 
-/* The public ICD currently exposes only the host-validated 1.0 transfer and
- * resource profile.  The 1.3 value above remains the version of the internal
- * product/profile contract; it must not leak into Vulkan loader advertisement
- * until the corresponding core command/error/lifetime semantics are wired. */
+/* The public ICD exposes the host-validated 1.0 transfer/resource profile and
+ * the separately enumerated VK_KHR_timeline_semaphore host extension.  The
+ * 1.3 value above remains the version of the internal product/profile
+ * contract; it must not leak into Vulkan core advertisement until the
+ * corresponding command/error/lifetime semantics are wired. */
 #define RIN_GPU_VK_ICD_API_VERSION RIN_GPU_VK_MAKE_VERSION(1u, 0u, 0u)
 #define RIN_GPU_VK_ICD_FEATURES UINT64_C(0x0000000000000001)
 
