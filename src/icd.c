@@ -341,7 +341,8 @@ static void publish_legacy_features(
         const RinGpuVulkanPhysicalDeviceV2* profile,
         RinVkPhysicalDeviceFeatures* features) {
     memset(features, 0, sizeof(*features));
-    if ((profile->features & RIN_GPU_VK_FEATURE_SAMPLER_ANISOTROPY) != 0u)
+    if ((profile->features & RIN_GPU_VK_ICD_FEATURES &
+         RIN_GPU_VK_FEATURE_SAMPLER_ANISOTROPY) != 0u)
         features->samplerAnisotropy = 1u;
 }
 
@@ -372,7 +373,8 @@ static int api_version_supported(uint32_t version) {
     uint32_t variant = version >> 29u;
     uint32_t major = (version >> 22u) & 0x7fu;
     uint32_t minor = (version >> 12u) & 0x3ffu;
-    return variant == 0u && major == 1u && minor <= 3u;
+    return variant == 0u && major == 1u &&
+           version <= RIN_GPU_VK_ICD_API_VERSION && minor <= 0u;
 }
 
 static RinGpuVulkanRuntimeV1* acquire_runtime(void) {
@@ -1433,7 +1435,7 @@ vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t* version) {
 RinVkResult RIN_VKAPI_CALL vkEnumerateInstanceVersion(
         uint32_t* api_version) {
     if (!api_version) return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    *api_version = RIN_GPU_VK_API_1_3;
+    *api_version = RIN_GPU_VK_ICD_API_VERSION;
     return RIN_VK_SUCCESS;
 }
 
@@ -1443,6 +1445,17 @@ RinVkResult RIN_VKAPI_CALL vkEnumerateInstanceExtensionProperties(
     (void)properties;
     if (!property_count) return RIN_VK_ERROR_INITIALIZATION_FAILED;
     *property_count = 0u;
+    return layer_name ? RIN_VK_ERROR_LAYER_NOT_PRESENT : RIN_VK_SUCCESS;
+}
+
+RinVkResult RIN_VKAPI_CALL vkEnumerateDeviceExtensionProperties(
+        RinVkPhysicalDevice physical_device, const char* layer_name,
+        uint32_t* property_count, RinVkExtensionProperties* properties) {
+    (void)properties;
+    if (!property_count) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    *property_count = 0u;
+    if (!physical_slot(physical_device, NULL))
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
     return layer_name ? RIN_VK_ERROR_LAYER_NOT_PRESENT : RIN_VK_SUCCESS;
 }
 
@@ -1671,21 +1684,14 @@ void RIN_VKAPI_CALL vkGetPhysicalDeviceFeatures2(
         return;
     publish_legacy_features(&profile, &features->features);
     if (chain.vulkan12) {
-        chain.vulkan12->descriptorIndexing =
-            (profile.features & RIN_GPU_VK_FEATURE_DESCRIPTOR_INDEXING) != 0u;
-        chain.vulkan12->timelineSemaphore =
-            (profile.features & RIN_GPU_VK_FEATURE_TIMELINE_SEMAPHORE) != 0u;
-        chain.vulkan12->bufferDeviceAddress =
-            (profile.features &
-             RIN_GPU_VK_FEATURE_BUFFER_DEVICE_ADDRESS) != 0u;
+        chain.vulkan12->descriptorIndexing = 0u;
+        chain.vulkan12->timelineSemaphore = 0u;
+        chain.vulkan12->bufferDeviceAddress = 0u;
     }
     if (chain.vulkan13) {
-        chain.vulkan13->synchronization2 =
-            (profile.features & RIN_GPU_VK_FEATURE_SYNCHRONIZATION_2) != 0u;
-        chain.vulkan13->dynamicRendering =
-            (profile.features & RIN_GPU_VK_FEATURE_DYNAMIC_RENDERING) != 0u;
-        chain.vulkan13->maintenance4 =
-            (profile.features & RIN_GPU_VK_FEATURE_MAINTENANCE_4) != 0u;
+        chain.vulkan13->synchronization2 = 0u;
+        chain.vulkan13->dynamicRendering = 0u;
+        chain.vulkan13->maintenance4 = 0u;
     }
 }
 
@@ -1694,7 +1700,9 @@ static void publish_legacy_properties(
         RinVkPhysicalDeviceProperties* properties) {
     uint32_t index;
     memset(properties, 0, sizeof(*properties));
-    properties->apiVersion = profile->api_version;
+    properties->apiVersion = profile->api_version < RIN_GPU_VK_ICD_API_VERSION
+                                 ? profile->api_version
+                                 : RIN_GPU_VK_ICD_API_VERSION;
     properties->driverVersion = profile->driver_version;
     properties->vendorID = profile->vendor_id;
     properties->deviceID = profile->device_id;
@@ -1761,20 +1769,8 @@ void RIN_VKAPI_CALL vkGetPhysicalDeviceProperties2(
         RIN_GPU_VULKAN_OK)
         return;
     publish_legacy_properties(&profile, &properties->properties);
-    if (chain.vulkan11) {
-        memcpy(chain.vulkan11->deviceUUID, profile.device_uuid,
-               sizeof(chain.vulkan11->deviceUUID));
-        memcpy(chain.vulkan11->driverUUID, profile.driver_digest,
-               sizeof(chain.vulkan11->driverUUID));
-    }
-    if (chain.vulkan12) {
-        memcpy(chain.vulkan12->driverName, driver_name,
-               sizeof(driver_name));
-        memcpy(chain.vulkan12->driverInfo, driver_info,
-               sizeof(driver_info));
-    }
-    if (chain.vulkan13)
-        chain.vulkan13->maxBufferSize = profile.max_buffer_size;
+    (void)driver_name;
+    (void)driver_info;
 }
 
 void RIN_VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties(
@@ -1871,6 +1867,8 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
         !requested_vulkan13_features(feature_chain.vulkan13,
                                      &chain_features))
         return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    if (feature_chain.vulkan12 || feature_chain.vulkan13)
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
     if (create_info->flags != 0u)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
     if (create_info->enabledLayerCount != 0u)
@@ -1936,11 +1934,13 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
     }
     if (create_info->pEnabledFeatures &&
         create_info->pEnabledFeatures->samplerAnisotropy != 0u &&
-        (profile.features & RIN_GPU_VK_FEATURE_SAMPLER_ANISOTROPY) == 0u) {
+        (profile.features & RIN_GPU_VK_ICD_FEATURES &
+         RIN_GPU_VK_FEATURE_SAMPLER_ANISOTROPY) == 0u) {
         release_runtime();
         return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
     }
-    if ((profile.features & chain_features) != chain_features) {
+    if ((RIN_GPU_VK_ICD_FEATURES & chain_features) != chain_features ||
+        (profile.features & chain_features) != chain_features) {
         release_runtime();
         return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
     }
@@ -3138,6 +3138,8 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetInstanceProcAddr(
         return (RinVkVoidFunction)vkEnumerateInstanceVersion;
     if (name_equal(name, "vkEnumerateInstanceExtensionProperties"))
         return (RinVkVoidFunction)vkEnumerateInstanceExtensionProperties;
+    if (name_equal(name, "vkEnumerateDeviceExtensionProperties"))
+        return (RinVkVoidFunction)vkEnumerateDeviceExtensionProperties;
     if (name_equal(name, "vkEnumerateInstanceLayerProperties"))
         return (RinVkVoidFunction)vkEnumerateInstanceLayerProperties;
     if (name_equal(name, "vk_icdNegotiateLoaderICDInterfaceVersion"))
@@ -3163,6 +3165,8 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetInstanceProcAddr(
             vkGetPhysicalDeviceQueueFamilyProperties;
     if (name_equal(name, "vkGetPhysicalDeviceMemoryProperties"))
         return (RinVkVoidFunction)vkGetPhysicalDeviceMemoryProperties;
+    if (name_equal(name, "vkEnumerateDeviceExtensionProperties"))
+        return (RinVkVoidFunction)vkEnumerateDeviceExtensionProperties;
     if (name_equal(name, "vkCreateDevice"))
         return (RinVkVoidFunction)vkCreateDevice;
     if (name_equal(name, "vkGetDeviceProcAddr"))
@@ -3191,5 +3195,7 @@ RinVkVoidFunction RIN_VKAPI_CALL vk_icdGetPhysicalDeviceProcAddr(
             vkGetPhysicalDeviceQueueFamilyProperties;
     if (name_equal(name, "vkGetPhysicalDeviceMemoryProperties"))
         return (RinVkVoidFunction)vkGetPhysicalDeviceMemoryProperties;
+    if (name_equal(name, "vkEnumerateDeviceExtensionProperties"))
+        return (RinVkVoidFunction)vkEnumerateDeviceExtensionProperties;
     return NULL;
 }

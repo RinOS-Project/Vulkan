@@ -1052,6 +1052,10 @@ vkEnumerateInstanceExtensionProperties(
     const char* layer_name, uint32_t* property_count,
     RinVkExtensionProperties* properties);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkEnumerateDeviceExtensionProperties(
+    RinVkPhysicalDevice physical_device, const char* layer_name,
+    uint32_t* property_count, RinVkExtensionProperties* properties);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkEnumerateInstanceLayerProperties(uint32_t* property_count,
                                    RinVkLayerProperties* properties);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
