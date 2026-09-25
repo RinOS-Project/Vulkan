@@ -2551,6 +2551,19 @@ static int image_subresource_range_valid(
            range->baseArrayLayer == 0u && range->layerCount == 1u;
 }
 
+static int image_blit_region_valid(
+        const RinVkImageSlot* image,
+        const RinVkImageSubresourceLayers* subresource,
+        const RinVkOffset3D offsets[2]) {
+    return image && subresource && offsets &&
+           subresource->aspectMask == RIN_VK_IMAGE_ASPECT_COLOR_BIT &&
+           subresource->mipLevel == 0u && subresource->baseArrayLayer == 0u &&
+           subresource->layerCount == 1u && offsets[0].x == 0 &&
+           offsets[0].y == 0 && offsets[0].z == 0 &&
+           offsets[1].x == (int32_t)image->width &&
+           offsets[1].y == (int32_t)image->height && offsets[1].z == 1;
+}
+
 static int checked_image_address(const RinVkImageSlot* image, uint64_t offset,
                                  uint64_t size, uint64_t* address_out) {
     uint64_t address;
@@ -2795,6 +2808,62 @@ void RIN_VKAPI_CALL vkCmdClearColorImage(
     operation.destination_gpu_address = destination_address;
     operation.size_bytes = image->memory_size;
     operation.clear_value[0] = color->uint32[0];
+done:
+    if (valid) record_transfer_ops(core, &operation, 1u);
+    else rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime, core);
+}
+
+void RIN_VKAPI_CALL vkCmdBlitImage(
+        RinVkCommandBuffer command_buffer, RinVkImage src_image,
+        uint32_t src_image_layout, RinVkImage dst_image,
+        uint32_t dst_image_layout, uint32_t region_count,
+        const RinVkImageBlit* regions, uint32_t filter) {
+    RinGpuVulkanCommandBufferV1* core =
+        (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
+    RinGpuVulkanTransferOpV2 operation;
+    RinVkImageSlot* source;
+    RinVkImageSlot* destination;
+    struct RinVkDevice_T* owner;
+    uint64_t source_address;
+    uint64_t destination_address;
+    int valid = 1;
+
+    memset(&operation, 0, sizeof(operation));
+    if (!command_owner_device(core, &owner) || region_count != 1u || !regions ||
+        filter > RIN_VK_FILTER_LINEAR ||
+        !image_layout_transfer_valid(src_image_layout) ||
+        !image_layout_transfer_valid(dst_image_layout)) {
+        valid = 0;
+        goto done;
+    }
+    source = image_slot(owner, src_image);
+    destination = image_slot(owner, dst_image);
+    if (!source || !destination || source == destination ||
+        source->memory == destination->memory ||
+        (source->usage & RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0u ||
+        (destination->usage & RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u ||
+        !image_blit_region_valid(source, &regions[0].srcSubresource,
+                                 regions[0].srcOffsets) ||
+        !image_blit_region_valid(destination, &regions[0].dstSubresource,
+                                 regions[0].dstOffsets) ||
+        !checked_image_address(source, 0u, source->memory_size,
+                               &source_address) ||
+        !checked_image_address(destination, 0u, destination->memory_size,
+                               &destination_address)) {
+        valid = 0;
+        goto done;
+    }
+    operation.type = RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BLIT;
+    operation.source_allocation = source->memory->product_allocation;
+    operation.destination_allocation = destination->memory->product_allocation;
+    operation.source_gpu_address = source_address;
+    operation.destination_gpu_address = destination_address;
+    operation.size_bytes = destination->memory_size;
+    operation.source_width = source->width;
+    operation.source_height = source->height;
+    operation.destination_width = destination->width;
+    operation.destination_height = destination->height;
+    operation.filter = filter;
 done:
     if (valid) record_transfer_ops(core, &operation, 1u);
     else rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime, core);
@@ -3495,6 +3564,8 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
         return (RinVkVoidFunction)vkCmdCopyBufferToImage;
     if (name_equal(name, "vkCmdCopyImageToBuffer"))
         return (RinVkVoidFunction)vkCmdCopyImageToBuffer;
+    if (name_equal(name, "vkCmdBlitImage"))
+        return (RinVkVoidFunction)vkCmdBlitImage;
     if (name_equal(name, "vkCmdClearColorImage"))
         return (RinVkVoidFunction)vkCmdClearColorImage;
     if (name_equal(name, "vkAllocateMemory"))

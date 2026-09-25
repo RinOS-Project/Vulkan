@@ -477,7 +477,7 @@ int rin_gpu_vulkan_command_buffer_record_transfer_ops(
         return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
     for (index = 0u; index < operation_count; ++index) {
         if (operations[index].type < RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_COPY ||
-            operations[index].type > RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_CLEAR ||
+            operations[index].type > RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BLIT ||
             operations[index].reserved != 0u ||
             operations[index].destination_allocation == 0u ||
             operations[index].destination_gpu_address == 0u ||
@@ -491,6 +491,13 @@ int rin_gpu_vulkan_command_buffer_record_transfer_ops(
             (operations[index].source_allocation != 0u ||
              operations[index].source_gpu_address != 0u ||
              (operations[index].size_bytes & 3u) != 0u))
+            return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
+        if (operations[index].type == RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BLIT &&
+            (operations[index].source_width == 0u ||
+             operations[index].source_height == 0u ||
+             operations[index].destination_width == 0u ||
+             operations[index].destination_height == 0u ||
+             operations[index].filter > 1u))
             return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
     }
     memcpy(&buffer->transfer_ops[buffer->transfer_op_count], operations,

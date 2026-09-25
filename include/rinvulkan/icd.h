@@ -708,6 +708,13 @@ typedef struct RinVkImageCopy {
     RinVkExtent3D extent;
 } RinVkImageCopy;
 
+typedef struct RinVkImageBlit {
+    RinVkImageSubresourceLayers srcSubresource;
+    RinVkOffset3D srcOffsets[2];
+    RinVkImageSubresourceLayers dstSubresource;
+    RinVkOffset3D dstOffsets[2];
+} RinVkImageBlit;
+
 typedef union RinVkClearColorValue {
     float float32[4];
     int32_t int32[4];
@@ -738,6 +745,8 @@ typedef struct RinVkImageSubresourceRange {
 #define RIN_VK_IMAGE_LAYOUT_GENERAL UINT32_C(1)
 #define RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL UINT32_C(6)
 #define RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL UINT32_C(7)
+#define RIN_VK_FILTER_NEAREST 0u
+#define RIN_VK_FILTER_LINEAR 1u
 #define RIN_VK_SHARING_MODE_EXCLUSIVE 0u
 #define RIN_VK_FENCE_CREATE_SIGNALED_BIT UINT32_C(0x00000001)
 #define RIN_VK_FENCE_CREATE_KNOWN RIN_VK_FENCE_CREATE_SIGNALED_BIT
@@ -1214,6 +1223,11 @@ vkCmdCopyImageToBuffer(RinVkCommandBuffer command_buffer,
                         RinVkImage src_image, uint32_t src_image_layout,
                         RinVkBuffer dst_buffer, uint32_t region_count,
                         const RinVkBufferImageCopy* regions);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdBlitImage(RinVkCommandBuffer command_buffer, RinVkImage src_image,
+               uint32_t src_image_layout, RinVkImage dst_image,
+               uint32_t dst_image_layout, uint32_t region_count,
+               const RinVkImageBlit* regions, uint32_t filter);
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkCmdClearColorImage(RinVkCommandBuffer command_buffer, RinVkImage image,
                      uint32_t image_layout,

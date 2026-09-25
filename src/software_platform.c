@@ -259,12 +259,13 @@ static int software_submit(void* context,
             uint64_t destination_offset;
             if ((operation->type != RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_COPY &&
                  (operation->type < RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_COPY ||
-                  operation->type > RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_CLEAR)) ||
+                  operation->type > RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BLIT)) ||
                 operation->reserved != 0u || operation->size_bytes == 0u ||
                 !resource_has_access(resources, resource_count,
                                      operation->destination_allocation,
                                      RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE))
                 return RIN_VULKAN_PRODUCT_PROTOCOL;
+            source = allocation_by_handle(platform, operation->source_allocation);
             destination = allocation_by_handle(platform,
                                                operation->destination_allocation);
             if (!destination ||
@@ -284,6 +285,109 @@ static int software_submit(void* context,
                     memcpy(destination->bytes + destination_offset + clear_offset,
                            &operation->clear_value[0],
                            sizeof(operation->clear_value[0]));
+                continue;
+            }
+            if (operation->type == RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BLIT) {
+                uint64_t source_size;
+                uint64_t destination_size;
+                uint32_t y;
+                if (operation->source_width == 0u ||
+                    operation->source_height == 0u ||
+                    operation->destination_width == 0u ||
+                    operation->destination_height == 0u ||
+                    operation->source_width > 4096u ||
+                    operation->source_height > 4096u ||
+                    operation->destination_width > 4096u ||
+                    operation->destination_height > 4096u ||
+                    operation->filter > 1u)
+                    return RIN_VULKAN_PRODUCT_PROTOCOL;
+                source_size = (uint64_t)operation->source_width *
+                              (uint64_t)operation->source_height * 4u;
+                destination_size = (uint64_t)operation->destination_width *
+                                   (uint64_t)operation->destination_height * 4u;
+                if (operation->size_bytes != destination_size ||
+                    !resource_has_access(resources, resource_count,
+                                         operation->source_allocation,
+                                         RIN_VULKAN_PRODUCT_MEMORY_GPU_READ) ||
+                    allocation_for_range(platform, operation->source_gpu_address,
+                                         source_size) != source ||
+                    allocation_for_range(platform,
+                                         operation->destination_gpu_address,
+                                         destination_size) != destination ||
+                    source == destination)
+                    return RIN_VULKAN_PRODUCT_PROTOCOL;
+                source_offset = operation->source_gpu_address -
+                                source->gpu_virtual_address;
+                for (y = 0u; y < operation->destination_height; ++y) {
+                    uint32_t x;
+                    for (x = 0u; x < operation->destination_width; ++x) {
+                        uint32_t sx0;
+                        uint32_t sx1;
+                        uint32_t sy0;
+                        uint32_t sy1;
+                        uint32_t fx = 0u;
+                        uint32_t fy = 0u;
+                        uint32_t channel;
+                        uint64_t src_x_fp;
+                        uint64_t src_y_fp;
+                        uint8_t* out = destination->bytes + destination_offset +
+                            ((uint64_t)y * operation->destination_width + x) * 4u;
+                        if (operation->filter == 0u) {
+                            sx0 = (uint32_t)(((uint64_t)x *
+                                              operation->source_width) /
+                                             operation->destination_width);
+                            sy0 = (uint32_t)(((uint64_t)y *
+                                              operation->source_height) /
+                                             operation->destination_height);
+                            if (sx0 >= operation->source_width)
+                                sx0 = operation->source_width - 1u;
+                            if (sy0 >= operation->source_height)
+                                sy0 = operation->source_height - 1u;
+                            memcpy(out, source->bytes + source_offset +
+                                         ((uint64_t)sy0 * operation->source_width +
+                                          sx0) * 4u, 4u);
+                            continue;
+                        }
+                        src_x_fp = operation->destination_width == 1u
+                                       ? 0u
+                                       : ((uint64_t)x *
+                                          (operation->source_width - 1u) *
+                                          65536u) /
+                                             (operation->destination_width - 1u);
+                        src_y_fp = operation->destination_height == 1u
+                                       ? 0u
+                                       : ((uint64_t)y *
+                                          (operation->source_height - 1u) *
+                                          65536u) /
+                                             (operation->destination_height - 1u);
+                        sx0 = (uint32_t)(src_x_fp / 65536u);
+                        sy0 = (uint32_t)(src_y_fp / 65536u);
+                        sx1 = sx0 + 1u < operation->source_width ? sx0 + 1u : sx0;
+                        sy1 = sy0 + 1u < operation->source_height ? sy0 + 1u : sy0;
+                        fx = (uint32_t)(src_x_fp & 65535u);
+                        fy = (uint32_t)(src_y_fp & 65535u);
+                        for (channel = 0u; channel < 4u; ++channel) {
+                            const uint8_t* p00 = source->bytes + source_offset +
+                                ((uint64_t)sy0 * operation->source_width + sx0) * 4u;
+                            const uint8_t* p10 = source->bytes + source_offset +
+                                ((uint64_t)sy0 * operation->source_width + sx1) * 4u;
+                            const uint8_t* p01 = source->bytes + source_offset +
+                                ((uint64_t)sy1 * operation->source_width + sx0) * 4u;
+                            const uint8_t* p11 = source->bytes + source_offset +
+                                ((uint64_t)sy1 * operation->source_width + sx1) * 4u;
+                            uint32_t top = ((uint32_t)p00[channel] *
+                                                (65536u - fx) +
+                                            (uint32_t)p10[channel] * fx +
+                                            32768u) >> 16;
+                            uint32_t bottom = ((uint32_t)p01[channel] *
+                                                   (65536u - fx) +
+                                               (uint32_t)p11[channel] * fx +
+                                               32768u) >> 16;
+                            out[channel] = (uint8_t)((top * (65536u - fy) +
+                                                     bottom * fy + 32768u) >> 16);
+                        }
+                    }
+                }
                 continue;
             }
             if (!resource_has_access(resources, resource_count,
