@@ -2,6 +2,7 @@
 
 #include <rinvulkan/icd.h>
 #include <rinvulkan/command_runtime.h>
+#include <rinvulkan/descriptor_runtime.h>
 
 #include <string.h>
 
@@ -17,12 +18,16 @@
 #define RIN_VK_MAX_SUBMISSIONS 64u
 #define RIN_VK_MAX_SUBMIT_COMMAND_BUFFERS 4u
 #define RIN_VK_MAX_SUBMIT_SEMAPHORES 8u
+#define RIN_VK_MAX_IMAGE_VIEWS 128u
+#define RIN_VK_MAX_SAMPLERS 128u
 #define RIN_VK_RESOURCE_ALIGNMENT UINT64_C(2097152)
 #define RIN_VK_BUFFER_TAG UINT64_C(0x5242)
 #define RIN_VK_IMAGE_TAG UINT64_C(0x5249)
 #define RIN_VK_MEMORY_TAG UINT64_C(0x524d)
 #define RIN_VK_FENCE_TAG UINT64_C(0x5246)
 #define RIN_VK_SEMAPHORE_TAG UINT64_C(0x5253)
+#define RIN_VK_IMAGE_VIEW_TAG UINT64_C(0x5256)
+#define RIN_VK_SAMPLER_TAG UINT64_C(0x5254)
 
 typedef struct RinVkBaseFeatureStructure {
     RinVkStructureType sType;
@@ -79,6 +84,8 @@ struct RinVkDevice_T {
     RinGpuVulkanHandle owner_instance;
     RinGpuVulkanDevicePlanV1 plan;
     RinGpuVulkanPhysicalDeviceV2 physical_profile;
+    RinGpuVulkanDescriptorRuntimeV1 descriptor_runtime;
+    volatile uint32_t descriptor_validation_error;
     uint32_t queue_count;
     uint32_t reserved_queue;
     struct RinVkQueue_T queues[RIN_VULKAN_PRODUCT_MAX_QUEUES];
@@ -120,6 +127,29 @@ typedef struct RinVkImageSlot {
     uint32_t height;
     uint32_t samples;
 } RinVkImageSlot;
+
+typedef struct RinVkImageViewSlot {
+    uint32_t state;
+    uint32_t generation;
+    struct RinVkDevice_T* owner;
+    RinVkImageSlot* image;
+    uint32_t format;
+    uint32_t aspect_mask;
+} RinVkImageViewSlot;
+
+typedef struct RinVkSamplerSlot {
+    uint32_t state;
+    uint32_t generation;
+    struct RinVkDevice_T* owner;
+    uint32_t mag_filter;
+    uint32_t min_filter;
+    uint32_t mipmap_mode;
+    uint32_t address_mode_u;
+    uint32_t address_mode_v;
+    uint32_t address_mode_w;
+    uint32_t compare_enable;
+    uint32_t compare_op;
+} RinVkSamplerSlot;
 
 typedef struct RinVkFenceSlot {
     uint32_t state;
@@ -166,6 +196,8 @@ static RinGpuVulkanCommandRuntimeV1 g_command_runtime;
 static RinVkMemorySlot g_memories[RIN_VK_MAX_MEMORIES];
 static RinVkBufferSlot g_buffers[RIN_VK_MAX_BUFFERS];
 static RinVkImageSlot g_images[RIN_VK_MAX_IMAGES];
+static RinVkImageViewSlot g_image_views[RIN_VK_MAX_IMAGE_VIEWS];
+static RinVkSamplerSlot g_samplers[RIN_VK_MAX_SAMPLERS];
 static RinVkFenceSlot g_fences[RIN_VK_MAX_FENCES];
 static RinVkSemaphoreSlot g_semaphores[RIN_VK_MAX_SEMAPHORES];
 static RinVkSubmissionSlot g_submissions[RIN_VK_MAX_SUBMISSIONS];
@@ -617,6 +649,40 @@ static RinVkImageSlot* image_slot(RinVkDevice device, RinVkImage handle) {
     return slot;
 }
 
+static RinVkImageViewSlot* image_view_slot(RinVkDevice device,
+                                           RinVkImageView handle) {
+    struct RinVkDevice_T* owner = device_slot(device);
+    uint32_t index_field = (uint32_t)(handle & UINT64_C(0xffff));
+    uint32_t generation = (uint32_t)(handle >> 16u);
+    RinVkImageViewSlot* slot;
+    if (!owner || (handle >> 48u) != RIN_VK_IMAGE_VIEW_TAG ||
+        index_field == 0u || index_field > RIN_VK_MAX_IMAGE_VIEWS ||
+        generation == 0u)
+        return NULL;
+    slot = &g_image_views[index_field - 1u];
+    if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) != 1u ||
+        slot->generation != generation || slot->owner != owner)
+        return NULL;
+    return slot;
+}
+
+static RinVkSamplerSlot* sampler_slot(RinVkDevice device,
+                                      RinVkSampler handle) {
+    struct RinVkDevice_T* owner = device_slot(device);
+    uint32_t index_field = (uint32_t)(handle & UINT64_C(0xffff));
+    uint32_t generation = (uint32_t)(handle >> 16u);
+    RinVkSamplerSlot* slot;
+    if (!owner || (handle >> 48u) != RIN_VK_SAMPLER_TAG ||
+        index_field == 0u || index_field > RIN_VK_MAX_SAMPLERS ||
+        generation == 0u)
+        return NULL;
+    slot = &g_samplers[index_field - 1u];
+    if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) != 1u ||
+        slot->generation != generation || slot->owner != owner)
+        return NULL;
+    return slot;
+}
+
 static RinVkFenceSlot* fence_slot(RinVkDevice device, RinVkFence handle) {
     struct RinVkDevice_T* owner = device_slot(device);
     uint32_t index_field = (uint32_t)(handle & UINT64_C(0xffff));
@@ -772,6 +838,58 @@ static RinVkImageSlot* reserve_image_slot(uint32_t* index_out) {
             continue;
         }
         ++slot->generation;
+        *index_out = index;
+        return slot;
+    }
+    return NULL;
+}
+
+static RinVkImageViewSlot* reserve_image_view_slot(
+        struct RinVkDevice_T* owner, uint32_t* index_out) {
+    uint32_t index;
+    for (index = 0u; index < RIN_VK_MAX_IMAGE_VIEWS; ++index) {
+        RinVkImageViewSlot* slot = &g_image_views[index];
+        uint32_t expected = 0u;
+        uint32_t generation;
+        if (!__atomic_compare_exchange_n(&slot->state, &expected, 2u, 0,
+                                         __ATOMIC_ACQUIRE,
+                                         __ATOMIC_RELAXED))
+            continue;
+        generation = slot->generation;
+        if (generation == UINT32_MAX) {
+            __atomic_store_n(&slot->state, 3u, __ATOMIC_RELEASE);
+            continue;
+        }
+        memset(slot, 0, sizeof(*slot));
+        slot->generation = generation + 1u;
+        slot->owner = owner;
+        __atomic_store_n(&slot->state, 2u, __ATOMIC_RELEASE);
+        *index_out = index;
+        return slot;
+    }
+    return NULL;
+}
+
+static RinVkSamplerSlot* reserve_sampler_slot(
+        struct RinVkDevice_T* owner, uint32_t* index_out) {
+    uint32_t index;
+    for (index = 0u; index < RIN_VK_MAX_SAMPLERS; ++index) {
+        RinVkSamplerSlot* slot = &g_samplers[index];
+        uint32_t expected = 0u;
+        uint32_t generation;
+        if (!__atomic_compare_exchange_n(&slot->state, &expected, 2u, 0,
+                                         __ATOMIC_ACQUIRE,
+                                         __ATOMIC_RELAXED))
+            continue;
+        generation = slot->generation;
+        if (generation == UINT32_MAX) {
+            __atomic_store_n(&slot->state, 3u, __ATOMIC_RELEASE);
+            continue;
+        }
+        memset(slot, 0, sizeof(*slot));
+        slot->generation = generation + 1u;
+        slot->owner = owner;
+        __atomic_store_n(&slot->state, 2u, __ATOMIC_RELEASE);
         *index_out = index;
         return slot;
     }
@@ -949,6 +1067,93 @@ static void clear_image_slot(RinVkImageSlot* slot) {
     slot->width = 0u;
     slot->height = 0u;
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
+}
+
+static void clear_image_view_slot(RinVkImageViewSlot* slot) {
+    if (!slot) return;
+    slot->owner = NULL;
+    slot->image = NULL;
+    slot->format = 0u;
+    slot->aspect_mask = 0u;
+    __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
+}
+
+static void clear_sampler_slot(RinVkSamplerSlot* slot) {
+    if (!slot) return;
+    slot->owner = NULL;
+    slot->mag_filter = 0u;
+    slot->min_filter = 0u;
+    slot->mipmap_mode = 0u;
+    slot->address_mode_u = 0u;
+    slot->address_mode_v = 0u;
+    slot->address_mode_w = 0u;
+    slot->compare_enable = 0u;
+    slot->compare_op = 0u;
+    __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
+}
+
+static int image_has_views(const RinVkImageSlot* image) {
+    uint32_t index;
+    if (!image) return 0;
+    for (index = 0u; index < RIN_VK_MAX_IMAGE_VIEWS; ++index)
+        if (__atomic_load_n(&g_image_views[index].state, __ATOMIC_ACQUIRE) ==
+                1u &&
+            g_image_views[index].image == image)
+            return 1;
+    return 0;
+}
+
+static int device_view_sampler_active(
+        const struct RinVkDevice_T* device) {
+    uint32_t index;
+    if (!device) return 0;
+    for (index = 0u; index < RIN_VK_MAX_IMAGE_VIEWS; ++index)
+        if ((__atomic_load_n(&g_image_views[index].state, __ATOMIC_ACQUIRE) ==
+                 1u ||
+             __atomic_load_n(&g_image_views[index].state, __ATOMIC_ACQUIRE) ==
+                 2u) &&
+            g_image_views[index].owner == device)
+            return 1;
+    for (index = 0u; index < RIN_VK_MAX_SAMPLERS; ++index)
+        if ((__atomic_load_n(&g_samplers[index].state, __ATOMIC_ACQUIRE) ==
+                 1u ||
+             __atomic_load_n(&g_samplers[index].state, __ATOMIC_ACQUIRE) ==
+                 2u) &&
+            g_samplers[index].owner == device)
+            return 1;
+    return 0;
+}
+
+static uint32_t descriptor_runtime_type(uint32_t type) {
+    switch (type) {
+    case RIN_VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+    case RIN_VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+        return RIN_GPU_VULKAN_DESCRIPTOR_UNIFORM_BUFFER;
+    case RIN_VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+    case RIN_VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+        return RIN_GPU_VULKAN_DESCRIPTOR_STORAGE_BUFFER;
+    case RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+        return RIN_GPU_VULKAN_DESCRIPTOR_SAMPLED_IMAGE;
+    case RIN_VK_DESCRIPTOR_TYPE_SAMPLER:
+        return RIN_GPU_VULKAN_DESCRIPTOR_SAMPLER;
+    default:
+        return 0u;
+    }
+}
+
+static RinVkResult map_descriptor_result(int result) {
+    switch (result) {
+    case RIN_GPU_VULKAN_GRAPHICS_OK:
+        return RIN_VK_SUCCESS;
+    case RIN_GPU_VULKAN_GRAPHICS_LIMIT:
+        return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+    case RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE:
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    case RIN_GPU_VULKAN_GRAPHICS_INVALID_ARGUMENT:
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    default:
+        return RIN_VK_ERROR_UNKNOWN;
+    }
 }
 
 static volatile uint32_t g_sync_lock;
@@ -2016,6 +2221,27 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
     slot->loader_magic = RIN_VK_ICD_LOADER_MAGIC;
     slot->reserved = 0u;
     slot->physical_profile = profile;
+    if (rin_gpu_vulkan_descriptor_runtime_init(
+            &slot->descriptor_runtime,
+            ((uint64_t)(uintptr_t)slot ^ slot->runtime_handle ^
+             UINT64_C(0x9e3779b97f4a7c15))) !=
+        RIN_GPU_VULKAN_GRAPHICS_OK) {
+        runtime = acquire_runtime();
+        if (runtime) {
+            (void)call_destroy_device(runtime, slot->owner_instance,
+                                       slot->runtime_handle);
+            release_runtime();
+        }
+        memset(&slot->plan, 0, sizeof(slot->plan));
+        memset(&slot->physical_profile, 0, sizeof(slot->physical_profile));
+        slot->runtime_handle = 0u;
+        slot->owner_instance = 0u;
+        slot->loader_magic = 0u;
+        __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
+        return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+    __atomic_store_n(&slot->descriptor_validation_error, 0u,
+                     __ATOMIC_RELEASE);
     slot->queue_count = queue->queueCount;
     slot->reserved_queue = 0u;
     memset(slot->queues, 0, sizeof(slot->queues));
@@ -2043,6 +2269,15 @@ void RIN_VKAPI_CALL vkDestroyDevice(RinVkDevice device,
                                      __ATOMIC_ACQUIRE,
                                      __ATOMIC_RELAXED))
         return;
+    if (!rin_gpu_vulkan_descriptor_runtime_is_empty(
+            &slot->descriptor_runtime)) {
+        __atomic_store_n(&slot->state, 1u, __ATOMIC_RELEASE);
+        return;
+    }
+    if (device_view_sampler_active(slot)) {
+        __atomic_store_n(&slot->state, 1u, __ATOMIC_RELEASE);
+        return;
+    }
     if (!cleanup_device_resources(slot)) {
         __atomic_store_n(&slot->state, 1u, __ATOMIC_RELEASE);
         return;
@@ -2062,6 +2297,10 @@ void RIN_VKAPI_CALL vkDestroyDevice(RinVkDevice device,
     (void)rin_gpu_vulkan_command_owner_cleanup(
         &g_command_runtime, (uintptr_t)slot);
     cleanup_device_sync_objects(slot);
+    (void)rin_gpu_vulkan_descriptor_runtime_shutdown(
+        &slot->descriptor_runtime);
+    __atomic_store_n(&slot->descriptor_validation_error, 0u,
+                     __ATOMIC_RELEASE);
     memset(&slot->plan, 0, sizeof(slot->plan));
     memset(&slot->physical_profile, 0, sizeof(slot->physical_profile));
     memset(slot->queues, 0, sizeof(slot->queues));
@@ -3108,6 +3347,11 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     device = queue_slot_value->device;
     result = maintain_device_submissions(device);
     if (result != RIN_VK_SUCCESS) goto done;
+    if (__atomic_load_n(&device->descriptor_validation_error,
+                        __ATOMIC_ACQUIRE) != 0u) {
+        result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        goto done;
+    }
     if (submit_count > 1u ||
         (submit_count != 0u && !submits)) {
         result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
@@ -3554,7 +3798,7 @@ void RIN_VKAPI_CALL vkDestroyImage(RinVkDevice device, RinVkImage handle,
                                    const void* allocator) {
     RinVkImageSlot* image = image_slot(device, handle);
     (void)allocator;
-    if (!image) return;
+    if (!image || image_has_views(image)) return;
     if (image->memory &&
         __atomic_load_n(&image->memory->state, __ATOMIC_ACQUIRE) == 1u &&
         image->memory->generation == image->memory_generation &&
@@ -3593,6 +3837,352 @@ RinVkResult RIN_VKAPI_CALL vkBindImageMemory(
     image->memory_offset = memory_offset;
     ++memory->bound_resource_count;
     return RIN_VK_SUCCESS;
+}
+
+RinVkResult RIN_VKAPI_CALL vkCreateImageView(
+        RinVkDevice device, const RinVkImageViewCreateInfo* create_info,
+        const void* allocator, RinVkImageView* view_out) {
+    RinVkImageViewSlot* view;
+    RinVkImageSlot* image;
+    uint32_t index;
+    (void)allocator;
+    if (!view_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    *view_out = 0u;
+    if (!device || !create_info ||
+        create_info->sType != RIN_VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO ||
+        create_info->pNext || create_info->flags != 0u ||
+        (create_info->viewType != RIN_VK_IMAGE_VIEW_TYPE_2D &&
+         create_info->viewType != RIN_VK_IMAGE_VIEW_TYPE_2D_ARRAY) ||
+        create_info->format != RIN_VK_FORMAT_R8G8B8A8_UNORM ||
+        create_info->subresourceRange.aspectMask !=
+            RIN_VK_IMAGE_ASPECT_COLOR_BIT ||
+        create_info->subresourceRange.baseMipLevel != 0u ||
+        create_info->subresourceRange.levelCount != 1u ||
+        create_info->subresourceRange.baseArrayLayer != 0u ||
+        create_info->subresourceRange.layerCount != 1u)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    image = image_slot(device, create_info->image);
+    if (!image || image->format != create_info->format)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    view = reserve_image_view_slot(device_slot(device), &index);
+    if (!view) return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+    view->image = image;
+    view->format = (uint32_t)create_info->format;
+    view->aspect_mask = create_info->subresourceRange.aspectMask;
+    __atomic_store_n(&view->state, 1u, __ATOMIC_RELEASE);
+    *view_out = resource_handle(RIN_VK_IMAGE_VIEW_TAG, index,
+                                view->generation);
+    return RIN_VK_SUCCESS;
+}
+
+void RIN_VKAPI_CALL vkDestroyImageView(RinVkDevice device, RinVkImageView view,
+                                       const void* allocator) {
+    RinVkImageViewSlot* slot;
+    (void)allocator;
+    slot = image_view_slot(device, view);
+    if (slot) clear_image_view_slot(slot);
+}
+
+RinVkResult RIN_VKAPI_CALL vkCreateSampler(
+        RinVkDevice device, const RinVkSamplerCreateInfo* create_info,
+        const void* allocator, RinVkSampler* sampler_out) {
+    RinVkSamplerSlot* sampler;
+    uint32_t index;
+    (void)allocator;
+    if (!sampler_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    *sampler_out = 0u;
+    if (!device || !create_info ||
+        create_info->sType != RIN_VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO ||
+        create_info->pNext || create_info->flags != 0u ||
+        create_info->magFilter > RIN_VK_FILTER_LINEAR ||
+        create_info->minFilter > RIN_VK_FILTER_LINEAR ||
+        create_info->mipmapMode > RIN_VK_FILTER_LINEAR ||
+        create_info->addressModeU > 4u || create_info->addressModeV > 4u ||
+        create_info->addressModeW > 4u || create_info->compareEnable > 1u ||
+        create_info->compareOp > 8u)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    sampler = reserve_sampler_slot(device_slot(device), &index);
+    if (!sampler) return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+    sampler->mag_filter = create_info->magFilter;
+    sampler->min_filter = create_info->minFilter;
+    sampler->mipmap_mode = create_info->mipmapMode;
+    sampler->address_mode_u = create_info->addressModeU;
+    sampler->address_mode_v = create_info->addressModeV;
+    sampler->address_mode_w = create_info->addressModeW;
+    sampler->compare_enable = create_info->compareEnable;
+    sampler->compare_op = create_info->compareOp;
+    __atomic_store_n(&sampler->state, 1u, __ATOMIC_RELEASE);
+    *sampler_out = resource_handle(RIN_VK_SAMPLER_TAG, index,
+                                   sampler->generation);
+    return RIN_VK_SUCCESS;
+}
+
+void RIN_VKAPI_CALL vkDestroySampler(RinVkDevice device, RinVkSampler sampler,
+                                     const void* allocator) {
+    RinVkSamplerSlot* slot;
+    (void)allocator;
+    slot = sampler_slot(device, sampler);
+    if (slot) clear_sampler_slot(slot);
+}
+
+RinVkResult RIN_VKAPI_CALL vkCreateDescriptorSetLayout(
+        RinVkDevice device, const RinVkDescriptorSetLayoutCreateInfo* info,
+        const void* allocator, RinVkDescriptorSetLayout* layout_out) {
+    struct RinVkDevice_T* owner = device_slot(device);
+    RinGpuVulkanDescriptorSetLayoutBindingV1 bindings[RIN_SHADER_MAX_RESOURCES];
+    RinGpuVulkanDescriptorHandleV1 layout = 0u;
+    uint32_t index;
+    int result;
+    (void)allocator;
+    if (!layout_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    *layout_out = 0u;
+    if (!owner || !info ||
+        info->sType != RIN_VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO ||
+        info->pNext || info->flags != 0u || info->bindingCount == 0u ||
+        info->bindingCount > RIN_SHADER_MAX_RESOURCES || !info->pBindings)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    memset(bindings, 0, sizeof(bindings));
+    for (index = 0u; index < info->bindingCount; ++index) {
+        const RinVkDescriptorSetLayoutBinding* source = &info->pBindings[index];
+        uint32_t type = descriptor_runtime_type(source->descriptorType);
+        if (type == 0u || source->descriptorCount == 0u ||
+            source->descriptorCount > RIN_SHADER_MAX_RESOURCES ||
+            source->stageFlags == 0u || source->pImmutableSamplers)
+            return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        bindings[index].set = 0u;
+        bindings[index].binding = source->binding;
+        bindings[index].descriptor_type = type;
+        bindings[index].descriptor_count = source->descriptorCount;
+        bindings[index].stage_flags = source->stageFlags;
+        bindings[index].reserved =
+            (source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
+             source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)
+                ? RIN_GPU_VULKAN_DESCRIPTOR_BINDING_DYNAMIC
+                : 0u;
+    }
+    result = rin_gpu_vulkan_descriptor_layout_create(
+        &owner->descriptor_runtime, bindings, info->bindingCount, &layout);
+    if (result != RIN_GPU_VULKAN_GRAPHICS_OK)
+        return map_descriptor_result(result);
+    *layout_out = (RinVkDescriptorSetLayout)layout;
+    return RIN_VK_SUCCESS;
+}
+
+void RIN_VKAPI_CALL vkDestroyDescriptorSetLayout(
+        RinVkDevice device, RinVkDescriptorSetLayout layout,
+        const void* allocator) {
+    struct RinVkDevice_T* owner = device_slot(device);
+    int result;
+    (void)allocator;
+    if (!owner || layout == 0u) return;
+    result = rin_gpu_vulkan_descriptor_layout_destroy(
+        &owner->descriptor_runtime,
+        (RinGpuVulkanDescriptorHandleV1)layout);
+    if (result != RIN_GPU_VULKAN_GRAPHICS_OK)
+        __atomic_store_n(&owner->descriptor_validation_error, 1u,
+                         __ATOMIC_RELEASE);
+}
+
+RinVkResult RIN_VKAPI_CALL vkCreateDescriptorPool(
+        RinVkDevice device, const RinVkDescriptorPoolCreateInfo* info,
+        const void* allocator, RinVkDescriptorPool* pool_out) {
+    struct RinVkDevice_T* owner = device_slot(device);
+    uint32_t limits[8];
+    uint32_t index;
+    uint32_t pool_index;
+    RinGpuVulkanDescriptorHandleV1 pool = 0u;
+    int result;
+    (void)allocator;
+    if (!pool_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    *pool_out = 0u;
+    if (!owner || !info ||
+        info->sType != RIN_VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO ||
+        info->pNext ||
+        (info->flags & ~RIN_VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT) !=
+            0u || info->maxSets == 0u ||
+        info->poolSizeCount == 0u || !info->pPoolSizes ||
+        info->poolSizeCount > 8u)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    memset(limits, 0, sizeof(limits));
+    for (index = 0u; index < info->poolSizeCount; ++index) {
+        const RinVkDescriptorPoolSize* size = &info->pPoolSizes[index];
+        uint32_t type = descriptor_runtime_type(size->type);
+        if (type == 0u || size->descriptorCount == 0u || type >= 8u ||
+            limits[type] != 0u ||
+            UINT32_MAX - limits[type] < size->descriptorCount)
+            return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        limits[type] = size->descriptorCount;
+    }
+    (void)pool_index;
+    result = rin_gpu_vulkan_descriptor_pool_create_v2(
+        &owner->descriptor_runtime, info->maxSets, limits, 8u, &pool);
+    if (result != RIN_GPU_VULKAN_GRAPHICS_OK)
+        return map_descriptor_result(result);
+    *pool_out = (RinVkDescriptorPool)pool;
+    return RIN_VK_SUCCESS;
+}
+
+void RIN_VKAPI_CALL vkDestroyDescriptorPool(RinVkDevice device,
+                                            RinVkDescriptorPool pool,
+                                            const void* allocator) {
+    struct RinVkDevice_T* owner = device_slot(device);
+    int result;
+    (void)allocator;
+    if (!owner || pool == 0u) return;
+    result = rin_gpu_vulkan_descriptor_pool_destroy(
+        &owner->descriptor_runtime, (RinGpuVulkanDescriptorHandleV1)pool);
+    if (result != RIN_GPU_VULKAN_GRAPHICS_OK)
+        __atomic_store_n(&owner->descriptor_validation_error, 1u,
+                         __ATOMIC_RELEASE);
+}
+
+RinVkResult RIN_VKAPI_CALL vkAllocateDescriptorSets(
+        RinVkDevice device, const RinVkDescriptorSetAllocateInfo* info,
+        RinVkDescriptorSet* sets_out) {
+    struct RinVkDevice_T* owner = device_slot(device);
+    uint32_t index;
+    if (!owner || !info || !sets_out ||
+        info->sType != RIN_VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO ||
+        info->pNext || info->descriptorPool == 0u ||
+        info->descriptorSetCount == 0u ||
+        info->descriptorSetCount > RIN_GPU_VULKAN_DESCRIPTOR_MAX_SETS ||
+        !info->pSetLayouts)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    for (index = 0u; index < info->descriptorSetCount; ++index)
+        sets_out[index] = 0u;
+    for (index = 0u; index < info->descriptorSetCount; ++index) {
+        RinGpuVulkanDescriptorHandleV1 set = 0u;
+        int result = rin_gpu_vulkan_descriptor_set_allocate(
+            &owner->descriptor_runtime,
+            (RinGpuVulkanDescriptorHandleV1)info->descriptorPool,
+            (RinGpuVulkanDescriptorHandleV1)info->pSetLayouts[index], &set);
+        if (result != RIN_GPU_VULKAN_GRAPHICS_OK) {
+            uint32_t cleanup;
+            for (cleanup = 0u; cleanup < index; ++cleanup)
+                (void)rin_gpu_vulkan_descriptor_set_free(
+                    &owner->descriptor_runtime,
+                    (RinGpuVulkanDescriptorHandleV1)sets_out[cleanup]);
+            return map_descriptor_result(result);
+        }
+        sets_out[index] = (RinVkDescriptorSet)set;
+    }
+    return RIN_VK_SUCCESS;
+}
+
+RinVkResult RIN_VKAPI_CALL vkFreeDescriptorSets(
+        RinVkDevice device, RinVkDescriptorPool pool, uint32_t set_count,
+        const RinVkDescriptorSet* sets) {
+    struct RinVkDevice_T* owner = device_slot(device);
+    uint32_t index;
+    RinVkResult result = RIN_VK_SUCCESS;
+    if (!owner || pool == 0u || set_count == 0u || !sets)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    for (index = 0u; index < set_count; ++index) {
+        int current = rin_gpu_vulkan_descriptor_set_free_from_pool(
+            &owner->descriptor_runtime,
+            (RinGpuVulkanDescriptorHandleV1)pool,
+            (RinGpuVulkanDescriptorHandleV1)sets[index]);
+        if (current != RIN_GPU_VULKAN_GRAPHICS_OK)
+            result = map_descriptor_result(current);
+    }
+    return result;
+}
+
+void RIN_VKAPI_CALL vkUpdateDescriptorSets(
+        RinVkDevice device, uint32_t write_count,
+        const RinVkWriteDescriptorSet* writes, uint32_t copy_count,
+        const void* copies) {
+    struct RinVkDevice_T* owner = device_slot(device);
+    uint32_t index;
+    if (!owner || (write_count != 0u && !writes) || copy_count != 0u ||
+        copies || write_count > RIN_SHADER_MAX_RESOURCES) {
+        if (owner) __atomic_store_n(&owner->descriptor_validation_error, 1u,
+                                    __ATOMIC_RELEASE);
+        return;
+    }
+    for (index = 0u; index < write_count; ++index) {
+        const RinVkWriteDescriptorSet* source = &writes[index];
+        RinGpuVulkanDescriptorWriteV1 converted[RIN_SHADER_MAX_RESOURCES];
+        uint32_t item;
+        uint32_t type = descriptor_runtime_type(source->descriptorType);
+        int invalid = source->sType != 0 || source->pNext ||
+                      source->dstSet == 0u || source->descriptorCount == 0u ||
+                      source->descriptorCount > RIN_SHADER_MAX_RESOURCES ||
+                      type == 0u;
+        if (source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_SAMPLER ||
+            source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE)
+            invalid = invalid || !source->pImageInfo;
+        else if (source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
+                 source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ||
+                 source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
+                 source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)
+            invalid = invalid || !source->pBufferInfo;
+        else
+            invalid = 1;
+        if (invalid) {
+            __atomic_store_n(&owner->descriptor_validation_error, 1u,
+                             __ATOMIC_RELEASE);
+            continue;
+        }
+        memset(converted, 0, sizeof(converted));
+        for (item = 0u; item < source->descriptorCount; ++item) {
+            RinGpuVulkanDescriptorWriteV1* destination = &converted[item];
+            destination->set = 0u;
+            destination->binding = source->dstBinding;
+            destination->array_element = source->dstArrayElement + item;
+            destination->resource_index = source->dstBinding;
+            destination->descriptor_type = type;
+            if (source->pBufferInfo) {
+                const RinVkDescriptorBufferInfo* buffer_info =
+                    &source->pBufferInfo[item];
+                RinVkBufferSlot* buffer = buffer_slot(owner, buffer_info->buffer);
+                if (!buffer || !buffer->memory || buffer_info->offset > buffer->size ||
+                    buffer_info->range == 0u ||
+                    buffer_info->range > buffer->size - buffer_info->offset) {
+                    invalid = 1;
+                    break;
+                }
+                destination->resource = (RinGpuHandle)buffer_info->buffer;
+                destination->access =
+                    type == RIN_GPU_VULKAN_DESCRIPTOR_UNIFORM_BUFFER
+                        ? RIN_GPU_RESOURCE_READ
+                        : RIN_GPU_RESOURCE_READ | RIN_GPU_RESOURCE_WRITE;
+                destination->offset = buffer_info->offset;
+                destination->size_bytes = buffer_info->range;
+            } else {
+                const RinVkDescriptorImageInfo* image_info =
+                    &source->pImageInfo[item];
+                if (source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_SAMPLER) {
+                    if (!sampler_slot(owner, image_info->sampler)) {
+                        invalid = 1;
+                        break;
+                    }
+                    destination->resource =
+                        (RinGpuHandle)image_info->sampler;
+                } else {
+                    RinVkImageViewSlot* view =
+                        image_view_slot(owner, image_info->imageView);
+                    if (!view || (image_info->imageLayout != RIN_VK_IMAGE_LAYOUT_GENERAL &&
+                                  image_info->imageLayout != 5u)) {
+                        invalid = 1;
+                        break;
+                    }
+                    destination->resource = (RinGpuHandle)resource_handle(
+                        RIN_VK_IMAGE_TAG,
+                        (uint32_t)(view->image - &g_images[0]),
+                        view->image->generation);
+                    destination->access = RIN_GPU_RESOURCE_READ;
+                }
+            }
+        }
+        if (invalid || rin_gpu_vulkan_descriptor_set_update(
+                            &owner->descriptor_runtime,
+                            (RinGpuVulkanDescriptorHandleV1)source->dstSet,
+                            converted, source->descriptorCount) !=
+                        RIN_GPU_VULKAN_GRAPHICS_OK)
+            __atomic_store_n(&owner->descriptor_validation_error, 1u,
+                             __ATOMIC_RELEASE);
+    }
 }
 
 RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
@@ -3674,6 +4264,28 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
         return (RinVkVoidFunction)vkGetImageMemoryRequirements;
     if (name_equal(name, "vkBindImageMemory"))
         return (RinVkVoidFunction)vkBindImageMemory;
+    if (name_equal(name, "vkCreateImageView"))
+        return (RinVkVoidFunction)vkCreateImageView;
+    if (name_equal(name, "vkDestroyImageView"))
+        return (RinVkVoidFunction)vkDestroyImageView;
+    if (name_equal(name, "vkCreateSampler"))
+        return (RinVkVoidFunction)vkCreateSampler;
+    if (name_equal(name, "vkDestroySampler"))
+        return (RinVkVoidFunction)vkDestroySampler;
+    if (name_equal(name, "vkCreateDescriptorSetLayout"))
+        return (RinVkVoidFunction)vkCreateDescriptorSetLayout;
+    if (name_equal(name, "vkDestroyDescriptorSetLayout"))
+        return (RinVkVoidFunction)vkDestroyDescriptorSetLayout;
+    if (name_equal(name, "vkCreateDescriptorPool"))
+        return (RinVkVoidFunction)vkCreateDescriptorPool;
+    if (name_equal(name, "vkDestroyDescriptorPool"))
+        return (RinVkVoidFunction)vkDestroyDescriptorPool;
+    if (name_equal(name, "vkAllocateDescriptorSets"))
+        return (RinVkVoidFunction)vkAllocateDescriptorSets;
+    if (name_equal(name, "vkFreeDescriptorSets"))
+        return (RinVkVoidFunction)vkFreeDescriptorSets;
+    if (name_equal(name, "vkUpdateDescriptorSets"))
+        return (RinVkVoidFunction)vkUpdateDescriptorSets;
     return NULL;
 }
 

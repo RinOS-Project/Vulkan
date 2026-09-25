@@ -37,6 +37,11 @@
 #define RIN_VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO 9
 #define RIN_VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO 12
 #define RIN_VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO 14
+#define RIN_VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO 15
+#define RIN_VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO 31
+#define RIN_VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO 30
+#define RIN_VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO 33
+#define RIN_VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO 34
 #define RIN_VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO 39
 #define RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO 40
 #define RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO 42
@@ -90,9 +95,15 @@ typedef uint64_t RinVkCommandPool;
 typedef struct RinVkCommandBuffer_T* RinVkCommandBuffer;
 typedef uint64_t RinVkBuffer;
 typedef uint64_t RinVkImage;
+typedef uint64_t RinVkImageView;
+typedef uint64_t RinVkSampler;
 typedef uint64_t RinVkDeviceMemory;
 typedef uint64_t RinVkFence;
 typedef uint64_t RinVkSemaphore;
+typedef uint64_t RinVkDescriptorSetLayout;
+typedef uint64_t RinVkDescriptorPool;
+typedef uint64_t RinVkDescriptorSet;
+typedef uint64_t RinVkPipelineLayout;
 
 typedef struct RinVkApplicationInfo {
     RinVkStructureType sType;
@@ -737,6 +748,93 @@ typedef struct RinVkImageSubresourceRange {
     uint32_t layerCount;
 } RinVkImageSubresourceRange;
 
+typedef struct RinVkDescriptorSetLayoutBinding {
+    uint32_t binding;
+    uint32_t descriptorType;
+    uint32_t descriptorCount;
+    uint32_t stageFlags;
+    const void* pImmutableSamplers;
+} RinVkDescriptorSetLayoutBinding;
+
+typedef struct RinVkDescriptorSetLayoutCreateInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    uint32_t bindingCount;
+    const RinVkDescriptorSetLayoutBinding* pBindings;
+} RinVkDescriptorSetLayoutCreateInfo;
+
+typedef struct RinVkDescriptorPoolSize {
+    uint32_t type;
+    uint32_t descriptorCount;
+} RinVkDescriptorPoolSize;
+
+typedef struct RinVkDescriptorPoolCreateInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    uint32_t maxSets;
+    uint32_t poolSizeCount;
+    const RinVkDescriptorPoolSize* pPoolSizes;
+} RinVkDescriptorPoolCreateInfo;
+
+typedef struct RinVkDescriptorSetAllocateInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    RinVkDescriptorPool descriptorPool;
+    uint32_t descriptorSetCount;
+    const RinVkDescriptorSetLayout* pSetLayouts;
+} RinVkDescriptorSetAllocateInfo;
+
+typedef struct RinVkDescriptorBufferInfo {
+    RinVkBuffer buffer;
+    uint64_t offset;
+    uint64_t range;
+} RinVkDescriptorBufferInfo;
+
+typedef struct RinVkDescriptorImageInfo {
+    RinVkSampler sampler;
+    RinVkImageView imageView;
+    uint32_t imageLayout;
+} RinVkDescriptorImageInfo;
+
+typedef struct RinVkWriteDescriptorSet {
+    RinVkStructureType sType;
+    const void* pNext;
+    RinVkDescriptorSet dstSet;
+    uint32_t dstBinding;
+    uint32_t dstArrayElement;
+    uint32_t descriptorCount;
+    uint32_t descriptorType;
+    const RinVkDescriptorImageInfo* pImageInfo;
+    const RinVkDescriptorBufferInfo* pBufferInfo;
+    const RinVkBuffer* pTexelBufferView;
+} RinVkWriteDescriptorSet;
+
+typedef struct RinVkImageViewCreateInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    RinVkImage image;
+    uint32_t viewType;
+    int32_t format;
+    RinVkImageSubresourceRange subresourceRange;
+} RinVkImageViewCreateInfo;
+
+typedef struct RinVkSamplerCreateInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    uint32_t magFilter;
+    uint32_t minFilter;
+    uint32_t mipmapMode;
+    uint32_t addressModeU;
+    uint32_t addressModeV;
+    uint32_t addressModeW;
+    uint32_t compareEnable;
+    uint32_t compareOp;
+} RinVkSamplerCreateInfo;
+
 #define RIN_VK_BUFFER_USAGE_TRANSFER_SRC_BIT UINT32_C(0x00000001)
 #define RIN_VK_BUFFER_USAGE_TRANSFER_DST_BIT UINT32_C(0x00000002)
 #define RIN_VK_BUFFER_USAGE_KNOWN \
@@ -752,6 +850,8 @@ typedef struct RinVkImageSubresourceRange {
 #define RIN_VK_IMAGE_USAGE_KNOWN \
     (RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT | RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT)
 #define RIN_VK_IMAGE_ASPECT_COLOR_BIT UINT32_C(0x00000001)
+#define RIN_VK_IMAGE_VIEW_TYPE_2D 1u
+#define RIN_VK_IMAGE_VIEW_TYPE_2D_ARRAY 5u
 #define RIN_VK_IMAGE_LAYOUT_GENERAL UINT32_C(1)
 #define RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL UINT32_C(6)
 #define RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL UINT32_C(7)
@@ -761,6 +861,19 @@ typedef struct RinVkImageSubresourceRange {
 #define RIN_VK_FENCE_CREATE_SIGNALED_BIT UINT32_C(0x00000001)
 #define RIN_VK_FENCE_CREATE_KNOWN RIN_VK_FENCE_CREATE_SIGNALED_BIT
 #define RIN_VK_SEMAPHORE_CREATE_KNOWN 0u
+#define RIN_VK_DESCRIPTOR_TYPE_SAMPLER 0u
+#define RIN_VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER 1u
+#define RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE 2u
+#define RIN_VK_DESCRIPTOR_TYPE_STORAGE_IMAGE 3u
+#define RIN_VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER 4u
+#define RIN_VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER 5u
+#define RIN_VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER 6u
+#define RIN_VK_DESCRIPTOR_TYPE_STORAGE_BUFFER 7u
+#define RIN_VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC 8u
+#define RIN_VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC 9u
+#define RIN_VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT 10u
+#define RIN_VK_DESCRIPTOR_TYPE_KNOWN_MAX RIN_VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT
+#define RIN_VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT UINT32_C(0x00000001)
 
 #if UINTPTR_MAX == UINT64_MAX
 #define RIN_VK_APPLICATION_INFO_SIZE 48u
@@ -1297,7 +1410,54 @@ vkGetImageMemoryRequirements(RinVkDevice device, RinVkImage image,
                              RinVkMemoryRequirements* requirements);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkBindImageMemory(RinVkDevice device, RinVkImage image,
-                  RinVkDeviceMemory memory, uint64_t memory_offset);
+                   RinVkDeviceMemory memory, uint64_t memory_offset);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkCreateImageView(RinVkDevice device,
+                  const RinVkImageViewCreateInfo* create_info,
+                  const void* allocator, RinVkImageView* view_out);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkDestroyImageView(RinVkDevice device, RinVkImageView view,
+                   const void* allocator);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkCreateSampler(RinVkDevice device, const RinVkSamplerCreateInfo* create_info,
+                const void* allocator, RinVkSampler* sampler_out);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkDestroySampler(RinVkDevice device, RinVkSampler sampler,
+                 const void* allocator);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkCreateDescriptorSetLayout(
+    RinVkDevice device, const RinVkDescriptorSetLayoutCreateInfo* create_info,
+    const void* allocator, RinVkDescriptorSetLayout* layout_out);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkDestroyDescriptorSetLayout(RinVkDevice device,
+                             RinVkDescriptorSetLayout layout,
+                             const void* allocator);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkCreateDescriptorPool(RinVkDevice device,
+                       const RinVkDescriptorPoolCreateInfo* create_info,
+                       const void* allocator, RinVkDescriptorPool* pool_out);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkDestroyDescriptorPool(RinVkDevice device, RinVkDescriptorPool pool,
+                        const void* allocator);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkAllocateDescriptorSets(RinVkDevice device,
+                         const RinVkDescriptorSetAllocateInfo* allocate_info,
+                         RinVkDescriptorSet* sets_out);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkFreeDescriptorSets(RinVkDevice device, RinVkDescriptorPool pool,
+                     uint32_t set_count, const RinVkDescriptorSet* sets);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkUpdateDescriptorSets(RinVkDevice device, uint32_t write_count,
+                       const RinVkWriteDescriptorSet* writes,
+                       uint32_t copy_count, const void* copies);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdBindDescriptorSets(RinVkCommandBuffer command_buffer,
+                         uint32_t pipeline_bind_point,
+                         RinVkPipelineLayout layout, uint32_t first_set,
+                         uint32_t descriptor_set_count,
+                         const RinVkDescriptorSet* descriptor_sets,
+                         uint32_t dynamic_offset_count,
+                         const uint32_t* dynamic_offsets);
 RIN_VKAPI_ATTR RinVkVoidFunction RIN_VKAPI_CALL
 vkGetDeviceProcAddr(RinVkDevice device, const char* name);
 RIN_VKAPI_ATTR RinVkVoidFunction RIN_VKAPI_CALL

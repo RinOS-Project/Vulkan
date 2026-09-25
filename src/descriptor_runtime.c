@@ -54,7 +54,9 @@ static int layout_binding_valid(
            binding->set != UINT32_MAX && binding->binding != UINT32_MAX &&
            binding->descriptor_count != 0u &&
            binding->descriptor_count <= RIN_SHADER_MAX_RESOURCES &&
-           binding->stage_flags != 0u && binding->reserved == 0u;
+           binding->stage_flags != 0u &&
+           (binding->reserved & ~RIN_GPU_VULKAN_DESCRIPTOR_BINDING_DYNAMIC) ==
+               0u;
 }
 
 static int layout_binding_index(
@@ -89,6 +91,22 @@ static int write_key_unique(
     return 1;
 }
 
+static const RinGpuVulkanDescriptorWriteV1* find_set_write(
+        const RinGpuVulkanDescriptorRuntimeV1* runtime, uint32_t set_index,
+        uint32_t set, uint32_t binding, uint32_t array_element) {
+    uint32_t index;
+    if (!runtime || set_index >= RIN_GPU_VULKAN_DESCRIPTOR_MAX_SETS)
+        return NULL;
+    for (index = 0u; index < runtime->sets[set_index].write_count; ++index) {
+        const RinGpuVulkanDescriptorWriteV1* write =
+            &runtime->sets[set_index].writes[index];
+        if (write->set == set && write->binding == binding &&
+            write->array_element == array_element)
+            return write;
+    }
+    return NULL;
+}
+
 int rin_gpu_vulkan_descriptor_runtime_init(
         RinGpuVulkanDescriptorRuntimeV1* runtime, uint64_t handle_secret) {
     if (!runtime || handle_secret == 0u) return RIN_GPU_VULKAN_GRAPHICS_INVALID_ARGUMENT;
@@ -113,6 +131,19 @@ int rin_gpu_vulkan_descriptor_runtime_shutdown(
             return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
     memset(runtime, 0, sizeof(*runtime));
     return RIN_GPU_VULKAN_GRAPHICS_OK;
+}
+
+int rin_gpu_vulkan_descriptor_runtime_is_empty(
+        const RinGpuVulkanDescriptorRuntimeV1* runtime) {
+    uint32_t index;
+    if (!runtime_valid(runtime)) return 0;
+    for (index = 0u; index < RIN_GPU_VULKAN_DESCRIPTOR_MAX_SETS; ++index)
+        if (runtime->sets[index].state != 0u) return 0;
+    for (index = 0u; index < RIN_GPU_VULKAN_DESCRIPTOR_MAX_POOLS; ++index)
+        if (runtime->pools[index].state != 0u) return 0;
+    for (index = 0u; index < RIN_GPU_VULKAN_DESCRIPTOR_MAX_LAYOUTS; ++index)
+        if (runtime->layouts[index].state != 0u) return 0;
+    return 1;
 }
 
 int rin_gpu_vulkan_descriptor_layout_create(
@@ -172,12 +203,15 @@ int rin_gpu_vulkan_descriptor_layout_destroy(
     return RIN_GPU_VULKAN_GRAPHICS_OK;
 }
 
-int rin_gpu_vulkan_descriptor_pool_create(
+int rin_gpu_vulkan_descriptor_pool_create_v2(
         RinGpuVulkanDescriptorRuntimeV1* runtime, uint32_t max_sets,
+        const uint32_t* descriptor_limits, uint32_t descriptor_limit_count,
         RinGpuVulkanDescriptorHandleV1* pool_out) {
     uint32_t index;
     if (!pool_out || !runtime_valid(runtime) || max_sets == 0u ||
-        max_sets > RIN_GPU_VULKAN_DESCRIPTOR_MAX_SETS)
+        max_sets > RIN_GPU_VULKAN_DESCRIPTOR_MAX_SETS ||
+        descriptor_limit_count > 8u ||
+        (descriptor_limit_count != 0u && !descriptor_limits))
         return RIN_GPU_VULKAN_GRAPHICS_INVALID_ARGUMENT;
     *pool_out = 0u;
     for (index = 0u; index < RIN_GPU_VULKAN_DESCRIPTOR_MAX_POOLS; ++index) {
@@ -186,6 +220,11 @@ int rin_gpu_vulkan_descriptor_pool_create(
         runtime->pools[index].generation = runtime->pool_generation;
         runtime->pools[index].max_sets = max_sets;
         runtime->pools[index].live_sets = 0u;
+        runtime->pools[index].has_limits = descriptor_limit_count != 0u;
+        if (descriptor_limit_count != 0u)
+            memcpy(runtime->pools[index].descriptor_limits,
+                   descriptor_limits,
+                   sizeof(*descriptor_limits) * descriptor_limit_count);
         runtime->pools[index].state = 1u;
         *pool_out = make_handle(RIN_GPU_VULKAN_DESCRIPTOR_POOL_TAG, index,
                                 runtime->pool_generation,
@@ -193,6 +232,13 @@ int rin_gpu_vulkan_descriptor_pool_create(
         return RIN_GPU_VULKAN_GRAPHICS_OK;
     }
     return RIN_GPU_VULKAN_GRAPHICS_LIMIT;
+}
+
+int rin_gpu_vulkan_descriptor_pool_create(
+        RinGpuVulkanDescriptorRuntimeV1* runtime, uint32_t max_sets,
+        RinGpuVulkanDescriptorHandleV1* pool_out) {
+    return rin_gpu_vulkan_descriptor_pool_create_v2(
+        runtime, max_sets, NULL, 0u, pool_out);
 }
 
 int rin_gpu_vulkan_descriptor_pool_destroy(
@@ -222,6 +268,8 @@ int rin_gpu_vulkan_descriptor_set_allocate(
     uint32_t layout_index;
     uint32_t layout_generation;
     uint32_t set_index;
+    uint32_t descriptor_counts[8];
+    uint32_t binding_index;
     if (!set_out || !runtime_valid(runtime))
         return RIN_GPU_VULKAN_GRAPHICS_INVALID_ARGUMENT;
     *set_out = 0u;
@@ -239,6 +287,32 @@ int rin_gpu_vulkan_descriptor_set_allocate(
     if (runtime->pools[pool_index].live_sets >=
         runtime->pools[pool_index].max_sets)
         return RIN_GPU_VULKAN_GRAPHICS_LIMIT;
+    memset(descriptor_counts, 0, sizeof(descriptor_counts));
+    for (binding_index = 0u;
+         binding_index < runtime->layouts[layout_index].binding_count;
+         ++binding_index) {
+        const RinGpuVulkanDescriptorSetLayoutBindingV1* binding =
+            &runtime->layouts[layout_index].bindings[binding_index];
+        if (binding->descriptor_type >= 8u ||
+            UINT32_MAX - descriptor_counts[binding->descriptor_type] <
+                binding->descriptor_count)
+            return RIN_GPU_VULKAN_GRAPHICS_LIMIT;
+        descriptor_counts[binding->descriptor_type] +=
+            binding->descriptor_count;
+    }
+    if (runtime->pools[pool_index].has_limits != 0u) {
+        for (binding_index = 0u; binding_index < 8u; ++binding_index)
+            if (runtime->pools[pool_index]
+                    .descriptor_used[binding_index] >
+                    runtime->pools[pool_index]
+                        .descriptor_limits[binding_index] ||
+                descriptor_counts[binding_index] >
+                    runtime->pools[pool_index]
+                        .descriptor_limits[binding_index] -
+                    runtime->pools[pool_index]
+                        .descriptor_used[binding_index])
+                return RIN_GPU_VULKAN_GRAPHICS_LIMIT;
+    }
     for (set_index = 0u; set_index < RIN_GPU_VULKAN_DESCRIPTOR_MAX_SETS;
          ++set_index) {
         if (runtime->sets[set_index].state != 0u) continue;
@@ -250,6 +324,10 @@ int rin_gpu_vulkan_descriptor_set_allocate(
         runtime->sets[set_index].layout = layout;
         runtime->sets[set_index].state = 1u;
         ++runtime->pools[pool_index].live_sets;
+        if (runtime->pools[pool_index].has_limits != 0u)
+            for (binding_index = 0u; binding_index < 8u; ++binding_index)
+                runtime->pools[pool_index].descriptor_used[binding_index] +=
+                    descriptor_counts[binding_index];
         *set_out = make_handle(RIN_GPU_VULKAN_DESCRIPTOR_SET_TAG, set_index,
                                runtime->set_generation, runtime->handle_secret);
         return RIN_GPU_VULKAN_GRAPHICS_OK;
@@ -264,6 +342,9 @@ int rin_gpu_vulkan_descriptor_set_free(
     uint32_t set_generation;
     uint32_t pool_index;
     uint32_t pool_generation;
+    uint32_t layout_index;
+    uint32_t layout_generation;
+    uint32_t binding_index;
     if (!runtime_valid(runtime) ||
         !decode_handle(set, RIN_GPU_VULKAN_DESCRIPTOR_SET_TAG,
                        runtime->handle_secret,
@@ -277,10 +358,50 @@ int rin_gpu_vulkan_descriptor_set_free(
                        &pool_generation) || runtime->pools[pool_index].state == 0u ||
         runtime->pools[pool_index].generation != pool_generation)
         return RIN_GPU_VULKAN_GRAPHICS_INVALID_ARGUMENT;
+    if (!decode_handle(runtime->sets[set_index].layout,
+                       RIN_GPU_VULKAN_DESCRIPTOR_LAYOUT_TAG,
+                       runtime->handle_secret,
+                       RIN_GPU_VULKAN_DESCRIPTOR_MAX_LAYOUTS, &layout_index,
+                       &layout_generation) ||
+        runtime->layouts[layout_index].state == 0u ||
+        runtime->layouts[layout_index].generation != layout_generation)
+        return RIN_GPU_VULKAN_GRAPHICS_INVALID_ARGUMENT;
     if (runtime->pools[pool_index].live_sets != 0u)
         --runtime->pools[pool_index].live_sets;
+    if (runtime->pools[pool_index].has_limits != 0u)
+        for (binding_index = 0u;
+             binding_index < runtime->layouts[layout_index].binding_count;
+             ++binding_index) {
+            uint32_t type = runtime->layouts[layout_index]
+                                .bindings[binding_index]
+                                .descriptor_type;
+            uint32_t count = runtime->layouts[layout_index]
+                                 .bindings[binding_index]
+                                 .descriptor_count;
+            if (type >= 8u ||
+                runtime->pools[pool_index].descriptor_used[type] < count)
+                return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
+            runtime->pools[pool_index].descriptor_used[type] -= count;
+        }
     memset(&runtime->sets[set_index], 0, sizeof(runtime->sets[set_index]));
     return RIN_GPU_VULKAN_GRAPHICS_OK;
+}
+
+int rin_gpu_vulkan_descriptor_set_free_from_pool(
+        RinGpuVulkanDescriptorRuntimeV1* runtime,
+        RinGpuVulkanDescriptorHandleV1 pool,
+        RinGpuVulkanDescriptorHandleV1 set) {
+    uint32_t set_index;
+    uint32_t set_generation;
+    if (!runtime_valid(runtime) ||
+        !decode_handle(set, RIN_GPU_VULKAN_DESCRIPTOR_SET_TAG,
+                       runtime->handle_secret,
+                       RIN_GPU_VULKAN_DESCRIPTOR_MAX_SETS, &set_index,
+                       &set_generation) || runtime->sets[set_index].state == 0u ||
+        runtime->sets[set_index].generation != set_generation ||
+        runtime->sets[set_index].pool != pool)
+        return RIN_GPU_VULKAN_GRAPHICS_INVALID_ARGUMENT;
+    return rin_gpu_vulkan_descriptor_set_free(runtime, set);
 }
 
 int rin_gpu_vulkan_descriptor_set_update(
@@ -347,6 +468,59 @@ int rin_gpu_vulkan_descriptor_set_update(
         runtime->sets[set_index].writes[
             runtime->sets[set_index].write_count++] = writes[index];
     }
+    return RIN_GPU_VULKAN_GRAPHICS_OK;
+}
+
+int rin_gpu_vulkan_descriptor_set_validate_dynamic_offsets(
+        RinGpuVulkanDescriptorRuntimeV1* runtime,
+        RinGpuVulkanDescriptorHandleV1 set, const uint32_t* offsets,
+        uint32_t offset_count, uint32_t* consumed_count_out) {
+    uint32_t set_index;
+    uint32_t set_generation;
+    uint32_t layout_index;
+    uint32_t layout_generation;
+    uint32_t consumed = 0u;
+    uint32_t binding_index;
+    if (!consumed_count_out || !runtime_valid(runtime) ||
+        (offset_count != 0u && !offsets) ||
+        !decode_handle(set, RIN_GPU_VULKAN_DESCRIPTOR_SET_TAG,
+                       runtime->handle_secret,
+                       RIN_GPU_VULKAN_DESCRIPTOR_MAX_SETS, &set_index,
+                       &set_generation) || runtime->sets[set_index].state == 0u ||
+        runtime->sets[set_index].generation != set_generation ||
+        !decode_handle(runtime->sets[set_index].layout,
+                       RIN_GPU_VULKAN_DESCRIPTOR_LAYOUT_TAG,
+                       runtime->handle_secret,
+                       RIN_GPU_VULKAN_DESCRIPTOR_MAX_LAYOUTS, &layout_index,
+                       &layout_generation) || runtime->layouts[layout_index].state == 0u ||
+        runtime->layouts[layout_index].generation != layout_generation)
+        return RIN_GPU_VULKAN_GRAPHICS_INVALID_ARGUMENT;
+    for (binding_index = 0u;
+         binding_index < runtime->layouts[layout_index].binding_count;
+         ++binding_index) {
+        const RinGpuVulkanDescriptorSetLayoutBindingV1* binding =
+            &runtime->layouts[layout_index].bindings[binding_index];
+        uint32_t array_element;
+        if ((binding->reserved & RIN_GPU_VULKAN_DESCRIPTOR_BINDING_DYNAMIC) ==
+            0u)
+            continue;
+        for (array_element = 0u; array_element < binding->descriptor_count;
+             ++array_element) {
+            const RinGpuVulkanDescriptorWriteV1* write = find_set_write(
+                runtime, set_index, binding->set, binding->binding,
+                array_element);
+            uint32_t dynamic_offset;
+            if (!write || consumed >= offset_count ||
+                !offsets || UINT64_MAX - write->offset < offsets[consumed])
+                return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
+            dynamic_offset = offsets[consumed++];
+            if ((uint64_t)dynamic_offset > write->size_bytes ||
+                write->offset + dynamic_offset > UINT64_MAX - write->size_bytes)
+                return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
+        }
+    }
+    if (consumed != offset_count) return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
+    *consumed_count_out = consumed;
     return RIN_GPU_VULKAN_GRAPHICS_OK;
 }
 
