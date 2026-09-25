@@ -401,6 +401,83 @@ int rin_gpu_vulkan_graphics_runtime_begin_render_pass_depth_stencil(
         runtime->runtime, command_list, render_pass);
 }
 
+int rin_gpu_vulkan_graphics_runtime_begin_dynamic_rendering(
+    RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
+    const RinGpuVulkanDynamicRenderingV1* rendering)
+{
+    RinGpuRenderPassDepthDescV1 depth_pass;
+    RinGpuRenderPassDepthStencilDescV1 depth_stencil_pass;
+
+    if (!runtime_valid(runtime) || !rendering ||
+        rendering->abi_version != RIN_GPU_ABI_VERSION ||
+        rendering->struct_size != sizeof(*rendering) ||
+        rendering->active_color_mask == 0u ||
+        (rendering->active_color_mask & ~((1u << RIN_GPU_MAX_COLOR_TARGETS) - 1u)) != 0u ||
+        rendering->reserved0 != 0u || rendering->reserved1 != 0u ||
+        rendering->reserved2 != 0u || rendering->clear_region.reserved != 0u)
+        return RIN_GPU_ERROR_INVALID_ARGUMENT;
+    if (rendering->stencil_target != 0u && rendering->depth_target == 0u)
+        return RIN_GPU_ERROR_UNSUPPORTED;
+    if (rendering->depth_target != 0u && rendering->active_color_mask != 1u)
+        return RIN_GPU_ERROR_UNSUPPORTED;
+    if (rendering->depth_target == 0u && rendering->stencil_target == 0u)
+        return rin_gpu_vulkan_graphics_runtime_begin_render_pass_mrt(
+            runtime, command_list, rendering);
+    if (rendering->stencil_target == 0u) {
+        memset(&depth_pass, 0, sizeof(depth_pass));
+        depth_pass.abi_version = RIN_GPU_ABI_VERSION;
+        depth_pass.struct_size = sizeof(depth_pass);
+        depth_pass.color_target = rendering->color_attachments[0].target;
+        depth_pass.depth_target = rendering->depth_target;
+        depth_pass.color_mip_level = rendering->color_attachments[0].mip_level;
+        depth_pass.color_array_layer = rendering->color_attachments[0].array_layer;
+        depth_pass.depth_mip_level = rendering->depth_mip_level;
+        depth_pass.depth_array_layer = rendering->depth_array_layer;
+        depth_pass.color_load_op = rendering->color_load_op;
+        depth_pass.color_store_op = rendering->color_store_op;
+        depth_pass.depth_load_op = rendering->depth_load_op;
+        depth_pass.depth_store_op = rendering->depth_store_op;
+        depth_pass.clear_red = rendering->clear_red;
+        depth_pass.clear_green = rendering->clear_green;
+        depth_pass.clear_blue = rendering->clear_blue;
+        depth_pass.clear_alpha = rendering->clear_alpha;
+        depth_pass.clear_depth = rendering->clear_depth;
+        depth_pass.color_write_mask = rendering->color_write_mask;
+        depth_pass.clear_region = rendering->clear_region;
+        return rin_gpu_vulkan_graphics_runtime_begin_render_pass_depth(
+            runtime, command_list, &depth_pass);
+    }
+    memset(&depth_stencil_pass, 0, sizeof(depth_stencil_pass));
+    depth_stencil_pass.abi_version = RIN_GPU_ABI_VERSION;
+    depth_stencil_pass.struct_size = sizeof(depth_stencil_pass);
+    depth_stencil_pass.color_target = rendering->color_attachments[0].target;
+    depth_stencil_pass.depth_target = rendering->depth_target;
+    depth_stencil_pass.stencil_target = rendering->stencil_target;
+    depth_stencil_pass.color_mip_level = rendering->color_attachments[0].mip_level;
+    depth_stencil_pass.color_array_layer = rendering->color_attachments[0].array_layer;
+    depth_stencil_pass.depth_mip_level = rendering->depth_mip_level;
+    depth_stencil_pass.depth_array_layer = rendering->depth_array_layer;
+    depth_stencil_pass.stencil_mip_level = rendering->stencil_mip_level;
+    depth_stencil_pass.stencil_array_layer = rendering->stencil_array_layer;
+    depth_stencil_pass.color_load_op = rendering->color_load_op;
+    depth_stencil_pass.color_store_op = rendering->color_store_op;
+    depth_stencil_pass.depth_load_op = rendering->depth_load_op;
+    depth_stencil_pass.depth_store_op = rendering->depth_store_op;
+    depth_stencil_pass.stencil_load_op = rendering->stencil_load_op;
+    depth_stencil_pass.stencil_store_op = rendering->stencil_store_op;
+    depth_stencil_pass.clear_red = rendering->clear_red;
+    depth_stencil_pass.clear_green = rendering->clear_green;
+    depth_stencil_pass.clear_blue = rendering->clear_blue;
+    depth_stencil_pass.clear_alpha = rendering->clear_alpha;
+    depth_stencil_pass.clear_depth = rendering->clear_depth;
+    depth_stencil_pass.clear_stencil = rendering->clear_stencil;
+    depth_stencil_pass.stencil_write_mask = rendering->stencil_write_mask;
+    depth_stencil_pass.color_write_mask = rendering->color_write_mask;
+    depth_stencil_pass.clear_region = rendering->clear_region;
+    return rin_gpu_vulkan_graphics_runtime_begin_render_pass_depth_stencil(
+        runtime, command_list, &depth_stencil_pass);
+}
+
 int rin_gpu_vulkan_graphics_runtime_bind_graphics_resources(
     RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
     RinGpuHandle bind_group)

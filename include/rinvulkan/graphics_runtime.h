@@ -9,6 +9,12 @@
 
 #define RIN_GPU_VULKAN_GRAPHICS_RUNTIME_VERSION 1u
 
+/* Bounded dynamic-rendering owner. The attachment contract deliberately
+ * reuses RinGPU's explicit MRT/depth-stencil descriptor so load/store,
+ * clear, format and lifetime validation remain in one executor. A full
+ * Vulkan VkRenderingInfo ABI is a separate loader boundary. */
+typedef RinGpuRenderPassMrtDescV1 RinGpuVulkanDynamicRenderingV1;
+
 /* This is the host software execution owner for the bounded Vulkan graphics
  * profile.  It deliberately receives a caller-owned RinGPU software surface
  * descriptor, so presentation and image acquisition are real callbacks rather
@@ -85,6 +91,9 @@ int rin_gpu_vulkan_graphics_runtime_begin_render_pass_depth(
 int rin_gpu_vulkan_graphics_runtime_begin_render_pass_depth_stencil(
     RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
     const RinGpuRenderPassDepthStencilDescV1* render_pass);
+int rin_gpu_vulkan_graphics_runtime_begin_dynamic_rendering(
+    RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
+    const RinGpuVulkanDynamicRenderingV1* rendering);
 int rin_gpu_vulkan_graphics_runtime_bind_graphics_resources(
     RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
     RinGpuHandle bind_group);

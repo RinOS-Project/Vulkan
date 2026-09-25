@@ -429,7 +429,7 @@ int main(void)
     render_pass_mrt.color_store_op = RIN_GPU_RENDER_STORE;
     render_pass_mrt.clear_alpha = 1.0f;
     render_pass_mrt.color_write_mask = RIN_GPU_COLOR_WRITE_ALL;
-    CHECK(rin_gpu_vulkan_graphics_runtime_begin_render_pass_mrt(
+    CHECK(rin_gpu_vulkan_graphics_runtime_begin_dynamic_rendering(
               &runtime, command_list, &render_pass_mrt) == RIN_GPU_OK);
     memset(&raster_state, 0, sizeof(raster_state));
     raster_state.abi_version = RIN_GPU_ABI_VERSION;
