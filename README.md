@@ -21,9 +21,10 @@ software-path regression. It owns zeroed allocation bytes, validates GPU
 address ranges and resource leases, executes the versioned transfer packet,
 and publishes completion through `poll`. The host profile includes bounded
 2D RGBA8 single-mip/layer `vkCmdCopyImage`, buffer-to-image, and
-image-to-buffer operations with actual byte movement and readback. It does
-not advertise or emulate a physical GPU, and malformed or unsupported
-packets fail closed.
+image-to-buffer operations with actual byte movement and readback. The same
+host profile also executes full-image packed-RGBA8 `vkCmdClearColorImage`
+operations. It does not advertise or emulate a physical GPU, and malformed or
+unsupported packets fail closed.
 
 Build and test:
 

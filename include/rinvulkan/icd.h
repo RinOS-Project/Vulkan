@@ -708,6 +708,20 @@ typedef struct RinVkImageCopy {
     RinVkExtent3D extent;
 } RinVkImageCopy;
 
+typedef union RinVkClearColorValue {
+    float float32[4];
+    int32_t int32[4];
+    uint32_t uint32[4];
+} RinVkClearColorValue;
+
+typedef struct RinVkImageSubresourceRange {
+    uint32_t aspectMask;
+    uint32_t baseMipLevel;
+    uint32_t levelCount;
+    uint32_t baseArrayLayer;
+    uint32_t layerCount;
+} RinVkImageSubresourceRange;
+
 #define RIN_VK_BUFFER_USAGE_TRANSFER_SRC_BIT UINT32_C(0x00000001)
 #define RIN_VK_BUFFER_USAGE_TRANSFER_DST_BIT UINT32_C(0x00000002)
 #define RIN_VK_BUFFER_USAGE_KNOWN \
@@ -1197,9 +1211,15 @@ vkCmdCopyBufferToImage(RinVkCommandBuffer command_buffer,
                        const RinVkBufferImageCopy* regions);
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkCmdCopyImageToBuffer(RinVkCommandBuffer command_buffer,
-                       RinVkImage src_image, uint32_t src_image_layout,
-                       RinVkBuffer dst_buffer, uint32_t region_count,
-                       const RinVkBufferImageCopy* regions);
+                        RinVkImage src_image, uint32_t src_image_layout,
+                        RinVkBuffer dst_buffer, uint32_t region_count,
+                        const RinVkBufferImageCopy* regions);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdClearColorImage(RinVkCommandBuffer command_buffer, RinVkImage image,
+                     uint32_t image_layout,
+                     const RinVkClearColorValue* color,
+                     uint32_t range_count,
+                     const RinVkImageSubresourceRange* ranges);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkQueueSubmit(RinVkQueue queue, uint32_t submit_count,
               const RinVkSubmitInfo* submits, uint64_t fence);

@@ -259,28 +259,44 @@ static int software_submit(void* context,
             uint64_t destination_offset;
             if ((operation->type != RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_COPY &&
                  (operation->type < RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_COPY ||
-                  operation->type > RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_TO_BUFFER)) ||
+                  operation->type > RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_CLEAR)) ||
                 operation->reserved != 0u || operation->size_bytes == 0u ||
-                !resource_has_access(resources, resource_count,
-                                     operation->source_allocation,
-                                     RIN_VULKAN_PRODUCT_MEMORY_GPU_READ) ||
                 !resource_has_access(resources, resource_count,
                                      operation->destination_allocation,
                                      RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE))
                 return RIN_VULKAN_PRODUCT_PROTOCOL;
-            source = allocation_by_handle(platform, operation->source_allocation);
             destination = allocation_by_handle(platform,
                                                operation->destination_allocation);
-            if (!source || !destination ||
-                allocation_for_range(platform, operation->source_gpu_address,
-                                     operation->size_bytes) != source ||
+            if (!destination ||
                 allocation_for_range(platform, operation->destination_gpu_address,
                                      operation->size_bytes) != destination)
                 return RIN_VULKAN_PRODUCT_PROTOCOL;
-            source_offset = operation->source_gpu_address -
-                            source->gpu_virtual_address;
             destination_offset = operation->destination_gpu_address -
                                  destination->gpu_virtual_address;
+            if (operation->type == RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_CLEAR) {
+                uint64_t clear_offset;
+                if (operation->source_allocation != 0u ||
+                    operation->source_gpu_address != 0u ||
+                    (operation->size_bytes & 3u) != 0u)
+                    return RIN_VULKAN_PRODUCT_PROTOCOL;
+                for (clear_offset = 0u; clear_offset < operation->size_bytes;
+                     clear_offset += sizeof(operation->clear_value[0]))
+                    memcpy(destination->bytes + destination_offset + clear_offset,
+                           &operation->clear_value[0],
+                           sizeof(operation->clear_value[0]));
+                continue;
+            }
+            if (!resource_has_access(resources, resource_count,
+                                     operation->source_allocation,
+                                     RIN_VULKAN_PRODUCT_MEMORY_GPU_READ))
+                return RIN_VULKAN_PRODUCT_PROTOCOL;
+            source = allocation_by_handle(platform, operation->source_allocation);
+            if (!source ||
+                allocation_for_range(platform, operation->source_gpu_address,
+                                     operation->size_bytes) != source)
+                return RIN_VULKAN_PRODUCT_PROTOCOL;
+            source_offset = operation->source_gpu_address -
+                            source->gpu_virtual_address;
             memmove(destination->bytes + destination_offset,
                     source->bytes + source_offset,
                     (size_t)operation->size_bytes);

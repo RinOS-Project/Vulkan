@@ -76,7 +76,8 @@ enum {
     RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_COPY = 1u,
     RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_COPY = 2u,
     RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_TO_IMAGE = 3u,
-    RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_TO_BUFFER = 4u
+    RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_TO_BUFFER = 4u,
+    RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_CLEAR = 5u
 };
 
 typedef struct RinGpuVulkanTransferOpV2 {
@@ -87,6 +88,7 @@ typedef struct RinGpuVulkanTransferOpV2 {
     uint64_t source_gpu_address;
     uint64_t destination_gpu_address;
     uint64_t size_bytes;
+    uint32_t clear_value[4];
 } RinGpuVulkanTransferOpV2;
 
 typedef struct RinGpuVulkanTransferPacketV2 {
