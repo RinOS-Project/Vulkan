@@ -191,4 +191,12 @@ void rin_gpu_vulkan_command_buffers_abort(
 uint32_t rin_gpu_vulkan_command_owner_cleanup(
     RinGpuVulkanCommandRuntimeV1* runtime, uintptr_t owner);
 
+#if defined(__cplusplus)
+static_assert(sizeof(RinGpuVulkanTransferOpV2) == 88u,
+              "RinVulkan transfer operation ABI drift");
+#else
+_Static_assert(sizeof(RinGpuVulkanTransferOpV2) == 88u,
+               "RinVulkan transfer operation ABI drift");
+#endif
+
 #endif

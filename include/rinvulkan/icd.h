@@ -957,6 +957,14 @@ static_assert(sizeof(RinVkSemaphoreCreateInfo) ==
               "Vulkan semaphore-create ABI drift");
 static_assert(sizeof(RinVkBufferCopy) == 24u,
               "Vulkan buffer-copy ABI drift");
+static_assert(sizeof(RinVkImageBlit) == 80u,
+              "Vulkan image-blit ABI drift");
+static_assert(sizeof(RinVkImageResolve) == 68u,
+              "Vulkan image-resolve ABI drift");
+static_assert(sizeof(RinVkClearColorValue) == 16u,
+              "Vulkan clear-color ABI drift");
+static_assert(sizeof(RinVkImageSubresourceRange) == 20u,
+              "Vulkan image-subresource-range ABI drift");
 static_assert(sizeof(RinVkCommandPool) == 8u,
               "Vulkan command-pool handle ABI drift");
 static_assert(sizeof(RinVkCommandBuffer) == sizeof(void*),
@@ -1083,7 +1091,15 @@ _Static_assert(sizeof(RinVkSemaphoreCreateInfo) ==
                    RIN_VK_SEMAPHORE_CREATE_INFO_SIZE,
                "Vulkan semaphore-create ABI drift");
 _Static_assert(sizeof(RinVkBufferCopy) == 24u,
-               "Vulkan buffer-copy ABI drift");
+                "Vulkan buffer-copy ABI drift");
+_Static_assert(sizeof(RinVkImageBlit) == 80u,
+               "Vulkan image-blit ABI drift");
+_Static_assert(sizeof(RinVkImageResolve) == 68u,
+               "Vulkan image-resolve ABI drift");
+_Static_assert(sizeof(RinVkClearColorValue) == 16u,
+               "Vulkan clear-color ABI drift");
+_Static_assert(sizeof(RinVkImageSubresourceRange) == 20u,
+               "Vulkan image-subresource-range ABI drift");
 _Static_assert(sizeof(RinVkCommandPool) == 8u,
                "Vulkan command-pool handle ABI drift");
 _Static_assert(sizeof(RinVkCommandBuffer) == sizeof(void*),
