@@ -53,6 +53,15 @@
 #define RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES 54
 #define RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 1000059000
 #define RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 1000059001
+#define RIN_VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO 1000207000
+#define RIN_VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO 1000207001
+#define RIN_VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO 1000207002
+
+#define RIN_VK_SEMAPHORE_TYPE_BINARY 0u
+#define RIN_VK_SEMAPHORE_TYPE_TIMELINE 1u
+#define RIN_VK_SEMAPHORE_WAIT_ANY_BIT 0x00000001u
+#define RIN_VK_KHR_TIMELINE_SEMAPHORE_EXTENSION \
+    "VK_KHR_timeline_semaphore"
 
 #define RIN_VK_SUCCESS 0
 #define RIN_VK_NOT_READY 1
@@ -631,6 +640,15 @@ typedef struct RinVkSubmitInfo {
     const uint64_t* pSignalSemaphores;
 } RinVkSubmitInfo;
 
+typedef struct RinVkTimelineSemaphoreSubmitInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t waitSemaphoreValueCount;
+    const uint64_t* pWaitSemaphoreValues;
+    uint32_t signalSemaphoreValueCount;
+    const uint64_t* pSignalSemaphoreValues;
+} RinVkTimelineSemaphoreSubmitInfo;
+
 typedef struct RinVkFenceCreateInfo {
     RinVkStructureType sType;
     const void* pNext;
@@ -642,6 +660,22 @@ typedef struct RinVkSemaphoreCreateInfo {
     const void* pNext;
     uint32_t flags;
 } RinVkSemaphoreCreateInfo;
+
+typedef struct RinVkSemaphoreTypeCreateInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t semaphoreType;
+    uint64_t initialValue;
+} RinVkSemaphoreTypeCreateInfo;
+
+typedef struct RinVkSemaphoreWaitInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    uint32_t semaphoreCount;
+    const RinVkSemaphore* pSemaphores;
+    const uint64_t* pValues;
+} RinVkSemaphoreWaitInfo;
 
 typedef struct RinVkMemoryAllocateInfo {
     RinVkStructureType sType;
@@ -1329,6 +1363,15 @@ vkCreateSemaphore(RinVkDevice device,
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkDestroySemaphore(RinVkDevice device, RinVkSemaphore semaphore,
                    const void* allocator);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkGetSemaphoreCounterValue(RinVkDevice device, RinVkSemaphore semaphore,
+                           uint64_t* value_out);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkSignalSemaphore(RinVkDevice device, RinVkSemaphore semaphore,
+                  uint64_t value);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkWaitSemaphores(RinVkDevice device, const RinVkSemaphoreWaitInfo* wait_info,
+                 uint64_t timeout);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkCreateCommandPool(RinVkDevice device,
                     const RinVkCommandPoolCreateInfo* create_info,

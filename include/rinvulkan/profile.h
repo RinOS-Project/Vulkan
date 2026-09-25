@@ -22,7 +22,7 @@
  * product/profile contract; it must not leak into Vulkan loader advertisement
  * until the corresponding core command/error/lifetime semantics are wired. */
 #define RIN_GPU_VK_ICD_API_VERSION RIN_GPU_VK_MAKE_VERSION(1u, 0u, 0u)
-#define RIN_GPU_VK_ICD_FEATURES UINT64_C(0)
+#define RIN_GPU_VK_ICD_FEATURES UINT64_C(0x0000000000000001)
 
 #define RIN_GPU_VK_PHYSICAL_DMA_ISOLATED UINT32_C(0x00000001)
 #define RIN_GPU_VK_PHYSICAL_RESET_CAPABLE UINT32_C(0x00000002)

@@ -88,6 +88,7 @@ struct RinVkDevice_T {
     RinGpuVulkanPhysicalDeviceV2 physical_profile;
     RinGpuVulkanDescriptorRuntimeV1 descriptor_runtime;
     volatile uint32_t descriptor_validation_error;
+    uint32_t timeline_enabled;
     uint32_t queue_count;
     uint32_t reserved_queue;
     struct RinVkQueue_T queues[RIN_VULKAN_PRODUCT_MAX_QUEUES];
@@ -173,8 +174,12 @@ typedef struct RinVkSemaphoreSlot {
     uint32_t state;
     uint32_t generation;
     struct RinVkDevice_T* owner;
+    uint32_t type;
+    uint32_t reserved_type;
     volatile uint32_t signaled;
     volatile uint32_t pending;
+    volatile uint64_t value;
+    uint64_t pending_value;
 } RinVkSemaphoreSlot;
 
 typedef struct RinVkSubmissionSlot {
@@ -189,6 +194,7 @@ typedef struct RinVkSubmissionSlot {
     uint32_t wait_semaphore_count;
     uint32_t signal_semaphore_count;
     RinVkSemaphore signal_semaphores[RIN_VK_MAX_SUBMIT_SEMAPHORES];
+    uint64_t signal_semaphore_values[RIN_VK_MAX_SUBMIT_SEMAPHORES];
     RinGpuVulkanCommandBufferV1*
         command_buffers[RIN_VK_MAX_SUBMIT_COMMAND_BUFFERS];
     RinGpuVulkanTransferPacketV1 packet;
@@ -423,6 +429,30 @@ static int api_version_supported(uint32_t version) {
     uint32_t minor = (version >> 12u) & 0x3ffu;
     return variant == 0u && major == 1u &&
            version <= RIN_GPU_VK_ICD_API_VERSION && minor <= 0u;
+}
+
+static int timeline_extension_enabled(const RinVkDeviceCreateInfo* info) {
+    uint32_t index;
+    if (!info || info->enabledExtensionCount == 0u) return 0;
+    if (!info->ppEnabledExtensionNames) return 0;
+    for (index = 0u; index < info->enabledExtensionCount; ++index) {
+        if (!info->ppEnabledExtensionNames[index]) return 0;
+        if (name_equal(info->ppEnabledExtensionNames[index],
+                       RIN_VK_KHR_TIMELINE_SEMAPHORE_EXTENSION))
+            return 1;
+    }
+    return 0;
+}
+
+static int device_extensions_valid(const RinVkDeviceCreateInfo* info) {
+    uint32_t index;
+    if (!info || info->enabledExtensionCount > 1u) return 0;
+    if (info->enabledExtensionCount == 0u)
+        return info->ppEnabledExtensionNames == NULL;
+    if (!timeline_extension_enabled(info)) return 0;
+    for (index = 0u; index < info->enabledExtensionCount; ++index)
+        if (!info->ppEnabledExtensionNames[index]) return 0;
+    return 1;
 }
 
 static RinGpuVulkanRuntimeV1* acquire_runtime(void) {
@@ -807,8 +837,12 @@ static void clear_fence_slot(RinVkFenceSlot* slot) {
 static void clear_semaphore_slot(RinVkSemaphoreSlot* slot) {
     if (!slot) return;
     slot->owner = NULL;
+    slot->type = RIN_VK_SEMAPHORE_TYPE_BINARY;
+    slot->reserved_type = 0u;
     __atomic_store_n(&slot->signaled, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&slot->pending, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&slot->value, 0u, __ATOMIC_RELEASE);
+    slot->pending_value = 0u;
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
 }
 
@@ -1286,7 +1320,15 @@ static void complete_submission_sync(const RinVkSubmissionSlot* submission) {
         if (semaphore &&
             __atomic_load_n(&semaphore->pending, __ATOMIC_ACQUIRE) != 0u) {
             __atomic_store_n(&semaphore->pending, 0u, __ATOMIC_RELEASE);
-            __atomic_store_n(&semaphore->signaled, 1u, __ATOMIC_RELEASE);
+            if (semaphore->type == RIN_VK_SEMAPHORE_TYPE_TIMELINE) {
+                __atomic_store_n(
+                    &semaphore->value,
+                    submission->signal_semaphore_values[index],
+                    __ATOMIC_RELEASE);
+            } else {
+                __atomic_store_n(&semaphore->signaled, 1u,
+                                 __ATOMIC_RELEASE);
+            }
         }
     }
 }
@@ -1736,12 +1778,27 @@ RinVkResult RIN_VKAPI_CALL vkEnumerateInstanceExtensionProperties(
 RinVkResult RIN_VKAPI_CALL vkEnumerateDeviceExtensionProperties(
         RinVkPhysicalDevice physical_device, const char* layer_name,
         uint32_t* property_count, RinVkExtensionProperties* properties) {
-    (void)properties;
+    RinVkExtensionProperties extension;
+    uint32_t capacity;
     if (!property_count) return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    *property_count = 0u;
     if (!physical_slot(physical_device, NULL))
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    return layer_name ? RIN_VK_ERROR_LAYER_NOT_PRESENT : RIN_VK_SUCCESS;
+    if (layer_name) {
+        *property_count = 0u;
+        return RIN_VK_ERROR_LAYER_NOT_PRESENT;
+    }
+    capacity = *property_count;
+    *property_count = properties ? (capacity == 0u ? 0u : 1u) : 1u;
+    if (!properties || capacity == 0u) {
+        return properties && capacity == 0u ? RIN_VK_INCOMPLETE
+                                            : RIN_VK_SUCCESS;
+    }
+    memset(&extension, 0, sizeof(extension));
+    memcpy(extension.extensionName, RIN_VK_KHR_TIMELINE_SEMAPHORE_EXTENSION,
+           sizeof(RIN_VK_KHR_TIMELINE_SEMAPHORE_EXTENSION));
+    extension.specVersion = 2u;
+    properties[0] = extension;
+    return RIN_VK_SUCCESS;
 }
 
 RinVkResult RIN_VKAPI_CALL vkEnumerateInstanceLayerProperties(
@@ -1970,7 +2027,9 @@ void RIN_VKAPI_CALL vkGetPhysicalDeviceFeatures2(
     publish_legacy_features(&profile, &features->features);
     if (chain.vulkan12) {
         chain.vulkan12->descriptorIndexing = 0u;
-        chain.vulkan12->timelineSemaphore = 0u;
+        chain.vulkan12->timelineSemaphore =
+            (profile.features & RIN_GPU_VK_ICD_FEATURES &
+             RIN_GPU_VK_FEATURE_TIMELINE_SEMAPHORE) != 0u;
         chain.vulkan12->bufferDeviceAddress = 0u;
     }
     if (chain.vulkan13) {
@@ -2152,13 +2211,14 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
         !requested_vulkan13_features(feature_chain.vulkan13,
                                      &chain_features))
         return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
-    if (feature_chain.vulkan12 || feature_chain.vulkan13)
-        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    if ((chain_features & RIN_GPU_VK_FEATURE_TIMELINE_SEMAPHORE) != 0u &&
+        !timeline_extension_enabled(create_info))
+        return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
     if (create_info->flags != 0u)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
     if (create_info->enabledLayerCount != 0u)
         return RIN_VK_ERROR_LAYER_NOT_PRESENT;
-    if (create_info->enabledExtensionCount != 0u)
+    if (!device_extensions_valid(create_info))
         return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
     if (create_info->queueCreateInfoCount != 1u ||
         !create_info->pQueueCreateInfos)
@@ -2289,6 +2349,8 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
     release_runtime();
     slot->loader_magic = RIN_VK_ICD_LOADER_MAGIC;
     slot->reserved = 0u;
+    slot->timeline_enabled =
+        (chain_features & RIN_GPU_VK_FEATURE_TIMELINE_SEMAPHORE) != 0u;
     slot->physical_profile = profile;
     if (rin_gpu_vulkan_descriptor_runtime_init(
             &slot->descriptor_runtime,
@@ -2370,6 +2432,7 @@ void RIN_VKAPI_CALL vkDestroyDevice(RinVkDevice device,
         &slot->descriptor_runtime);
     __atomic_store_n(&slot->descriptor_validation_error, 0u,
                      __ATOMIC_RELEASE);
+    slot->timeline_enabled = 0u;
     memset(&slot->plan, 0, sizeof(slot->plan));
     memset(&slot->physical_profile, 0, sizeof(slot->physical_profile));
     memset(slot->queues, 0, sizeof(slot->queues));
@@ -2556,6 +2619,9 @@ RinVkResult RIN_VKAPI_CALL vkCreateSemaphore(
         const void* allocator, RinVkSemaphore* semaphore_out) {
     struct RinVkDevice_T* owner = device_slot(device);
     RinVkSemaphoreSlot* semaphore;
+    const RinVkSemaphoreTypeCreateInfo* type_info;
+    uint32_t semaphore_type = RIN_VK_SEMAPHORE_TYPE_BINARY;
+    uint64_t initial_value = 0u;
     uint32_t index;
     (void)allocator;
 
@@ -2563,17 +2629,30 @@ RinVkResult RIN_VKAPI_CALL vkCreateSemaphore(
     *semaphore_out = 0u;
     if (!owner || !create_info ||
         create_info->sType != RIN_VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO ||
-        create_info->pNext ||
         (create_info->flags & ~RIN_VK_SEMAPHORE_CREATE_KNOWN) != 0u)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    type_info = (const RinVkSemaphoreTypeCreateInfo*)create_info->pNext;
+    if (type_info) {
+        if (type_info->sType !=
+                RIN_VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO ||
+            type_info->pNext || type_info->semaphoreType !=
+                RIN_VK_SEMAPHORE_TYPE_TIMELINE ||
+            !owner->timeline_enabled)
+            return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        semaphore_type = type_info->semaphoreType;
+        initial_value = type_info->initialValue;
+    }
     if (!sync_try_lock()) return RIN_VK_NOT_READY;
     semaphore = reserve_semaphore_slot(owner, &index);
     if (!semaphore) {
         sync_unlock();
         return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
     }
+    semaphore->type = semaphore_type;
     __atomic_store_n(&semaphore->signaled, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&semaphore->pending, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&semaphore->value, initial_value, __ATOMIC_RELEASE);
+    semaphore->pending_value = 0u;
     __atomic_store_n(&semaphore->state, 1u, __ATOMIC_RELEASE);
     *semaphore_out = resource_handle(RIN_VK_SEMAPHORE_TAG, index,
                                      semaphore->generation);
@@ -2589,6 +2668,91 @@ void RIN_VKAPI_CALL vkDestroySemaphore(
     slot = semaphore_slot(device, semaphore);
     if (slot) clear_semaphore_slot(slot);
     sync_unlock();
+}
+
+RinVkResult RIN_VKAPI_CALL vkGetSemaphoreCounterValue(
+        RinVkDevice device, RinVkSemaphore semaphore, uint64_t* value_out) {
+    struct RinVkDevice_T* owner = device_slot(device);
+    RinVkSemaphoreSlot* slot;
+    RinVkResult result;
+    if (!owner || !value_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    result = maintain_device_submissions(owner);
+    if (result != RIN_VK_SUCCESS) return result;
+    if (!sync_try_lock()) return RIN_VK_NOT_READY;
+    slot = semaphore_slot(owner, semaphore);
+    if (!slot || slot->type != RIN_VK_SEMAPHORE_TYPE_TIMELINE) {
+        sync_unlock();
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    }
+    *value_out = __atomic_load_n(&slot->value, __ATOMIC_ACQUIRE);
+    sync_unlock();
+    return RIN_VK_SUCCESS;
+}
+
+RinVkResult RIN_VKAPI_CALL vkSignalSemaphore(
+        RinVkDevice device, RinVkSemaphore semaphore, uint64_t value) {
+    struct RinVkDevice_T* owner = device_slot(device);
+    RinVkSemaphoreSlot* slot;
+    uint64_t current;
+    if (!owner) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    if (!sync_try_lock()) return RIN_VK_NOT_READY;
+    slot = semaphore_slot(owner, semaphore);
+    if (!slot || slot->type != RIN_VK_SEMAPHORE_TYPE_TIMELINE) {
+        sync_unlock();
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    }
+    if (__atomic_load_n(&slot->pending, __ATOMIC_ACQUIRE) != 0u) {
+        sync_unlock();
+        return RIN_VK_NOT_READY;
+    }
+    current = __atomic_load_n(&slot->value, __ATOMIC_ACQUIRE);
+    if (value < current) {
+        sync_unlock();
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    }
+    __atomic_store_n(&slot->value, value, __ATOMIC_RELEASE);
+    sync_unlock();
+    return RIN_VK_SUCCESS;
+}
+
+RinVkResult RIN_VKAPI_CALL vkWaitSemaphores(
+        RinVkDevice device, const RinVkSemaphoreWaitInfo* wait_info,
+        uint64_t timeout) {
+    struct RinVkDevice_T* owner = device_slot(device);
+    uint32_t index;
+    uint32_t satisfied = 0u;
+    RinVkResult result;
+    if (!owner || !wait_info ||
+        wait_info->sType != RIN_VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO ||
+        wait_info->pNext ||
+        (wait_info->flags & ~RIN_VK_SEMAPHORE_WAIT_ANY_BIT) != 0u ||
+        wait_info->semaphoreCount == 0u ||
+        wait_info->semaphoreCount > RIN_VK_MAX_SUBMIT_SEMAPHORES ||
+        !wait_info->pSemaphores || !wait_info->pValues)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    result = maintain_device_submissions(owner);
+    if (result != RIN_VK_SUCCESS) return result;
+    if (!sync_try_lock()) return RIN_VK_NOT_READY;
+    for (index = 0u; index < wait_info->semaphoreCount; ++index) {
+        RinVkSemaphoreSlot* slot = semaphore_slot(
+            owner, wait_info->pSemaphores[index]);
+        uint64_t current;
+        if (!slot || slot->type != RIN_VK_SEMAPHORE_TYPE_TIMELINE ||
+            semaphore_list_contains(wait_info->pSemaphores, index,
+                                    wait_info->pSemaphores[index])) {
+            sync_unlock();
+            return RIN_VK_ERROR_INITIALIZATION_FAILED;
+        }
+        current = __atomic_load_n(&slot->value, __ATOMIC_ACQUIRE);
+        if (current >= wait_info->pValues[index]) ++satisfied;
+    }
+    if ((wait_info->flags == 0u && satisfied == wait_info->semaphoreCount) ||
+        (wait_info->flags != 0u && satisfied != 0u)) {
+        sync_unlock();
+        return RIN_VK_SUCCESS;
+    }
+    sync_unlock();
+    return timeout == 0u ? RIN_VK_NOT_READY : RIN_VK_TIMEOUT;
 }
 
 RinVkResult RIN_VKAPI_CALL vkCreateCommandPool(
@@ -3401,6 +3565,9 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     RinVkSubmissionSlot* slot = NULL;
     RinVkSemaphore wait_semaphores[RIN_VK_MAX_SUBMIT_SEMAPHORES];
     RinVkSemaphore signal_semaphores[RIN_VK_MAX_SUBMIT_SEMAPHORES];
+    uint64_t wait_values[RIN_VK_MAX_SUBMIT_SEMAPHORES];
+    uint64_t signal_values[RIN_VK_MAX_SUBMIT_SEMAPHORES];
+    const RinVkTimelineSemaphoreSubmitInfo* timeline_submit = NULL;
     RinVkResult result;
     uint32_t resource_count = 0u;
     uint32_t index;
@@ -3432,7 +3599,7 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         goto done;
     }
     request = submits[0];
-    if (request.sType != RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO || request.pNext ||
+    if (request.sType != RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO ||
         request.waitSemaphoreCount > RIN_VK_MAX_SUBMIT_SEMAPHORES ||
         request.signalSemaphoreCount > RIN_VK_MAX_SUBMIT_SEMAPHORES ||
         (request.waitSemaphoreCount != 0u &&
@@ -3447,6 +3614,24 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
         goto done;
     }
+    if (request.pNext) {
+        const RinVkTimelineSemaphoreSubmitInfo* candidate =
+            (const RinVkTimelineSemaphoreSubmitInfo*)request.pNext;
+        if (candidate->sType !=
+                RIN_VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO ||
+            candidate->pNext ||
+            candidate->waitSemaphoreValueCount != request.waitSemaphoreCount ||
+            candidate->signalSemaphoreValueCount !=
+                request.signalSemaphoreCount ||
+            (candidate->waitSemaphoreValueCount != 0u &&
+             !candidate->pWaitSemaphoreValues) ||
+            (candidate->signalSemaphoreValueCount != 0u &&
+             !candidate->pSignalSemaphoreValues)) {
+            result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+            goto done;
+        }
+        timeline_submit = candidate;
+    }
     if (!sync_try_lock()) {
         result = RIN_VK_NOT_READY;
         goto done;
@@ -3454,6 +3639,8 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     sync_locked = 1;
     memset(wait_semaphores, 0, sizeof(wait_semaphores));
     memset(signal_semaphores, 0, sizeof(signal_semaphores));
+    memset(wait_values, 0, sizeof(wait_values));
+    memset(signal_values, 0, sizeof(signal_values));
     for (index = 0u; index < request.waitSemaphoreCount; ++index) {
         wait_semaphores[index] = (RinVkSemaphore)
             request.pWaitSemaphores[index];
@@ -3463,6 +3650,8 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
             result = RIN_VK_ERROR_INITIALIZATION_FAILED;
             goto done;
         }
+        if (timeline_submit)
+            wait_values[index] = timeline_submit->pWaitSemaphoreValues[index];
     }
     for (index = 0u; index < request.signalSemaphoreCount; ++index) {
         signal_semaphores[index] = (RinVkSemaphore)
@@ -3476,6 +3665,9 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
             result = RIN_VK_ERROR_INITIALIZATION_FAILED;
             goto done;
         }
+        if (timeline_submit)
+            signal_values[index] =
+                timeline_submit->pSignalSemaphoreValues[index];
     }
     if (fence != 0u) {
         RinVkFenceSlot* fence_value = fence_slot(device, (RinVkFence)fence);
@@ -3492,8 +3684,15 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     for (index = 0u; index < request.waitSemaphoreCount; ++index) {
         RinVkSemaphoreSlot* semaphore =
             semaphore_slot(device, wait_semaphores[index]);
-        if (__atomic_load_n(&semaphore->pending, __ATOMIC_ACQUIRE) != 0u ||
-            __atomic_load_n(&semaphore->signaled, __ATOMIC_ACQUIRE) == 0u) {
+        if ((semaphore->type == RIN_VK_SEMAPHORE_TYPE_TIMELINE &&
+             (!timeline_submit ||
+              __atomic_load_n(&semaphore->value, __ATOMIC_ACQUIRE) <
+                  wait_values[index])) ||
+            (semaphore->type == RIN_VK_SEMAPHORE_TYPE_BINARY &&
+             (timeline_submit ? wait_values[index] != 0u : 0) != 0u) ||
+            __atomic_load_n(&semaphore->pending, __ATOMIC_ACQUIRE) != 0u ||
+            (semaphore->type == RIN_VK_SEMAPHORE_TYPE_BINARY &&
+             __atomic_load_n(&semaphore->signaled, __ATOMIC_ACQUIRE) == 0u)) {
             result = RIN_VK_NOT_READY;
             goto done;
         }
@@ -3505,7 +3704,14 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
             result = RIN_VK_NOT_READY;
             goto done;
         }
-        if (__atomic_load_n(&semaphore->signaled, __ATOMIC_ACQUIRE) != 0u) {
+        if ((semaphore->type == RIN_VK_SEMAPHORE_TYPE_BINARY &&
+             (timeline_submit ? signal_values[index] != 0u : 0) != 0u) ||
+            (semaphore->type == RIN_VK_SEMAPHORE_TYPE_BINARY &&
+             __atomic_load_n(&semaphore->signaled, __ATOMIC_ACQUIRE) != 0u) ||
+            (semaphore->type == RIN_VK_SEMAPHORE_TYPE_TIMELINE &&
+             (!timeline_submit ||
+              signal_values[index] <=
+                  __atomic_load_n(&semaphore->value, __ATOMIC_ACQUIRE)))) {
             result = RIN_VK_ERROR_INITIALIZATION_FAILED;
             goto done;
         }
@@ -3597,10 +3803,13 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     slot->signal_semaphore_count = request.signalSemaphoreCount;
     memcpy(slot->signal_semaphores, signal_semaphores,
            sizeof(RinVkSemaphore) * request.signalSemaphoreCount);
+    memcpy(slot->signal_semaphore_values, signal_values,
+           sizeof(uint64_t) * request.signalSemaphoreCount);
     for (index = 0u; index < request.waitSemaphoreCount; ++index) {
         RinVkSemaphoreSlot* semaphore =
             semaphore_slot(device, wait_semaphores[index]);
-        __atomic_store_n(&semaphore->signaled, 0u, __ATOMIC_RELEASE);
+        if (semaphore->type == RIN_VK_SEMAPHORE_TYPE_BINARY)
+            __atomic_store_n(&semaphore->signaled, 0u, __ATOMIC_RELEASE);
     }
     if (fence != 0u) {
         RinVkFenceSlot* fence_value = fence_slot(device, (RinVkFence)fence);
@@ -3610,6 +3819,8 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         RinVkSemaphoreSlot* semaphore =
             semaphore_slot(device, signal_semaphores[index]);
         __atomic_store_n(&semaphore->pending, 1u, __ATOMIC_RELEASE);
+        if (semaphore->type == RIN_VK_SEMAPHORE_TYPE_TIMELINE)
+            semaphore->pending_value = signal_values[index];
     }
     __atomic_store_n(&slot->state, 1u, __ATOMIC_RELEASE);
     result = RIN_VK_SUCCESS;
@@ -4392,6 +4603,12 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
         return (RinVkVoidFunction)vkCreateSemaphore;
     if (name_equal(name, "vkDestroySemaphore"))
         return (RinVkVoidFunction)vkDestroySemaphore;
+    if (name_equal(name, "vkGetSemaphoreCounterValue"))
+        return (RinVkVoidFunction)vkGetSemaphoreCounterValue;
+    if (name_equal(name, "vkSignalSemaphore"))
+        return (RinVkVoidFunction)vkSignalSemaphore;
+    if (name_equal(name, "vkWaitSemaphores"))
+        return (RinVkVoidFunction)vkWaitSemaphores;
     if (name_equal(name, "vkQueueSubmit"))
         return (RinVkVoidFunction)vkQueueSubmit;
     if (name_equal(name, "vkCreateCommandPool"))
