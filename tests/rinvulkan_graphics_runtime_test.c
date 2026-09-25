@@ -266,6 +266,62 @@ static int storage_image_descriptor_profile(void)
     return 0;
 }
 
+static int combined_image_sampler_descriptor_profile(void)
+{
+    RinSpirvTranslationInfoV1 vertex = {0};
+    RinSpirvTranslationInfoV1 fragment = {0};
+    RinGpuVulkanDescriptorSetLayoutBindingV1 layout = {0};
+    RinGpuVulkanCombinedImageSamplerWriteV1 write = {0};
+    RinGpuVulkanDescriptorSetPlanV1 plan = {0};
+
+    vertex.struct_size = sizeof(vertex);
+    vertex.stage = RIN_SHADER_STAGE_VERTEX;
+    vertex.shader.abi_version = RIN_GPU_ABI_VERSION;
+    vertex.shader.struct_size = sizeof(vertex.shader);
+    vertex.shader.stage = RIN_SHADER_STAGE_VERTEX;
+    fragment.struct_size = sizeof(fragment);
+    fragment.stage = RIN_SHADER_STAGE_FRAGMENT;
+    fragment.shader.abi_version = RIN_GPU_ABI_VERSION;
+    fragment.shader.struct_size = sizeof(fragment.shader);
+    fragment.shader.stage = RIN_SHADER_STAGE_FRAGMENT;
+    fragment.shader.resource_count = 2u;
+    fragment.descriptor_count = 2u;
+    fragment.descriptors[0].set = 1u;
+    fragment.descriptors[0].binding = 5u;
+    fragment.descriptors[0].resource_index = 0u;
+    fragment.descriptors[0].resource_kind = RIN_SHADER_RESOURCE_SAMPLED_IMAGE;
+    fragment.descriptors[1].set = 1u;
+    fragment.descriptors[1].binding = 5u;
+    fragment.descriptors[1].resource_index = 1u;
+    fragment.descriptors[1].resource_kind = RIN_SHADER_RESOURCE_SAMPLER;
+    layout.set = 1u;
+    layout.binding = 5u;
+    layout.descriptor_type = RIN_GPU_VULKAN_DESCRIPTOR_COMBINED_IMAGE_SAMPLER;
+    layout.descriptor_count = 1u;
+    layout.stage_flags = 1u;
+    write.struct_size = sizeof(write);
+    write.version = 1u;
+    write.set = 1u;
+    write.binding = 5u;
+    write.image_resource_index = 0u;
+    write.sampler_resource_index = 1u;
+    write.image_resource = 17u;
+    write.sampler_resource = 23u;
+    CHECK(ringpu_vulkan_graphics_build_combined_descriptor_set(
+              &vertex, &fragment, &layout, 1u, &write, 1u, &plan) ==
+          RIN_GPU_VULKAN_GRAPHICS_OK);
+    CHECK(plan.binding_count == 2u);
+    CHECK(plan.bindings[0].kind == RIN_SHADER_RESOURCE_SAMPLED_IMAGE);
+    CHECK(plan.bindings[0].resource == 17u);
+    CHECK(plan.bindings[1].kind == RIN_SHADER_RESOURCE_SAMPLER);
+    CHECK(plan.bindings[1].resource == 23u);
+    write.sampler_resource = 0u;
+    CHECK(ringpu_vulkan_graphics_build_combined_descriptor_set(
+              &vertex, &fragment, &layout, 1u, &write, 1u, &plan) ==
+          RIN_GPU_VULKAN_GRAPHICS_INVALID_ARGUMENT);
+    return 0;
+}
+
 int main(void)
 {
     RinGpuRuntimeSoftwareSurfaceDescV1 surface;
@@ -318,6 +374,7 @@ int main(void)
               RIN_GPU_QUEUE_COPY | RIN_GPU_QUEUE_COMPUTE |
                   RIN_GPU_QUEUE_GRAPHICS) == RIN_GPU_OK);
     CHECK(storage_image_descriptor_profile() == 0);
+    CHECK(combined_image_sampler_descriptor_profile() == 0);
     make_constant_vertex(&vertex);
     make_constant_fragment(&fragment);
     memset(&plan, 0, sizeof(plan));

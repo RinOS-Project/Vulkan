@@ -82,9 +82,51 @@ static uint32_t descriptor_resource_kind(uint32_t descriptor_type) {
             return RIN_SHADER_RESOURCE_COMPARISON_SAMPLER;
         case RIN_GPU_VULKAN_DESCRIPTOR_STORAGE_IMAGE:
             return RIN_SHADER_RESOURCE_STORAGE_IMAGE;
+        case RIN_GPU_VULKAN_DESCRIPTOR_COMBINED_IMAGE_SAMPLER:
+            return RIN_SHADER_RESOURCE_NONE;
         default:
             return RIN_SHADER_RESOURCE_NONE;
     }
+}
+
+static const RinGpuVulkanCombinedImageSamplerWriteV1*
+find_combined_write(
+    const RinGpuVulkanCombinedImageSamplerWriteV1* writes,
+    uint32_t write_count, uint32_t set, uint32_t binding) {
+    uint32_t index;
+    if (!writes) return NULL;
+    for (index = 0u; index < write_count; ++index)
+        if (writes[index].set == set && writes[index].binding == binding)
+            return &writes[index];
+    return NULL;
+}
+
+static int combined_write_unique(
+    const RinGpuVulkanCombinedImageSamplerWriteV1* writes,
+    uint32_t write_count) {
+    uint32_t index;
+    if (write_count != 0u && !writes) return 0;
+    for (index = 0u; index < write_count; ++index) {
+        if (writes[index].struct_size != sizeof(writes[index]) ||
+            writes[index].version != 1u || writes[index].set == UINT32_MAX ||
+            writes[index].binding == UINT32_MAX ||
+            writes[index].array_element != 0u ||
+            writes[index].image_resource_index >= RIN_SHADER_MAX_RESOURCES ||
+            writes[index].sampler_resource_index >= RIN_SHADER_MAX_RESOURCES ||
+            writes[index].image_resource_index ==
+                writes[index].sampler_resource_index ||
+            writes[index].image_resource == 0u ||
+            writes[index].sampler_resource == 0u || writes[index].flags != 0u ||
+            writes[index].reserved != 0u || writes[index].mip_level != 0u ||
+            writes[index].array_layer != 0u || writes[index].reserved2 != 0u ||
+            writes[index].reserved3 != 0u)
+            return 0;
+        for (uint32_t prior = 0u; prior < index; ++prior)
+            if (writes[prior].set == writes[index].set &&
+                writes[prior].binding == writes[index].binding)
+                return 0;
+    }
+    return 1;
 }
 
 static int graphics_state_valid(const RinGpuVulkanGraphicsStateV1* state) {
@@ -482,6 +524,83 @@ int ringpu_vulkan_graphics_build_descriptor_set(
         binding->size_bytes = write->size_bytes;
         binding->mip_level = write->mip_level;
         binding->array_layer = write->array_layer;
+        plan.set_count = sets[index] + 1u > plan.set_count
+                             ? sets[index] + 1u
+                             : plan.set_count;
+    }
+    *plan_out = plan;
+    return RIN_GPU_VULKAN_GRAPHICS_OK;
+}
+
+int ringpu_vulkan_graphics_build_combined_descriptor_set(
+    const RinSpirvTranslationInfoV1* vertex,
+    const RinSpirvTranslationInfoV1* fragment,
+    const RinGpuVulkanDescriptorSetLayoutBindingV1* layouts,
+    uint32_t layout_count,
+    const RinGpuVulkanCombinedImageSamplerWriteV1* writes,
+    uint32_t write_count,
+    RinGpuVulkanDescriptorSetPlanV1* plan_out) {
+    uint32_t kinds[RIN_SHADER_MAX_RESOURCES];
+    uint32_t sets[RIN_SHADER_MAX_RESOURCES];
+    uint32_t bindings[RIN_SHADER_MAX_RESOURCES];
+    uint32_t resource_count = 0u;
+    uint32_t index;
+    RinGpuVulkanDescriptorSetPlanV1 plan;
+
+    if (!plan_out || (layout_count != 0u && !layouts) ||
+        (write_count != 0u && !writes) ||
+        layout_count > RIN_SHADER_MAX_RESOURCES ||
+        write_count > RIN_SHADER_MAX_RESOURCES ||
+        !translation_info_valid(vertex, RIN_SHADER_STAGE_VERTEX) ||
+        !translation_info_valid(fragment, RIN_SHADER_STAGE_FRAGMENT) ||
+        !combined_write_unique(writes, write_count))
+        return RIN_GPU_VULKAN_GRAPHICS_INVALID_ARGUMENT;
+    memset(kinds, 0, sizeof(kinds));
+    memset(sets, 0, sizeof(sets));
+    memset(bindings, 0, sizeof(bindings));
+    if (!descriptor_metadata_collect(kinds, sets, bindings, &resource_count,
+                                     vertex) ||
+        !descriptor_metadata_collect(kinds, sets, bindings, &resource_count,
+                                     fragment) || resource_count == 0u ||
+        write_count > resource_count / 2u ||
+        write_count * 2u != resource_count)
+        return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
+    for (index = 0u; index < layout_count; ++index) {
+        const RinGpuVulkanDescriptorSetLayoutBindingV1* layout =
+            &layouts[index];
+        if (layout->descriptor_type !=
+                RIN_GPU_VULKAN_DESCRIPTOR_COMBINED_IMAGE_SAMPLER ||
+            layout->set == UINT32_MAX || layout->binding == UINT32_MAX ||
+            layout->descriptor_count != 1u || layout->stage_flags == 0u ||
+            layout->reserved != 0u ||
+            find_layout(layouts, index, layout->set, layout->binding) != NULL)
+            return RIN_GPU_VULKAN_GRAPHICS_INVALID_ARGUMENT;
+    }
+    memset(&plan, 0, sizeof(plan));
+    plan.struct_size = sizeof(plan);
+    plan.version = RIN_GPU_VULKAN_GRAPHICS_PROFILE_VERSION;
+    plan.binding_count = resource_count;
+    for (index = 0u; index < resource_count; ++index) {
+        const RinGpuVulkanDescriptorSetLayoutBindingV1* layout =
+            find_layout(layouts, layout_count, sets[index], bindings[index]);
+        const RinGpuVulkanCombinedImageSamplerWriteV1* write =
+            find_combined_write(writes, write_count, sets[index], bindings[index]);
+        RinGpuGraphicsBindingV1* output = &plan.bindings[index];
+        int is_image = kinds[index] == RIN_SHADER_RESOURCE_SAMPLED_IMAGE;
+        int is_sampler = kinds[index] == RIN_SHADER_RESOURCE_SAMPLER;
+        if (!layout || !write || (is_image == 0 && is_sampler == 0) ||
+            (is_image && write->image_resource_index != index) ||
+            (is_sampler && write->sampler_resource_index != index))
+            return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
+        output->abi_version = RIN_GPU_ABI_VERSION;
+        output->struct_size = sizeof(*output);
+        output->binding = index;
+        output->kind = kinds[index];
+        output->access = is_image ? RIN_GPU_RESOURCE_READ : 0u;
+        output->resource = is_image ? write->image_resource
+                                    : write->sampler_resource;
+        if (output->resource == 0u)
+            return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
         plan.set_count = sets[index] + 1u > plan.set_count
                              ? sets[index] + 1u
                              : plan.set_count;

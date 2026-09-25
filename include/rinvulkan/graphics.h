@@ -91,7 +91,8 @@ enum {
     RIN_GPU_VULKAN_DESCRIPTOR_STORAGE_BUFFER = 4u,
     RIN_GPU_VULKAN_DESCRIPTOR_SAMPLED_DEPTH_IMAGE = 5u,
     RIN_GPU_VULKAN_DESCRIPTOR_COMPARISON_SAMPLER = 6u,
-    RIN_GPU_VULKAN_DESCRIPTOR_STORAGE_IMAGE = 7u
+    RIN_GPU_VULKAN_DESCRIPTOR_STORAGE_IMAGE = 7u,
+    RIN_GPU_VULKAN_DESCRIPTOR_COMBINED_IMAGE_SAMPLER = 8u
 };
 
 typedef struct RinGpuVulkanDescriptorWriteV1 {
@@ -109,6 +110,29 @@ typedef struct RinGpuVulkanDescriptorWriteV1 {
     uint32_t mip_level;
     uint32_t array_layer;
 } RinGpuVulkanDescriptorWriteV1;
+
+/* Additive combined-image-sampler write. A single logical Vulkan descriptor
+ * is lowered to the two explicit RinGPU resource bindings required by RSH1.
+ * The two resource indices are carried explicitly; no handle is packed into
+ * offset/size fields and array descriptors are intentionally bounded to one
+ * element until the full descriptor-array ABI is available. */
+typedef struct RinGpuVulkanCombinedImageSamplerWriteV1 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint32_t set;
+    uint32_t binding;
+    uint32_t array_element;
+    uint32_t image_resource_index;
+    uint32_t sampler_resource_index;
+    uint32_t flags;
+    uint32_t reserved;
+    RinGpuHandle image_resource;
+    RinGpuHandle sampler_resource;
+    uint32_t mip_level;
+    uint32_t array_layer;
+    uint32_t reserved2;
+    uint32_t reserved3;
+} RinGpuVulkanCombinedImageSamplerWriteV1;
 
 typedef struct RinGpuVulkanDescriptorSetPlanV1 {
     uint32_t struct_size;
@@ -152,6 +176,18 @@ int ringpu_vulkan_graphics_build_descriptor_set(
     const RinGpuVulkanDescriptorSetLayoutBindingV1* layouts,
     uint32_t layout_count,
     const RinGpuVulkanDescriptorWriteV1* writes,
+    uint32_t write_count,
+    RinGpuVulkanDescriptorSetPlanV1* plan_out);
+
+/* Lower the bounded combined-image-sampler profile. Reflection must contain
+ * exactly one sampled-image and one sampler resource at the same set/binding;
+ * the explicit pair write supplies both concrete RinGPU handles. */
+int ringpu_vulkan_graphics_build_combined_descriptor_set(
+    const RinSpirvTranslationInfoV1* vertex,
+    const RinSpirvTranslationInfoV1* fragment,
+    const RinGpuVulkanDescriptorSetLayoutBindingV1* layouts,
+    uint32_t layout_count,
+    const RinGpuVulkanCombinedImageSamplerWriteV1* writes,
     uint32_t write_count,
     RinGpuVulkanDescriptorSetPlanV1* plan_out);
 
