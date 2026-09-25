@@ -1506,6 +1506,8 @@ static uint32_t descriptor_runtime_type(uint32_t type) {
         return RIN_GPU_VULKAN_DESCRIPTOR_STORAGE_IMAGE;
     case RIN_VK_DESCRIPTOR_TYPE_SAMPLER:
         return RIN_GPU_VULKAN_DESCRIPTOR_SAMPLER;
+    case RIN_VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+        return RIN_GPU_VULKAN_DESCRIPTOR_COMBINED_IMAGE_SAMPLER;
     default:
         return 0u;
     }
@@ -5298,7 +5300,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateDescriptorPool(
         RinVkDevice device, const RinVkDescriptorPoolCreateInfo* info,
         const void* allocator, RinVkDescriptorPool* pool_out) {
     struct RinVkDevice_T* owner = device_slot(device);
-    uint32_t limits[8];
+    uint32_t limits[RIN_GPU_VULKAN_DESCRIPTOR_TYPE_COUNT];
     uint32_t index;
     uint32_t pool_index;
     RinGpuVulkanDescriptorHandleV1 pool = 0u;
@@ -5318,7 +5320,8 @@ RinVkResult RIN_VKAPI_CALL vkCreateDescriptorPool(
     for (index = 0u; index < info->poolSizeCount; ++index) {
         const RinVkDescriptorPoolSize* size = &info->pPoolSizes[index];
         uint32_t type = descriptor_runtime_type(size->type);
-        if (type == 0u || size->descriptorCount == 0u || type >= 8u ||
+        if (type == 0u || size->descriptorCount == 0u ||
+            type >= RIN_GPU_VULKAN_DESCRIPTOR_TYPE_COUNT ||
             limits[type] != 0u ||
             UINT32_MAX - limits[type] < size->descriptorCount)
             return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
@@ -5326,7 +5329,8 @@ RinVkResult RIN_VKAPI_CALL vkCreateDescriptorPool(
     }
     (void)pool_index;
     result = rin_gpu_vulkan_descriptor_pool_create_v2(
-        &owner->descriptor_runtime, info->maxSets, limits, 8u, &pool);
+        &owner->descriptor_runtime, info->maxSets, limits,
+        RIN_GPU_VULKAN_DESCRIPTOR_TYPE_COUNT, &pool);
     if (result != RIN_GPU_VULKAN_GRAPHICS_OK)
         return map_descriptor_result(result);
     *pool_out = (RinVkDescriptorPool)pool;
@@ -5422,6 +5426,7 @@ void RIN_VKAPI_CALL vkUpdateDescriptorSets(
                       type == 0u;
         if (source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_SAMPLER ||
             source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
+            source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
             source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
             invalid = invalid || !source->pImageInfo;
         else if (source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
@@ -5434,6 +5439,52 @@ void RIN_VKAPI_CALL vkUpdateDescriptorSets(
         if (invalid) {
             __atomic_store_n(&owner->descriptor_validation_error, 1u,
                              __ATOMIC_RELEASE);
+            continue;
+        }
+        if (source->descriptorType ==
+            RIN_VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+            RinGpuVulkanCombinedImageSamplerWriteV1 combined[
+                RIN_SHADER_MAX_RESOURCES];
+            memset(combined, 0, sizeof(combined));
+            if (source->dstBinding >= RIN_SHADER_MAX_RESOURCES / 2u) {
+                __atomic_store_n(&owner->descriptor_validation_error, 1u,
+                                 __ATOMIC_RELEASE);
+                continue;
+            }
+            for (item = 0u; item < source->descriptorCount; ++item) {
+                const RinVkDescriptorImageInfo* image_info =
+                    &source->pImageInfo[item];
+                RinVkImageViewSlot* view =
+                    image_view_slot(owner, image_info->imageView);
+                if (!view || !sampler_slot(owner, image_info->sampler) ||
+                    (image_info->imageLayout != RIN_VK_IMAGE_LAYOUT_GENERAL &&
+                     image_info->imageLayout != 5u)) {
+                    invalid = 1;
+                    break;
+                }
+                combined[item].struct_size = sizeof(combined[item]);
+                combined[item].version = 1u;
+                combined[item].set = 0u;
+                combined[item].binding = source->dstBinding;
+                combined[item].array_element = source->dstArrayElement + item;
+                /* The public ICD's bounded profile assigns two stable RSH1
+                 * slots to each logical binding. */
+                combined[item].image_resource_index = source->dstBinding * 2u;
+                combined[item].sampler_resource_index = source->dstBinding * 2u + 1u;
+                combined[item].image_resource = (RinGpuHandle)resource_handle(
+                    RIN_VK_IMAGE_TAG,
+                    (uint32_t)(view->image - &g_images[0]),
+                    view->image->generation);
+                combined[item].sampler_resource =
+                    (RinGpuHandle)image_info->sampler;
+            }
+            if (invalid || rin_gpu_vulkan_descriptor_set_update_combined(
+                                &owner->descriptor_runtime,
+                                (RinGpuVulkanDescriptorHandleV1)source->dstSet,
+                                combined, source->descriptorCount) !=
+                            RIN_GPU_VULKAN_GRAPHICS_OK)
+                __atomic_store_n(&owner->descriptor_validation_error, 1u,
+                                 __ATOMIC_RELEASE);
             continue;
         }
         memset(converted, 0, sizeof(converted));

@@ -11,6 +11,7 @@
 #define RIN_GPU_VULKAN_DESCRIPTOR_MAX_POOLS 32u
 #define RIN_GPU_VULKAN_DESCRIPTOR_MAX_SETS 128u
 #define RIN_GPU_VULKAN_DESCRIPTOR_BINDING_DYNAMIC UINT32_C(0x00000001)
+#define RIN_GPU_VULKAN_DESCRIPTOR_TYPE_COUNT 9u
 
 typedef uint64_t RinGpuVulkanDescriptorHandleV1;
 
@@ -37,8 +38,8 @@ typedef struct RinGpuVulkanDescriptorRuntimeV1 {
         uint32_t live_sets;
         uint32_t has_limits;
         uint32_t reserved;
-        uint32_t descriptor_limits[8];
-        uint32_t descriptor_used[8];
+        uint32_t descriptor_limits[RIN_GPU_VULKAN_DESCRIPTOR_TYPE_COUNT];
+        uint32_t descriptor_used[RIN_GPU_VULKAN_DESCRIPTOR_TYPE_COUNT];
     } pools[RIN_GPU_VULKAN_DESCRIPTOR_MAX_POOLS];
     struct {
         uint32_t state;
@@ -51,6 +52,10 @@ typedef struct RinGpuVulkanDescriptorRuntimeV1 {
         RinGpuVulkanDescriptorHandleV1 layout;
         RinGpuVulkanDescriptorWriteV1
             writes[RIN_SHADER_MAX_RESOURCES];
+        uint32_t combined_write_count;
+        uint32_t reserved1;
+        RinGpuVulkanCombinedImageSamplerWriteV1
+            combined_writes[RIN_SHADER_MAX_RESOURCES];
     } sets[RIN_GPU_VULKAN_DESCRIPTOR_MAX_SETS];
 } RinGpuVulkanDescriptorRuntimeV1;
 
@@ -100,6 +105,11 @@ int rin_gpu_vulkan_descriptor_set_update(
     RinGpuVulkanDescriptorRuntimeV1* runtime,
     RinGpuVulkanDescriptorHandleV1 set,
     const RinGpuVulkanDescriptorWriteV1* writes, uint32_t write_count);
+int rin_gpu_vulkan_descriptor_set_update_combined(
+    RinGpuVulkanDescriptorRuntimeV1* runtime,
+    RinGpuVulkanDescriptorHandleV1 set,
+    const RinGpuVulkanCombinedImageSamplerWriteV1* writes,
+    uint32_t write_count);
 int rin_gpu_vulkan_descriptor_set_validate_dynamic_offsets(
     RinGpuVulkanDescriptorRuntimeV1* runtime,
     RinGpuVulkanDescriptorHandleV1 set, const uint32_t* offsets,
@@ -108,6 +118,12 @@ int rin_gpu_vulkan_descriptor_set_dynamic_offset_count(
     const RinGpuVulkanDescriptorRuntimeV1* runtime,
     RinGpuVulkanDescriptorHandleV1 set, uint32_t* count_out);
 int rin_gpu_vulkan_descriptor_set_build_plan(
+    RinGpuVulkanDescriptorRuntimeV1* runtime,
+    RinGpuVulkanDescriptorHandleV1 set,
+    const RinSpirvTranslationInfoV1* vertex,
+    const RinSpirvTranslationInfoV1* fragment,
+    RinGpuVulkanDescriptorSetPlanV1* plan_out);
+int rin_gpu_vulkan_descriptor_set_build_combined_plan(
     RinGpuVulkanDescriptorRuntimeV1* runtime,
     RinGpuVulkanDescriptorHandleV1 set,
     const RinSpirvTranslationInfoV1* vertex,

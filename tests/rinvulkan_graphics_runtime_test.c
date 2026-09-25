@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 
 #include <rinvulkan/graphics_runtime.h>
+#include <rinvulkan/descriptor_runtime.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -322,6 +323,86 @@ static int combined_image_sampler_descriptor_profile(void)
     return 0;
 }
 
+static int combined_image_sampler_runtime_profile(void)
+{
+    static RinGpuVulkanDescriptorRuntimeV1 runtime;
+    RinGpuVulkanDescriptorSetLayoutBindingV1 layout_binding = {0};
+    RinGpuVulkanCombinedImageSamplerWriteV1 write = {0};
+    RinGpuVulkanDescriptorHandleV1 layout = 0u;
+    RinGpuVulkanDescriptorHandleV1 pool = 0u;
+    RinGpuVulkanDescriptorHandleV1 set = 0u;
+    RinGpuVulkanDescriptorSetPlanV1 plan = {0};
+    RinSpirvTranslationInfoV1 vertex = {0};
+    RinSpirvTranslationInfoV1 fragment = {0};
+    int result;
+
+    CHECK(rin_gpu_vulkan_descriptor_runtime_init(
+              &runtime, UINT64_C(0x434f4d42494e4544)) ==
+          RIN_GPU_VULKAN_GRAPHICS_OK);
+    layout_binding.set = 0u;
+    layout_binding.binding = 0u;
+    layout_binding.descriptor_type =
+        RIN_GPU_VULKAN_DESCRIPTOR_COMBINED_IMAGE_SAMPLER;
+    layout_binding.descriptor_count = 1u;
+    layout_binding.stage_flags = 1u;
+    CHECK(rin_gpu_vulkan_descriptor_layout_create(
+              &runtime, &layout_binding, 1u, &layout) ==
+          RIN_GPU_VULKAN_GRAPHICS_OK);
+    CHECK(rin_gpu_vulkan_descriptor_pool_create(&runtime, 1u, &pool) ==
+          RIN_GPU_VULKAN_GRAPHICS_OK);
+    CHECK(rin_gpu_vulkan_descriptor_set_allocate(&runtime, pool, layout, &set) ==
+          RIN_GPU_VULKAN_GRAPHICS_OK);
+    write.struct_size = sizeof(write);
+    write.version = 1u;
+    write.set = 0u;
+    write.binding = 0u;
+    write.image_resource_index = 0u;
+    write.sampler_resource_index = 1u;
+    write.image_resource = 31u;
+    write.sampler_resource = 37u;
+    CHECK(rin_gpu_vulkan_descriptor_set_update_combined(
+              &runtime, set, &write, 1u) == RIN_GPU_VULKAN_GRAPHICS_OK);
+    vertex.struct_size = sizeof(vertex);
+    vertex.stage = RIN_SHADER_STAGE_VERTEX;
+    vertex.shader.abi_version = RIN_GPU_ABI_VERSION;
+    vertex.shader.struct_size = sizeof(vertex.shader);
+    vertex.shader.stage = RIN_SHADER_STAGE_VERTEX;
+    fragment.struct_size = sizeof(fragment);
+    fragment.stage = RIN_SHADER_STAGE_FRAGMENT;
+    fragment.shader.abi_version = RIN_GPU_ABI_VERSION;
+    fragment.shader.struct_size = sizeof(fragment.shader);
+    fragment.shader.stage = RIN_SHADER_STAGE_FRAGMENT;
+    fragment.shader.resource_count = 2u;
+    fragment.descriptor_count = 2u;
+    fragment.descriptors[0].set = 0u;
+    fragment.descriptors[0].binding = 0u;
+    fragment.descriptors[0].resource_index = 0u;
+    fragment.descriptors[0].resource_kind = RIN_SHADER_RESOURCE_SAMPLED_IMAGE;
+    fragment.descriptors[1].set = 0u;
+    fragment.descriptors[1].binding = 0u;
+    fragment.descriptors[1].resource_index = 1u;
+    fragment.descriptors[1].resource_kind = RIN_SHADER_RESOURCE_SAMPLER;
+    CHECK(rin_gpu_vulkan_descriptor_set_build_combined_plan(
+              &runtime, set, &vertex, &fragment, &plan) ==
+          RIN_GPU_VULKAN_GRAPHICS_OK);
+    CHECK(plan.binding_count == 2u);
+    CHECK(plan.bindings[0].resource == 31u);
+    CHECK(plan.bindings[1].resource == 37u);
+    write.sampler_resource = 0u;
+    result = rin_gpu_vulkan_descriptor_set_update_combined(
+        &runtime, set, &write, 1u);
+    CHECK(result == RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE);
+    CHECK(rin_gpu_vulkan_descriptor_set_free(&runtime, set) ==
+          RIN_GPU_VULKAN_GRAPHICS_OK);
+    CHECK(rin_gpu_vulkan_descriptor_pool_destroy(&runtime, pool) ==
+          RIN_GPU_VULKAN_GRAPHICS_OK);
+    CHECK(rin_gpu_vulkan_descriptor_layout_destroy(&runtime, layout) ==
+          RIN_GPU_VULKAN_GRAPHICS_OK);
+    CHECK(rin_gpu_vulkan_descriptor_runtime_shutdown(&runtime) ==
+          RIN_GPU_VULKAN_GRAPHICS_OK);
+    return 0;
+}
+
 int main(void)
 {
     RinGpuRuntimeSoftwareSurfaceDescV1 surface;
@@ -375,6 +456,7 @@ int main(void)
                   RIN_GPU_QUEUE_GRAPHICS) == RIN_GPU_OK);
     CHECK(storage_image_descriptor_profile() == 0);
     CHECK(combined_image_sampler_descriptor_profile() == 0);
+    CHECK(combined_image_sampler_runtime_profile() == 0);
     make_constant_vertex(&vertex);
     make_constant_fragment(&fragment);
     memset(&plan, 0, sizeof(plan));
