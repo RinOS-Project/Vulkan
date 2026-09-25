@@ -90,6 +90,9 @@ static void reset_recording(RinGpuVulkanCommandBufferV1* buffer) {
     memset(buffer->descriptor_sets, 0, sizeof(buffer->descriptor_sets));
     memset(buffer->descriptor_dynamic_offsets, 0,
            sizeof(buffer->descriptor_dynamic_offsets));
+    buffer->barrier_count = 0u;
+    buffer->reserved_barrier = 0u;
+    memset(buffer->barriers, 0, sizeof(buffer->barriers));
 }
 
 static int pool_has_in_flight(const RinGpuVulkanCommandRuntimeV1* runtime,
@@ -543,6 +546,31 @@ int rin_gpu_vulkan_command_buffer_record_descriptor_bind(
     if (dynamic_offset_count != 0u)
         memcpy(buffer->descriptor_dynamic_offsets, dynamic_offsets,
                sizeof(*dynamic_offsets) * dynamic_offset_count);
+    return RIN_GPU_VULKAN_COMMAND_OK;
+}
+
+int rin_gpu_vulkan_command_buffer_record_barrier(
+        RinGpuVulkanCommandRuntimeV1* runtime,
+        RinGpuVulkanCommandBufferV1* handle, uint64_t src_stage_mask,
+        uint64_t src_access_mask, uint64_t dst_stage_mask,
+        uint64_t dst_access_mask) {
+    RinGpuVulkanCommandBufferV1* buffer = buffer_slot(runtime, handle);
+    if (!buffer || buffer->lifecycle != RIN_GPU_VULKAN_COMMAND_BUFFER_RECORDING ||
+        src_stage_mask == 0u ||
+        (src_stage_mask & ~RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS) != 0u ||
+        src_access_mask == 0u ||
+        (src_access_mask & ~RIN_GPU_VULKAN_BARRIER_ACCESS_ALL) != 0u ||
+        dst_stage_mask == 0u ||
+        (dst_stage_mask & ~RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS) != 0u ||
+        dst_access_mask == 0u ||
+        (dst_access_mask & ~RIN_GPU_VULKAN_BARRIER_ACCESS_ALL) != 0u ||
+        buffer->barrier_count >= RIN_GPU_VULKAN_COMMAND_MAX_BARRIERS)
+        return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
+    buffer->barriers[buffer->barrier_count].src_stage_mask = src_stage_mask;
+    buffer->barriers[buffer->barrier_count].src_access_mask = src_access_mask;
+    buffer->barriers[buffer->barrier_count].dst_stage_mask = dst_stage_mask;
+    buffer->barriers[buffer->barrier_count].dst_access_mask = dst_access_mask;
+    ++buffer->barrier_count;
     return RIN_GPU_VULKAN_COMMAND_OK;
 }
 

@@ -14,6 +14,7 @@
 #define RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS 8u
 #define RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS 4u
 #define RIN_GPU_VULKAN_COMMAND_MAX_DYNAMIC_OFFSETS 32u
+#define RIN_GPU_VULKAN_COMMAND_MAX_BARRIERS 8u
 
 #define RIN_GPU_VULKAN_COMMAND_POOL_TRANSIENT 0x00000001u
 #define RIN_GPU_VULKAN_COMMAND_POOL_RESET_BUFFER 0x00000002u
@@ -22,6 +23,21 @@
 #define RIN_GPU_VULKAN_COMMAND_USAGE_ONE_TIME 0x00000001u
 #define RIN_GPU_VULKAN_COMMAND_USAGE_SIMULTANEOUS 0x00000004u
 #define RIN_GPU_VULKAN_COMMAND_USAGE_FLAGS_KNOWN 0x00000005u
+
+#define RIN_GPU_VULKAN_BARRIER_STAGE_TRANSFER UINT64_C(0x0000000000000001)
+#define RIN_GPU_VULKAN_BARRIER_STAGE_HOST UINT64_C(0x0000000000000002)
+#define RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS \
+    (RIN_GPU_VULKAN_BARRIER_STAGE_TRANSFER | \
+     RIN_GPU_VULKAN_BARRIER_STAGE_HOST)
+#define RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_READ UINT64_C(0x0000000000000001)
+#define RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_WRITE UINT64_C(0x0000000000000002)
+#define RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_READ UINT64_C(0x0000000000000004)
+#define RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_WRITE UINT64_C(0x0000000000000008)
+#define RIN_GPU_VULKAN_BARRIER_ACCESS_ALL \
+    (RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_READ | \
+     RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_WRITE | \
+     RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_READ | \
+     RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_WRITE)
 
 #define RIN_GPU_VULKAN_COMMAND_RESET_RELEASE_RESOURCES 0x00000001u
 
@@ -133,6 +149,14 @@ struct RinGpuVulkanCommandBufferV1 {
     uint32_t descriptor_dynamic_offset_count;
     uint64_t descriptor_sets[RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS];
     uint32_t descriptor_dynamic_offsets[RIN_GPU_VULKAN_COMMAND_MAX_DYNAMIC_OFFSETS];
+    uint32_t barrier_count;
+    uint32_t reserved_barrier;
+    struct {
+        uint64_t src_stage_mask;
+        uint64_t src_access_mask;
+        uint64_t dst_stage_mask;
+        uint64_t dst_access_mask;
+    } barriers[RIN_GPU_VULKAN_COMMAND_MAX_BARRIERS];
 };
 
 typedef struct RinGpuVulkanCommandRuntimeV1 {
@@ -186,6 +210,11 @@ int rin_gpu_vulkan_command_buffer_record_descriptor_bind(
     RinGpuVulkanCommandBufferV1* buffer, uint32_t first_set,
     const uint64_t* descriptor_sets, uint32_t descriptor_set_count,
     const uint32_t* dynamic_offsets, uint32_t dynamic_offset_count);
+int rin_gpu_vulkan_command_buffer_record_barrier(
+    RinGpuVulkanCommandRuntimeV1* runtime,
+    RinGpuVulkanCommandBufferV1* buffer, uint64_t src_stage_mask,
+    uint64_t src_access_mask, uint64_t dst_stage_mask,
+    uint64_t dst_access_mask);
 void rin_gpu_vulkan_command_buffer_record_failure(
     RinGpuVulkanCommandRuntimeV1* runtime,
     RinGpuVulkanCommandBufferV1* buffer);

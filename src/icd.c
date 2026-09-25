@@ -44,6 +44,7 @@ typedef struct RinVkBaseFeatureStructure {
 typedef struct RinVkFeatureChain {
     RinVkPhysicalDeviceVulkan12Features* vulkan12;
     RinVkPhysicalDeviceVulkan13Features* vulkan13;
+    RinVkPhysicalDeviceSynchronization2Features* synchronization2;
 } RinVkFeatureChain;
 
 typedef struct RinVkPropertyChain {
@@ -94,6 +95,7 @@ struct RinVkDevice_T {
     RinGpuVulkanDescriptorRuntimeV1 descriptor_runtime;
     volatile uint32_t descriptor_validation_error;
     uint32_t timeline_enabled;
+    uint32_t synchronization2_enabled;
     uint32_t queue_count;
     uint32_t reserved_queue;
     struct RinVkQueue_T queues[RIN_VULKAN_PRODUCT_MAX_QUEUES];
@@ -266,6 +268,11 @@ static int collect_feature_chain(void* first, int allow_unknown,
             if (chain->vulkan13) return 0;
             chain->vulkan13 =
                 (RinVkPhysicalDeviceVulkan13Features*)node;
+        } else if (node->sType ==
+                   RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES) {
+            if (chain->synchronization2) return 0;
+            chain->synchronization2 =
+                (RinVkPhysicalDeviceSynchronization2Features*)node;
         } else if (!allow_unknown) {
             return 0;
         }
@@ -415,6 +422,21 @@ static void publish_legacy_features(
         features->samplerAnisotropy = 1u;
 }
 
+static int requested_synchronization2_feature(
+        const RinVkPhysicalDeviceSynchronization2Features* features,
+        uint64_t* required) {
+    RinVkPhysicalDeviceSynchronization2Features snapshot;
+    if (!features) return 1;
+    snapshot = *features;
+    if (snapshot.sType !=
+            RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES ||
+        snapshot.synchronization2 > 1u)
+        return 0;
+    if (snapshot.synchronization2 != 0u)
+        *required |= RIN_GPU_VK_FEATURE_SYNCHRONIZATION_2;
+    return 1;
+}
+
 static int name_equal(const char* actual, const char* expected) {
     size_t index;
     if (!actual || !expected) return 0;
@@ -446,27 +468,48 @@ static int api_version_supported(uint32_t version) {
            version <= RIN_GPU_VK_ICD_API_VERSION && minor <= 0u;
 }
 
-static int timeline_extension_enabled(const RinVkDeviceCreateInfo* info) {
+static int extension_enabled(const RinVkDeviceCreateInfo* info,
+                             const char* extension_name) {
     uint32_t index;
-    if (!info || info->enabledExtensionCount == 0u) return 0;
+    if (!info || !extension_name || info->enabledExtensionCount == 0u)
+        return 0;
     if (!info->ppEnabledExtensionNames) return 0;
     for (index = 0u; index < info->enabledExtensionCount; ++index) {
         if (!info->ppEnabledExtensionNames[index]) return 0;
         if (name_equal(info->ppEnabledExtensionNames[index],
-                       RIN_VK_KHR_TIMELINE_SEMAPHORE_EXTENSION))
+                       extension_name))
             return 1;
     }
     return 0;
 }
 
+static int timeline_extension_enabled(const RinVkDeviceCreateInfo* info) {
+    return extension_enabled(info, RIN_VK_KHR_TIMELINE_SEMAPHORE_EXTENSION);
+}
+
+static int synchronization2_extension_enabled(
+        const RinVkDeviceCreateInfo* info) {
+    return extension_enabled(info, RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION);
+}
+
 static int device_extensions_valid(const RinVkDeviceCreateInfo* info) {
     uint32_t index;
-    if (!info || info->enabledExtensionCount > 1u) return 0;
+    uint32_t prior;
+    if (!info || info->enabledExtensionCount > 2u) return 0;
     if (info->enabledExtensionCount == 0u)
         return info->ppEnabledExtensionNames == NULL;
-    if (!timeline_extension_enabled(info)) return 0;
-    for (index = 0u; index < info->enabledExtensionCount; ++index)
-        if (!info->ppEnabledExtensionNames[index]) return 0;
+    if (!info->ppEnabledExtensionNames) return 0;
+    for (index = 0u; index < info->enabledExtensionCount; ++index) {
+        const char* name = info->ppEnabledExtensionNames[index];
+        if (!name ||
+            (!name_equal(name, RIN_VK_KHR_TIMELINE_SEMAPHORE_EXTENSION) &&
+             !name_equal(name, RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION)))
+            return 0;
+        for (prior = 0u; prior < index; ++prior) {
+            if (name_equal(name, info->ppEnabledExtensionNames[prior]))
+                return 0;
+        }
+    }
     return 1;
 }
 
@@ -1852,8 +1895,11 @@ RinVkResult RIN_VKAPI_CALL vkEnumerateInstanceExtensionProperties(
 RinVkResult RIN_VKAPI_CALL vkEnumerateDeviceExtensionProperties(
         RinVkPhysicalDevice physical_device, const char* layer_name,
         uint32_t* property_count, RinVkExtensionProperties* properties) {
-    RinVkExtensionProperties extension;
+    RinVkExtensionProperties extensions[2];
     uint32_t capacity;
+    uint32_t available = 2u;
+    uint32_t count;
+    uint32_t index;
     if (!property_count) return RIN_VK_ERROR_INITIALIZATION_FAILED;
     if (!physical_slot(physical_device, NULL))
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
@@ -1862,17 +1908,24 @@ RinVkResult RIN_VKAPI_CALL vkEnumerateDeviceExtensionProperties(
         return RIN_VK_ERROR_LAYER_NOT_PRESENT;
     }
     capacity = *property_count;
-    *property_count = properties ? (capacity == 0u ? 0u : 1u) : 1u;
-    if (!properties || capacity == 0u) {
-        return properties && capacity == 0u ? RIN_VK_INCOMPLETE
-                                            : RIN_VK_SUCCESS;
+    if (!properties) {
+        *property_count = available;
+        return RIN_VK_SUCCESS;
     }
-    memset(&extension, 0, sizeof(extension));
-    memcpy(extension.extensionName, RIN_VK_KHR_TIMELINE_SEMAPHORE_EXTENSION,
+    count = capacity < available ? capacity : available;
+    *property_count = count;
+    if (count == 0u) return RIN_VK_INCOMPLETE;
+    memset(extensions, 0, sizeof(extensions));
+    memcpy(extensions[0].extensionName,
+           RIN_VK_KHR_TIMELINE_SEMAPHORE_EXTENSION,
            sizeof(RIN_VK_KHR_TIMELINE_SEMAPHORE_EXTENSION));
-    extension.specVersion = 2u;
-    properties[0] = extension;
-    return RIN_VK_SUCCESS;
+    extensions[0].specVersion = 2u;
+    memcpy(extensions[1].extensionName,
+           RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION,
+           sizeof(RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION));
+    extensions[1].specVersion = 1u;
+    for (index = 0u; index < count; ++index) properties[index] = extensions[index];
+    return count < available ? RIN_VK_INCOMPLETE : RIN_VK_SUCCESS;
 }
 
 RinVkResult RIN_VKAPI_CALL vkEnumerateInstanceLayerProperties(
@@ -2095,6 +2148,7 @@ void RIN_VKAPI_CALL vkGetPhysicalDeviceFeatures2(
                    offsetof(RinVkPhysicalDeviceVulkan13Features,
                             robustImageAccess));
     }
+    if (chain.synchronization2) chain.synchronization2->synchronization2 = 0u;
     if (get_physical_profile(physical_device, &profile) !=
         RIN_GPU_VULKAN_OK)
         return;
@@ -2107,9 +2161,16 @@ void RIN_VKAPI_CALL vkGetPhysicalDeviceFeatures2(
         chain.vulkan12->bufferDeviceAddress = 0u;
     }
     if (chain.vulkan13) {
-        chain.vulkan13->synchronization2 = 0u;
+        chain.vulkan13->synchronization2 =
+            (profile.features & RIN_GPU_VK_ICD_FEATURES &
+             RIN_GPU_VK_FEATURE_SYNCHRONIZATION_2) != 0u;
         chain.vulkan13->dynamicRendering = 0u;
         chain.vulkan13->maintenance4 = 0u;
+    }
+    if (chain.synchronization2) {
+        chain.synchronization2->synchronization2 =
+            (profile.features & RIN_GPU_VK_ICD_FEATURES &
+             RIN_GPU_VK_FEATURE_SYNCHRONIZATION_2) != 0u;
     }
 }
 
@@ -2283,10 +2344,15 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
         !requested_vulkan12_features(feature_chain.vulkan12,
                                      &chain_features) ||
         !requested_vulkan13_features(feature_chain.vulkan13,
-                                     &chain_features))
+                                     &chain_features) ||
+        !requested_synchronization2_feature(feature_chain.synchronization2,
+                                            &chain_features))
         return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
     if ((chain_features & RIN_GPU_VK_FEATURE_TIMELINE_SEMAPHORE) != 0u &&
         !timeline_extension_enabled(create_info))
+        return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
+    if ((chain_features & RIN_GPU_VK_FEATURE_SYNCHRONIZATION_2) != 0u &&
+        !synchronization2_extension_enabled(create_info))
         return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
     if (create_info->flags != 0u)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
@@ -2425,6 +2491,8 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
     slot->reserved = 0u;
     slot->timeline_enabled =
         (chain_features & RIN_GPU_VK_FEATURE_TIMELINE_SEMAPHORE) != 0u;
+    slot->synchronization2_enabled =
+        (chain_features & RIN_GPU_VK_FEATURE_SYNCHRONIZATION_2) != 0u;
     slot->physical_profile = profile;
     if (rin_gpu_vulkan_descriptor_runtime_init(
             &slot->descriptor_runtime,
@@ -2507,6 +2575,7 @@ void RIN_VKAPI_CALL vkDestroyDevice(RinVkDevice device,
     __atomic_store_n(&slot->descriptor_validation_error, 0u,
                      __ATOMIC_RELEASE);
     slot->timeline_enabled = 0u;
+    slot->synchronization2_enabled = 0u;
     memset(&slot->plan, 0, sizeof(slot->plan));
     memset(&slot->physical_profile, 0, sizeof(slot->physical_profile));
     memset(slot->queues, 0, sizeof(slot->queues));
@@ -3165,6 +3234,102 @@ static void record_transfer_ops(RinGpuVulkanCommandBufferV1* core,
         rin_gpu_vulkan_command_buffer_record_transfer_ops(
             &g_command_runtime, core, operations, operation_count) !=
             RIN_GPU_VULKAN_COMMAND_OK)
+        rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime, core);
+}
+
+static int synchronization2_stage_mask(
+        uint64_t public_mask, uint64_t* runtime_mask_out) {
+    uint64_t known = RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT |
+                     RIN_VK_PIPELINE_STAGE_2_HOST_BIT |
+                     RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    uint64_t runtime_mask = 0u;
+    if (!runtime_mask_out || public_mask == 0u ||
+        (public_mask & ~known) != 0u)
+        return 0;
+    if ((public_mask & RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) != 0u)
+        runtime_mask = RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS;
+    else {
+        if ((public_mask & RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT) != 0u)
+            runtime_mask |= RIN_GPU_VULKAN_BARRIER_STAGE_TRANSFER;
+        if ((public_mask & RIN_VK_PIPELINE_STAGE_2_HOST_BIT) != 0u)
+            runtime_mask |= RIN_GPU_VULKAN_BARRIER_STAGE_HOST;
+    }
+    *runtime_mask_out = runtime_mask;
+    return runtime_mask != 0u;
+}
+
+static int synchronization2_access_mask(
+        uint64_t public_mask, uint64_t* runtime_mask_out) {
+    uint64_t known = RIN_VK_ACCESS_2_TRANSFER_READ_BIT |
+                     RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT |
+                     RIN_VK_ACCESS_2_HOST_READ_BIT |
+                     RIN_VK_ACCESS_2_HOST_WRITE_BIT;
+    uint64_t runtime_mask = 0u;
+    if (!runtime_mask_out || public_mask == 0u ||
+        (public_mask & ~known) != 0u)
+        return 0;
+    if ((public_mask & RIN_VK_ACCESS_2_TRANSFER_READ_BIT) != 0u)
+        runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_READ;
+    if ((public_mask & RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT) != 0u)
+        runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_WRITE;
+    if ((public_mask & RIN_VK_ACCESS_2_HOST_READ_BIT) != 0u)
+        runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_READ;
+    if ((public_mask & RIN_VK_ACCESS_2_HOST_WRITE_BIT) != 0u)
+        runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_WRITE;
+    *runtime_mask_out = runtime_mask;
+    return runtime_mask != 0u;
+}
+
+void RIN_VKAPI_CALL vkCmdPipelineBarrier2(
+        RinVkCommandBuffer command_buffer,
+        const RinVkDependencyInfo* dependency_info) {
+    RinGpuVulkanCommandBufferV1* core =
+        (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
+    struct RinVkDevice_T* owner;
+    uint32_t index;
+    int valid = 1;
+
+    if (!dependency_info ||
+        !command_owner_device(core, &owner) ||
+        !owner->synchronization2_enabled ||
+        dependency_info->sType != RIN_VK_STRUCTURE_TYPE_DEPENDENCY_INFO ||
+        dependency_info->pNext || dependency_info->dependencyFlags != 0u ||
+        dependency_info->memoryBarrierCount == 0u ||
+        dependency_info->memoryBarrierCount >
+            RIN_GPU_VULKAN_COMMAND_MAX_BARRIERS ||
+        !dependency_info->pMemoryBarriers ||
+        dependency_info->bufferMemoryBarrierCount != 0u ||
+        dependency_info->pBufferMemoryBarriers ||
+        dependency_info->imageMemoryBarrierCount != 0u ||
+        dependency_info->pImageMemoryBarriers) {
+        valid = 0;
+        goto done;
+    }
+    for (index = 0u; index < dependency_info->memoryBarrierCount; ++index) {
+        const RinVkMemoryBarrier2* barrier =
+            &dependency_info->pMemoryBarriers[index];
+        uint64_t src_stage;
+        uint64_t src_access;
+        uint64_t dst_stage;
+        uint64_t dst_access;
+        if (barrier->sType != RIN_VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 ||
+            barrier->pNext ||
+            !synchronization2_stage_mask(barrier->srcStageMask, &src_stage) ||
+            !synchronization2_access_mask(barrier->srcAccessMask,
+                                          &src_access) ||
+            !synchronization2_stage_mask(barrier->dstStageMask, &dst_stage) ||
+            !synchronization2_access_mask(barrier->dstAccessMask,
+                                          &dst_access) ||
+            rin_gpu_vulkan_command_buffer_record_barrier(
+                &g_command_runtime, core, src_stage, src_access, dst_stage,
+                dst_access) != RIN_GPU_VULKAN_COMMAND_OK) {
+            valid = 0;
+            goto done;
+        }
+    }
+
+done:
+    if (!valid)
         rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime, core);
 }
 
@@ -3903,6 +4068,126 @@ done:
     if (sync_locked) sync_unlock();
     __atomic_store_n(&queue_slot_value->submit_lock, 0u, __ATOMIC_RELEASE);
     return result;
+}
+
+RinVkResult RIN_VKAPI_CALL vkQueueSubmit2(
+        RinVkQueue queue, uint32_t submit_count,
+        const RinVkSubmitInfo2* submits, uint64_t fence) {
+    struct RinVkQueue_T* queue_value = queue_slot(queue);
+    struct RinVkDevice_T* device;
+    const RinVkSubmitInfo2* request;
+    RinVkSemaphoreSubmitInfo wait_infos[RIN_VK_MAX_SUBMIT_SEMAPHORES];
+    RinVkSemaphoreSubmitInfo signal_infos[RIN_VK_MAX_SUBMIT_SEMAPHORES];
+    RinVkCommandBufferSubmitInfo command_infos[RIN_VK_MAX_SUBMIT_COMMAND_BUFFERS];
+    RinVkCommandBuffer command_buffers[RIN_VK_MAX_SUBMIT_COMMAND_BUFFERS];
+    uint64_t wait_semaphores[RIN_VK_MAX_SUBMIT_SEMAPHORES];
+    uint64_t signal_semaphores[RIN_VK_MAX_SUBMIT_SEMAPHORES];
+    uint32_t wait_stage_masks[RIN_VK_MAX_SUBMIT_SEMAPHORES];
+    uint64_t wait_values[RIN_VK_MAX_SUBMIT_SEMAPHORES];
+    uint64_t signal_values[RIN_VK_MAX_SUBMIT_SEMAPHORES];
+    RinVkTimelineSemaphoreSubmitInfo timeline;
+    RinVkSubmitInfo legacy;
+    uint64_t runtime_stage_mask;
+    uint32_t index;
+
+    if (!queue_value) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    device = queue_value->device;
+    if (!device || !device->synchronization2_enabled)
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    if (submit_count > 1u || (submit_count != 0u && !submits))
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    if (submit_count == 0u)
+        return fence == 0u ? RIN_VK_SUCCESS : RIN_VK_ERROR_INITIALIZATION_FAILED;
+    request = &submits[0];
+    if (request->sType != RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO_2 ||
+        request->pNext || request->flags != 0u ||
+        request->waitSemaphoreInfoCount > RIN_VK_MAX_SUBMIT_SEMAPHORES ||
+        request->signalSemaphoreInfoCount > RIN_VK_MAX_SUBMIT_SEMAPHORES ||
+        request->commandBufferInfoCount == 0u ||
+        request->commandBufferInfoCount > RIN_VK_MAX_SUBMIT_COMMAND_BUFFERS ||
+        (request->waitSemaphoreInfoCount != 0u &&
+         !request->pWaitSemaphoreInfos) ||
+        (request->waitSemaphoreInfoCount == 0u &&
+         request->pWaitSemaphoreInfos) ||
+        (request->signalSemaphoreInfoCount != 0u &&
+         !request->pSignalSemaphoreInfos) ||
+        (request->signalSemaphoreInfoCount == 0u &&
+         request->pSignalSemaphoreInfos) ||
+        !request->pCommandBufferInfos)
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+
+    memset(wait_infos, 0, sizeof(wait_infos));
+    memset(signal_infos, 0, sizeof(signal_infos));
+    memset(command_infos, 0, sizeof(command_infos));
+    memset(wait_semaphores, 0, sizeof(wait_semaphores));
+    memset(signal_semaphores, 0, sizeof(signal_semaphores));
+    memset(wait_stage_masks, 0, sizeof(wait_stage_masks));
+    memset(wait_values, 0, sizeof(wait_values));
+    memset(signal_values, 0, sizeof(signal_values));
+    for (index = 0u; index < request->waitSemaphoreInfoCount; ++index) {
+        wait_infos[index] = request->pWaitSemaphoreInfos[index];
+        if (wait_infos[index].sType != RIN_VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO ||
+            wait_infos[index].pNext || wait_infos[index].semaphore == 0u ||
+            wait_infos[index].deviceIndex != 0u || wait_infos[index].reserved != 0u ||
+            !synchronization2_stage_mask(wait_infos[index].stageMask,
+                                         &runtime_stage_mask))
+            return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        wait_semaphores[index] = wait_infos[index].semaphore;
+        wait_stage_masks[index] = (uint32_t)wait_infos[index].stageMask;
+        wait_values[index] = wait_infos[index].value;
+    }
+    for (index = 0u; index < request->signalSemaphoreInfoCount; ++index) {
+        signal_infos[index] = request->pSignalSemaphoreInfos[index];
+        if (signal_infos[index].sType != RIN_VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO ||
+            signal_infos[index].pNext || signal_infos[index].semaphore == 0u ||
+            signal_infos[index].deviceIndex != 0u || signal_infos[index].reserved != 0u ||
+            !synchronization2_stage_mask(signal_infos[index].stageMask,
+                                         &runtime_stage_mask))
+            return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        signal_semaphores[index] = signal_infos[index].semaphore;
+        signal_values[index] = signal_infos[index].value;
+    }
+    for (index = 0u; index < request->commandBufferInfoCount; ++index) {
+        command_infos[index] = request->pCommandBufferInfos[index];
+        if (command_infos[index].sType !=
+                RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO ||
+            command_infos[index].pNext || command_infos[index].commandBuffer == NULL ||
+            command_infos[index].deviceMask != 1u ||
+            command_infos[index].reserved != 0u)
+            return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        command_buffers[index] = command_infos[index].commandBuffer;
+    }
+
+    memset(&timeline, 0, sizeof(timeline));
+    timeline.sType = RIN_VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    timeline.waitSemaphoreValueCount = request->waitSemaphoreInfoCount;
+    timeline.pWaitSemaphoreValues = request->waitSemaphoreInfoCount != 0u
+                                         ? wait_values
+                                         : NULL;
+    timeline.signalSemaphoreValueCount = request->signalSemaphoreInfoCount;
+    timeline.pSignalSemaphoreValues = request->signalSemaphoreInfoCount != 0u
+                                          ? signal_values
+                                          : NULL;
+    memset(&legacy, 0, sizeof(legacy));
+    legacy.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    legacy.pNext = (request->waitSemaphoreInfoCount != 0u ||
+                    request->signalSemaphoreInfoCount != 0u)
+                       ? &timeline
+                       : NULL;
+    legacy.waitSemaphoreCount = request->waitSemaphoreInfoCount;
+    legacy.pWaitSemaphores = request->waitSemaphoreInfoCount != 0u
+                                 ? wait_semaphores
+                                 : NULL;
+    legacy.pWaitDstStageMask = request->waitSemaphoreInfoCount != 0u
+                                   ? wait_stage_masks
+                                   : NULL;
+    legacy.commandBufferCount = request->commandBufferInfoCount;
+    legacy.pCommandBuffers = command_buffers;
+    legacy.signalSemaphoreCount = request->signalSemaphoreInfoCount;
+    legacy.pSignalSemaphores = request->signalSemaphoreInfoCount != 0u
+                                   ? signal_semaphores
+                                   : NULL;
+    return vkQueueSubmit(queue, 1u, &legacy, fence);
 }
 
 RinVkResult RIN_VKAPI_CALL vkAllocateMemory(
@@ -4857,6 +5142,8 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
         return (RinVkVoidFunction)vkWaitSemaphores;
     if (name_equal(name, "vkQueueSubmit"))
         return (RinVkVoidFunction)vkQueueSubmit;
+    if (name_equal(name, "vkQueueSubmit2"))
+        return (RinVkVoidFunction)vkQueueSubmit2;
     if (name_equal(name, "vkCreateCommandPool"))
         return (RinVkVoidFunction)vkCreateCommandPool;
     if (name_equal(name, "vkDestroyCommandPool"))
@@ -4873,6 +5160,8 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
         return (RinVkVoidFunction)vkEndCommandBuffer;
     if (name_equal(name, "vkResetCommandBuffer"))
         return (RinVkVoidFunction)vkResetCommandBuffer;
+    if (name_equal(name, "vkCmdPipelineBarrier2"))
+        return (RinVkVoidFunction)vkCmdPipelineBarrier2;
     if (name_equal(name, "vkCmdCopyBuffer"))
         return (RinVkVoidFunction)vkCmdCopyBuffer;
     if (name_equal(name, "vkCmdCopyImage"))

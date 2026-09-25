@@ -18,12 +18,13 @@
 #define RIN_GPU_VK_API_1_3 RIN_GPU_VK_MAKE_VERSION(1u, 3u, 0u)
 
 /* The public ICD exposes the host-validated 1.0 transfer/resource profile and
- * the separately enumerated VK_KHR_timeline_semaphore host extension.  The
+ * separately enumerated host extensions for timeline semaphore and bounded
+ * synchronization2.  The
  * 1.3 value above remains the version of the internal product/profile
  * contract; it must not leak into Vulkan core advertisement until the
  * corresponding command/error/lifetime semantics are wired. */
 #define RIN_GPU_VK_ICD_API_VERSION RIN_GPU_VK_MAKE_VERSION(1u, 0u, 0u)
-#define RIN_GPU_VK_ICD_FEATURES UINT64_C(0x0000000000000001)
+#define RIN_GPU_VK_ICD_FEATURES UINT64_C(0x0000000000000003)
 
 #define RIN_GPU_VK_PHYSICAL_DMA_ISOLATED UINT32_C(0x00000001)
 #define RIN_GPU_VK_PHYSICAL_RESET_CAPABLE UINT32_C(0x00000002)

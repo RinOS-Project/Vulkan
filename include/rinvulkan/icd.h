@@ -57,12 +57,27 @@
 #define RIN_VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO 1000207000
 #define RIN_VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO 1000207001
 #define RIN_VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO 1000207002
+#define RIN_VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 1000314000
+#define RIN_VK_STRUCTURE_TYPE_DEPENDENCY_INFO 1000314003
+#define RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO_2 1000314004
+#define RIN_VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO 1000314005
+#define RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO 1000314006
+#define RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES 1000314007
 
 #define RIN_VK_SEMAPHORE_TYPE_BINARY 0u
 #define RIN_VK_SEMAPHORE_TYPE_TIMELINE 1u
 #define RIN_VK_SEMAPHORE_WAIT_ANY_BIT 0x00000001u
 #define RIN_VK_KHR_TIMELINE_SEMAPHORE_EXTENSION \
     "VK_KHR_timeline_semaphore"
+#define RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION \
+    "VK_KHR_synchronization2"
+#define RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT UINT64_C(0x0000000000001000)
+#define RIN_VK_PIPELINE_STAGE_2_HOST_BIT UINT64_C(0x0000000000004000)
+#define RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT UINT64_C(0x0000000000010000)
+#define RIN_VK_ACCESS_2_TRANSFER_READ_BIT UINT64_C(0x0000000000000800)
+#define RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT UINT64_C(0x0000000000001000)
+#define RIN_VK_ACCESS_2_HOST_READ_BIT UINT64_C(0x0000000000002000)
+#define RIN_VK_ACCESS_2_HOST_WRITE_BIT UINT64_C(0x0000000000004000)
 
 #define RIN_VK_SUCCESS 0
 #define RIN_VK_NOT_READY 1
@@ -116,6 +131,12 @@ typedef uint64_t RinVkDescriptorPool;
 typedef uint64_t RinVkDescriptorSet;
 typedef uint64_t RinVkPipelineLayout;
 typedef uint64_t RinVkPipelineCache;
+
+typedef struct RinVkPhysicalDeviceSynchronization2Features {
+    RinVkStructureType sType;
+    void* pNext;
+    uint32_t synchronization2;
+} RinVkPhysicalDeviceSynchronization2Features;
 
 typedef struct RinVkApplicationInfo {
     RinVkStructureType sType;
@@ -641,6 +662,57 @@ typedef struct RinVkSubmitInfo {
     uint32_t signalSemaphoreCount;
     const uint64_t* pSignalSemaphores;
 } RinVkSubmitInfo;
+
+typedef struct RinVkSemaphoreSubmitInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    RinVkSemaphore semaphore;
+    uint64_t value;
+    uint64_t stageMask;
+    uint32_t deviceIndex;
+    uint32_t reserved;
+} RinVkSemaphoreSubmitInfo;
+
+typedef struct RinVkCommandBufferSubmitInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    RinVkCommandBuffer commandBuffer;
+    uint32_t deviceMask;
+    uint32_t reserved;
+} RinVkCommandBufferSubmitInfo;
+
+typedef struct RinVkSubmitInfo2 {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    uint32_t waitSemaphoreInfoCount;
+    const RinVkSemaphoreSubmitInfo* pWaitSemaphoreInfos;
+    uint32_t commandBufferInfoCount;
+    const RinVkCommandBufferSubmitInfo* pCommandBufferInfos;
+    uint32_t signalSemaphoreInfoCount;
+    const RinVkSemaphoreSubmitInfo* pSignalSemaphoreInfos;
+} RinVkSubmitInfo2;
+
+typedef struct RinVkMemoryBarrier2 {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint64_t srcStageMask;
+    uint64_t srcAccessMask;
+    uint64_t dstStageMask;
+    uint64_t dstAccessMask;
+} RinVkMemoryBarrier2;
+
+typedef struct RinVkDependencyInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t dependencyFlags;
+    uint32_t memoryBarrierCount;
+    const RinVkMemoryBarrier2* pMemoryBarriers;
+    uint32_t bufferMemoryBarrierCount;
+    const void* pBufferMemoryBarriers;
+    uint32_t imageMemoryBarrierCount;
+    const void* pImageMemoryBarriers;
+} RinVkDependencyInfo;
 
 typedef struct RinVkTimelineSemaphoreSubmitInfo {
     RinVkStructureType sType;
@@ -1442,9 +1514,15 @@ vkCmdClearColorImage(RinVkCommandBuffer command_buffer, RinVkImage image,
                      const RinVkClearColorValue* color,
                      uint32_t range_count,
                      const RinVkImageSubresourceRange* ranges);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdPipelineBarrier2(RinVkCommandBuffer command_buffer,
+                      const RinVkDependencyInfo* dependency_info);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkQueueSubmit(RinVkQueue queue, uint32_t submit_count,
               const RinVkSubmitInfo* submits, uint64_t fence);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkQueueSubmit2(RinVkQueue queue, uint32_t submit_count,
+               const RinVkSubmitInfo2* submits, uint64_t fence);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkAllocateMemory(RinVkDevice device,
                  const RinVkMemoryAllocateInfo* allocate_info,
