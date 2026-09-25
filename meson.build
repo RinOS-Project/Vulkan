@@ -8,6 +8,7 @@ rinvulkan_sources = files(
   'src/icd.c',
   'src/profile.c',
   'src/runtime.c',
+  'src/software_platform.c',
   'src/wsi.c',
 )
 rinvulkan = library('rinvulkan', rinvulkan_sources,

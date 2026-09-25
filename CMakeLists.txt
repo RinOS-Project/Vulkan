@@ -18,6 +18,7 @@ set(RINVULKAN_SOURCES
     src/icd.c
     src/profile.c
     src/runtime.c
+    src/software_platform.c
     src/wsi.c)
 add_library(RinVulkan STATIC ${RINVULKAN_SOURCES})
 add_library(RinVulkan::RinVulkan ALIAS RinVulkan)
