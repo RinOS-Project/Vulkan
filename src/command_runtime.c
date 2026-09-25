@@ -81,6 +81,8 @@ static void reset_recording(RinGpuVulkanCommandBufferV1* buffer) {
     buffer->record_error = 0u;
     buffer->copy_count = 0u;
     memset(buffer->copies, 0, sizeof(buffer->copies));
+    buffer->transfer_op_count = 0u;
+    memset(buffer->transfer_ops, 0, sizeof(buffer->transfer_ops));
 }
 
 static int pool_has_in_flight(const RinGpuVulkanCommandRuntimeV1* runtime,
@@ -455,6 +457,38 @@ int rin_gpu_vulkan_command_buffer_record_copies(
     memcpy(&buffer->copies[buffer->copy_count], copies,
            sizeof(*copies) * (size_t)copy_count);
     buffer->copy_count += copy_count;
+    return RIN_GPU_VULKAN_COMMAND_OK;
+}
+
+int rin_gpu_vulkan_command_buffer_record_transfer_ops(
+        RinGpuVulkanCommandRuntimeV1* runtime,
+        RinGpuVulkanCommandBufferV1* handle,
+        const RinGpuVulkanTransferOpV2* operations,
+        uint32_t operation_count) {
+    RinGpuVulkanCommandBufferV1* buffer = buffer_slot(runtime, handle);
+    uint32_t index;
+    if (!buffer || !operations || operation_count == 0u ||
+        operation_count > RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS ||
+        buffer->lifecycle != RIN_GPU_VULKAN_COMMAND_BUFFER_RECORDING ||
+        buffer->transfer_op_count >
+            RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS - operation_count ||
+        overlaps_runtime(runtime, operations,
+                         sizeof(*operations) * (size_t)operation_count))
+        return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
+    for (index = 0u; index < operation_count; ++index) {
+        if (operations[index].type < RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_COPY ||
+            operations[index].type > RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_TO_BUFFER ||
+            operations[index].reserved != 0u ||
+            operations[index].source_allocation == 0u ||
+            operations[index].destination_allocation == 0u ||
+            operations[index].source_gpu_address == 0u ||
+            operations[index].destination_gpu_address == 0u ||
+            operations[index].size_bytes == 0u)
+            return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
+    }
+    memcpy(&buffer->transfer_ops[buffer->transfer_op_count], operations,
+           sizeof(*operations) * (size_t)operation_count);
+    buffer->transfer_op_count += operation_count;
     return RIN_GPU_VULKAN_COMMAND_OK;
 }
 

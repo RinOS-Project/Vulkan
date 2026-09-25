@@ -9,6 +9,9 @@
 #define RIN_GPU_VULKAN_COMMAND_MAX_COPIES 4u
 #define RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_COPIES 16u
 #define RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION 1u
+#define RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_2 2u
+#define RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS 16u
+#define RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS 8u
 
 #define RIN_GPU_VULKAN_COMMAND_POOL_TRANSIENT 0x00000001u
 #define RIN_GPU_VULKAN_COMMAND_POOL_RESET_BUFFER 0x00000002u
@@ -69,6 +72,32 @@ typedef struct RinGpuVulkanTransferPacketV1 {
         copies[RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_COPIES];
 } RinGpuVulkanTransferPacketV1;
 
+enum {
+    RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_COPY = 1u,
+    RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_COPY = 2u,
+    RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_TO_IMAGE = 3u,
+    RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_TO_BUFFER = 4u
+};
+
+typedef struct RinGpuVulkanTransferOpV2 {
+    uint32_t type;
+    uint32_t reserved;
+    uint64_t source_allocation;
+    uint64_t destination_allocation;
+    uint64_t source_gpu_address;
+    uint64_t destination_gpu_address;
+    uint64_t size_bytes;
+} RinGpuVulkanTransferOpV2;
+
+typedef struct RinGpuVulkanTransferPacketV2 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint32_t op_count;
+    uint32_t reserved;
+    RinGpuVulkanTransferOpV2
+        operations[RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS];
+} RinGpuVulkanTransferPacketV2;
+
 struct RinGpuVulkanCommandBufferV1 {
     uintptr_t loader_magic;
     uint32_t state;
@@ -83,6 +112,9 @@ struct RinGpuVulkanCommandBufferV1 {
     uint32_t copy_count;
     RinGpuVulkanBufferCopyCommandV1
         copies[RIN_GPU_VULKAN_COMMAND_MAX_COPIES];
+    uint32_t transfer_op_count;
+    RinGpuVulkanTransferOpV2
+        transfer_ops[RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS];
 };
 
 typedef struct RinGpuVulkanCommandRuntimeV1 {
@@ -127,6 +159,10 @@ int rin_gpu_vulkan_command_buffer_record_copies(
     RinGpuVulkanCommandRuntimeV1* runtime,
     RinGpuVulkanCommandBufferV1* buffer,
     const RinGpuVulkanBufferCopyCommandV1* copies, uint32_t copy_count);
+int rin_gpu_vulkan_command_buffer_record_transfer_ops(
+    RinGpuVulkanCommandRuntimeV1* runtime,
+    RinGpuVulkanCommandBufferV1* buffer,
+    const RinGpuVulkanTransferOpV2* operations, uint32_t operation_count);
 void rin_gpu_vulkan_command_buffer_record_failure(
     RinGpuVulkanCommandRuntimeV1* runtime,
     RinGpuVulkanCommandBufferV1* buffer);

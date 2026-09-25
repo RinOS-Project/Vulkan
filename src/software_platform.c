@@ -183,8 +183,10 @@ static int software_submit(void* context,
                            uint32_t resource_count) {
     RinGpuVulkanSoftwarePlatformV1* platform = software_context(context);
     const RinGpuVulkanTransferPacketV1* packet;
+    const RinGpuVulkanTransferPacketV2* packet_v2;
     RinVulkanProductReportV1* report;
     uint32_t copy_index;
+    uint32_t operation_index;
     uint32_t next_tail;
     if (!platform || !submission || submission->struct_size != sizeof(*submission) ||
         submission->version != RIN_VULKAN_PRODUCT_PLATFORM_VERSION ||
@@ -202,40 +204,89 @@ static int software_submit(void* context,
     if (next_tail == platform->report_head) return RIN_VULKAN_PRODUCT_BUSY;
     packet = (const RinGpuVulkanTransferPacketV1*)(uintptr_t)
         submission->command_cookie;
-    if (!packet || packet->struct_size != sizeof(*packet) ||
-        packet->version != RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION ||
-        packet->reserved != 0u || packet->copy_count == 0u ||
-        packet->copy_count > RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_COPIES)
+    if (!packet || packet->struct_size < sizeof(uint32_t) * 4u ||
+        packet->reserved != 0u)
         return RIN_VULKAN_PRODUCT_PROTOCOL;
-    for (copy_index = 0u; copy_index < packet->copy_count; ++copy_index) {
-        const RinGpuVulkanBufferCopyCommandV1* copy =
-            &packet->copies[copy_index];
-        RinGpuVulkanSoftwareAllocationV1* source;
-        RinGpuVulkanSoftwareAllocationV1* destination;
-        uint64_t source_offset;
-        uint64_t destination_offset;
-        if (!resource_has_access(resources, resource_count,
-                                 copy->source_allocation,
-                                 RIN_VULKAN_PRODUCT_MEMORY_GPU_READ) ||
-            !resource_has_access(resources, resource_count,
-                                 copy->destination_allocation,
-                                 RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE) ||
-            copy->size_bytes == 0u)
+    if (packet->version == RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION) {
+        if (packet->struct_size != sizeof(*packet) || packet->copy_count == 0u ||
+            packet->copy_count > RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_COPIES)
             return RIN_VULKAN_PRODUCT_PROTOCOL;
-        source = allocation_by_handle(platform, copy->source_allocation);
-        destination = allocation_by_handle(platform,
-                                           copy->destination_allocation);
-        if (!source || !destination ||
-            allocation_for_range(platform, copy->source_gpu_address,
-                                 copy->size_bytes) != source ||
-            allocation_for_range(platform, copy->destination_gpu_address,
-                                 copy->size_bytes) != destination)
+        for (copy_index = 0u; copy_index < packet->copy_count; ++copy_index) {
+            const RinGpuVulkanBufferCopyCommandV1* copy =
+                &packet->copies[copy_index];
+            RinGpuVulkanSoftwareAllocationV1* source;
+            RinGpuVulkanSoftwareAllocationV1* destination;
+            uint64_t source_offset;
+            uint64_t destination_offset;
+            if (!resource_has_access(resources, resource_count,
+                                     copy->source_allocation,
+                                     RIN_VULKAN_PRODUCT_MEMORY_GPU_READ) ||
+                !resource_has_access(resources, resource_count,
+                                     copy->destination_allocation,
+                                     RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE) ||
+                copy->size_bytes == 0u)
+                return RIN_VULKAN_PRODUCT_PROTOCOL;
+            source = allocation_by_handle(platform, copy->source_allocation);
+            destination = allocation_by_handle(platform,
+                                               copy->destination_allocation);
+            if (!source || !destination ||
+                allocation_for_range(platform, copy->source_gpu_address,
+                                     copy->size_bytes) != source ||
+                allocation_for_range(platform, copy->destination_gpu_address,
+                                     copy->size_bytes) != destination)
+                return RIN_VULKAN_PRODUCT_PROTOCOL;
+            source_offset = copy->source_gpu_address -
+                            source->gpu_virtual_address;
+            destination_offset = copy->destination_gpu_address -
+                                 destination->gpu_virtual_address;
+            memmove(destination->bytes + destination_offset,
+                    source->bytes + source_offset, (size_t)copy->size_bytes);
+        }
+    } else if (packet->version == RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_2) {
+        packet_v2 = (const RinGpuVulkanTransferPacketV2*)(uintptr_t)
+            submission->command_cookie;
+        if (packet_v2->struct_size != sizeof(*packet_v2) ||
+            packet_v2->op_count == 0u ||
+            packet_v2->op_count > RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS)
             return RIN_VULKAN_PRODUCT_PROTOCOL;
-        source_offset = copy->source_gpu_address - source->gpu_virtual_address;
-        destination_offset =
-            copy->destination_gpu_address - destination->gpu_virtual_address;
-        memmove(destination->bytes + destination_offset,
-                source->bytes + source_offset, (size_t)copy->size_bytes);
+        for (operation_index = 0u; operation_index < packet_v2->op_count;
+             ++operation_index) {
+            const RinGpuVulkanTransferOpV2* operation =
+                &packet_v2->operations[operation_index];
+            RinGpuVulkanSoftwareAllocationV1* source;
+            RinGpuVulkanSoftwareAllocationV1* destination;
+            uint64_t source_offset;
+            uint64_t destination_offset;
+            if ((operation->type != RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_COPY &&
+                 (operation->type < RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_COPY ||
+                  operation->type > RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_TO_BUFFER)) ||
+                operation->reserved != 0u || operation->size_bytes == 0u ||
+                !resource_has_access(resources, resource_count,
+                                     operation->source_allocation,
+                                     RIN_VULKAN_PRODUCT_MEMORY_GPU_READ) ||
+                !resource_has_access(resources, resource_count,
+                                     operation->destination_allocation,
+                                     RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE))
+                return RIN_VULKAN_PRODUCT_PROTOCOL;
+            source = allocation_by_handle(platform, operation->source_allocation);
+            destination = allocation_by_handle(platform,
+                                               operation->destination_allocation);
+            if (!source || !destination ||
+                allocation_for_range(platform, operation->source_gpu_address,
+                                     operation->size_bytes) != source ||
+                allocation_for_range(platform, operation->destination_gpu_address,
+                                     operation->size_bytes) != destination)
+                return RIN_VULKAN_PRODUCT_PROTOCOL;
+            source_offset = operation->source_gpu_address -
+                            source->gpu_virtual_address;
+            destination_offset = operation->destination_gpu_address -
+                                 destination->gpu_virtual_address;
+            memmove(destination->bytes + destination_offset,
+                    source->bytes + source_offset,
+                    (size_t)operation->size_bytes);
+        }
+    } else {
+        return RIN_VULKAN_PRODUCT_PROTOCOL;
     }
     report = &platform->reports[platform->report_tail];
     memset(report, 0, sizeof(*report));

@@ -678,6 +678,36 @@ typedef struct RinVkBufferCopy {
     uint64_t size;
 } RinVkBufferCopy;
 
+typedef struct RinVkImageSubresourceLayers {
+    uint32_t aspectMask;
+    uint32_t mipLevel;
+    uint32_t baseArrayLayer;
+    uint32_t layerCount;
+} RinVkImageSubresourceLayers;
+
+typedef struct RinVkOffset3D {
+    int32_t x;
+    int32_t y;
+    int32_t z;
+} RinVkOffset3D;
+
+typedef struct RinVkBufferImageCopy {
+    uint64_t bufferOffset;
+    uint32_t bufferRowLength;
+    uint32_t bufferImageHeight;
+    RinVkImageSubresourceLayers imageSubresource;
+    RinVkOffset3D imageOffset;
+    RinVkExtent3D imageExtent;
+} RinVkBufferImageCopy;
+
+typedef struct RinVkImageCopy {
+    RinVkImageSubresourceLayers srcSubresource;
+    RinVkOffset3D srcOffset;
+    RinVkImageSubresourceLayers dstSubresource;
+    RinVkOffset3D dstOffset;
+    RinVkExtent3D extent;
+} RinVkImageCopy;
+
 #define RIN_VK_BUFFER_USAGE_TRANSFER_SRC_BIT UINT32_C(0x00000001)
 #define RIN_VK_BUFFER_USAGE_TRANSFER_DST_BIT UINT32_C(0x00000002)
 #define RIN_VK_BUFFER_USAGE_KNOWN \
@@ -690,6 +720,10 @@ typedef struct RinVkBufferCopy {
 #define RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT UINT32_C(0x00000002)
 #define RIN_VK_IMAGE_USAGE_KNOWN \
     (RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT | RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+#define RIN_VK_IMAGE_ASPECT_COLOR_BIT UINT32_C(0x00000001)
+#define RIN_VK_IMAGE_LAYOUT_GENERAL UINT32_C(1)
+#define RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL UINT32_C(6)
+#define RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL UINT32_C(7)
 #define RIN_VK_SHARING_MODE_EXCLUSIVE 0u
 #define RIN_VK_FENCE_CREATE_SIGNALED_BIT UINT32_C(0x00000001)
 #define RIN_VK_FENCE_CREATE_KNOWN RIN_VK_FENCE_CREATE_SIGNALED_BIT
@@ -1151,6 +1185,21 @@ RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkCmdCopyBuffer(RinVkCommandBuffer command_buffer, RinVkBuffer src_buffer,
                 RinVkBuffer dst_buffer, uint32_t region_count,
                 const RinVkBufferCopy* regions);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdCopyImage(RinVkCommandBuffer command_buffer, RinVkImage src_image,
+               uint32_t src_image_layout, RinVkImage dst_image,
+               uint32_t dst_image_layout, uint32_t region_count,
+               const RinVkImageCopy* regions);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdCopyBufferToImage(RinVkCommandBuffer command_buffer,
+                       RinVkBuffer src_buffer, RinVkImage dst_image,
+                       uint32_t dst_image_layout, uint32_t region_count,
+                       const RinVkBufferImageCopy* regions);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdCopyImageToBuffer(RinVkCommandBuffer command_buffer,
+                       RinVkImage src_image, uint32_t src_image_layout,
+                       RinVkBuffer dst_buffer, uint32_t region_count,
+                       const RinVkBufferImageCopy* regions);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkQueueSubmit(RinVkQueue queue, uint32_t submit_count,
               const RinVkSubmitInfo* submits, uint64_t fence);

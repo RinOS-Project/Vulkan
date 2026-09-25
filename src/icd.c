@@ -116,6 +116,8 @@ typedef struct RinVkImageSlot {
     uint32_t usage;
     uint64_t memory_size;
     uint64_t memory_offset;
+    uint32_t width;
+    uint32_t height;
 } RinVkImageSlot;
 
 typedef struct RinVkFenceSlot {
@@ -149,6 +151,8 @@ typedef struct RinVkSubmissionSlot {
     RinGpuVulkanCommandBufferV1*
         command_buffers[RIN_VK_MAX_SUBMIT_COMMAND_BUFFERS];
     RinGpuVulkanTransferPacketV1 packet;
+    RinGpuVulkanTransferPacketV2 extended_packet;
+    uint32_t packet_version;
 } RinVkSubmissionSlot;
 
 static uintptr_t g_runtime_binding;
@@ -937,6 +941,8 @@ static void clear_image_slot(RinVkImageSlot* slot) {
     slot->usage = 0u;
     slot->memory_size = 0u;
     slot->memory_offset = 0u;
+    slot->width = 0u;
+    slot->height = 0u;
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
 }
 
@@ -2510,6 +2516,241 @@ done:
     }
 }
 
+static int image_layout_transfer_valid(uint32_t layout) {
+    return layout == RIN_VK_IMAGE_LAYOUT_GENERAL ||
+           layout == RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL ||
+           layout == RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+}
+
+static int image_subresource_valid(const RinVkImageSlot* image,
+                                   const RinVkImageSubresourceLayers* subresource,
+                                   uint32_t width, uint32_t height) {
+    return image && subresource &&
+           subresource->aspectMask == RIN_VK_IMAGE_ASPECT_COLOR_BIT &&
+           subresource->mipLevel == 0u && subresource->baseArrayLayer == 0u &&
+           subresource->layerCount == 1u && width == image->width &&
+           height == image->height;
+}
+
+static int image_region_valid(const RinVkImageSlot* image,
+                              const RinVkImageSubresourceLayers* subresource,
+                              const RinVkOffset3D* offset,
+                              const RinVkExtent3D* extent) {
+    return image && offset && extent && offset->x == 0 && offset->y == 0 &&
+           offset->z == 0 && extent->depth == 1u &&
+           image_subresource_valid(image, subresource, extent->width,
+                                    extent->height);
+}
+
+static int checked_image_address(const RinVkImageSlot* image, uint64_t offset,
+                                 uint64_t size, uint64_t* address_out) {
+    uint64_t address;
+    if (!image || !image->memory || !address_out ||
+        image->memory_generation != image->memory->generation ||
+        image->memory->product_allocation == 0u ||
+        image->memory->gpu_virtual_address == 0u ||
+        offset > image->memory_size || size > image->memory_size - offset ||
+        image->memory_offset > UINT64_MAX -
+                                    image->memory->gpu_virtual_address)
+        return 0;
+    address = image->memory->gpu_virtual_address + image->memory_offset;
+    if (offset > UINT64_MAX - address || size > UINT64_MAX - (address + offset))
+        return 0;
+    *address_out = address + offset;
+    return 1;
+}
+
+static int command_owner_device(RinGpuVulkanCommandBufferV1* core,
+                                struct RinVkDevice_T** owner_out) {
+    uintptr_t owner_address = 0u;
+    if (!owner_out || rin_gpu_vulkan_command_buffer_owner(
+                          &g_command_runtime, core, &owner_address) !=
+                          RIN_GPU_VULKAN_COMMAND_OK)
+        return 0;
+    *owner_out = device_slot((RinVkDevice)(void*)owner_address);
+    return *owner_out != NULL;
+}
+
+static void record_transfer_ops(RinGpuVulkanCommandBufferV1* core,
+                                const RinGpuVulkanTransferOpV2* operations,
+                                uint32_t operation_count) {
+    if (!core || !operations || operation_count == 0u ||
+        rin_gpu_vulkan_command_buffer_record_transfer_ops(
+            &g_command_runtime, core, operations, operation_count) !=
+            RIN_GPU_VULKAN_COMMAND_OK)
+        rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime, core);
+}
+
+void RIN_VKAPI_CALL vkCmdCopyImage(
+        RinVkCommandBuffer command_buffer, RinVkImage src_image,
+        uint32_t src_image_layout, RinVkImage dst_image,
+        uint32_t dst_image_layout, uint32_t region_count,
+        const RinVkImageCopy* regions) {
+    RinGpuVulkanCommandBufferV1* core =
+        (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
+    RinGpuVulkanTransferOpV2 operations[RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS];
+    RinVkImageSlot* source;
+    RinVkImageSlot* destination;
+    struct RinVkDevice_T* owner;
+    uint32_t index;
+    int valid = 1;
+
+    memset(operations, 0, sizeof(operations));
+    if (region_count == 0u ||
+        region_count > RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS || !regions ||
+        !command_owner_device(core, &owner) ||
+        !image_layout_transfer_valid(src_image_layout) ||
+        !image_layout_transfer_valid(dst_image_layout)) {
+        valid = 0;
+        goto done;
+    }
+    source = image_slot(owner, src_image);
+    destination = image_slot(owner, dst_image);
+    if (!source || !destination ||
+        (source->usage & RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0u ||
+        (destination->usage & RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u)
+        valid = 0;
+    for (index = 0u; valid && index < region_count; ++index) {
+        uint64_t source_address;
+        uint64_t destination_address;
+        if (!image_region_valid(source, &regions[index].srcSubresource,
+                                &regions[index].srcOffset,
+                                &regions[index].extent) ||
+            !image_region_valid(destination, &regions[index].dstSubresource,
+                                &regions[index].dstOffset,
+                                &regions[index].extent) ||
+            !checked_image_address(source, 0u, source->memory_size,
+                                   &source_address) ||
+            !checked_image_address(destination, 0u, destination->memory_size,
+                                   &destination_address)) {
+            valid = 0;
+            break;
+        }
+        operations[index].type = RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_COPY;
+        operations[index].source_allocation = source->memory->product_allocation;
+        operations[index].destination_allocation =
+            destination->memory->product_allocation;
+        operations[index].source_gpu_address = source_address;
+        operations[index].destination_gpu_address = destination_address;
+        operations[index].size_bytes = source->memory_size;
+        if (operations[index].size_bytes != destination->memory_size)
+            valid = 0;
+    }
+done:
+    if (valid) record_transfer_ops(core, operations, region_count);
+    else rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime, core);
+}
+
+void RIN_VKAPI_CALL vkCmdCopyBufferToImage(
+        RinVkCommandBuffer command_buffer, RinVkBuffer src_buffer,
+        RinVkImage dst_image, uint32_t dst_image_layout, uint32_t region_count,
+        const RinVkBufferImageCopy* regions) {
+    RinGpuVulkanCommandBufferV1* core =
+        (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
+    RinGpuVulkanTransferOpV2 operations[RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS];
+    RinVkBufferSlot* source;
+    RinVkImageSlot* destination;
+    struct RinVkDevice_T* owner;
+    uint32_t index;
+    int valid = 1;
+    memset(operations, 0, sizeof(operations));
+    if (region_count == 0u ||
+        region_count > RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS || !regions ||
+        !command_owner_device(core, &owner) ||
+        !image_layout_transfer_valid(dst_image_layout)) {
+        valid = 0;
+        goto done;
+    }
+    source = buffer_slot(owner, src_buffer);
+    destination = image_slot(owner, dst_image);
+    if (!source || !destination ||
+        (source->usage & RIN_VK_BUFFER_USAGE_TRANSFER_SRC_BIT) == 0u ||
+        (destination->usage & RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u)
+        valid = 0;
+    for (index = 0u; valid && index < region_count; ++index) {
+        uint64_t source_address;
+        uint64_t destination_address;
+        uint64_t size = destination->memory_size;
+        if (regions[index].bufferRowLength != 0u ||
+            regions[index].bufferImageHeight != 0u ||
+            !image_region_valid(destination,
+                                &regions[index].imageSubresource,
+                                &regions[index].imageOffset,
+                                &regions[index].imageExtent) ||
+            !checked_buffer_address(source, regions[index].bufferOffset, size,
+                                    &source_address) ||
+            !checked_image_address(destination, 0u, size,
+                                   &destination_address)) {
+            valid = 0;
+            break;
+        }
+        operations[index].type = RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_TO_IMAGE;
+        operations[index].source_allocation = source->memory->product_allocation;
+        operations[index].destination_allocation =
+            destination->memory->product_allocation;
+        operations[index].source_gpu_address = source_address;
+        operations[index].destination_gpu_address = destination_address;
+        operations[index].size_bytes = size;
+    }
+done:
+    if (valid) record_transfer_ops(core, operations, region_count);
+    else rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime, core);
+}
+
+void RIN_VKAPI_CALL vkCmdCopyImageToBuffer(
+        RinVkCommandBuffer command_buffer, RinVkImage src_image,
+        uint32_t src_image_layout, RinVkBuffer dst_buffer,
+        uint32_t region_count, const RinVkBufferImageCopy* regions) {
+    RinGpuVulkanCommandBufferV1* core =
+        (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
+    RinGpuVulkanTransferOpV2 operations[RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS];
+    RinVkImageSlot* source;
+    RinVkBufferSlot* destination;
+    struct RinVkDevice_T* owner;
+    uint32_t index;
+    int valid = 1;
+    memset(operations, 0, sizeof(operations));
+    if (region_count == 0u ||
+        region_count > RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS || !regions ||
+        !command_owner_device(core, &owner) ||
+        !image_layout_transfer_valid(src_image_layout)) {
+        valid = 0;
+        goto done;
+    }
+    source = image_slot(owner, src_image);
+    destination = buffer_slot(owner, dst_buffer);
+    if (!source || !destination ||
+        (source->usage & RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0u ||
+        (destination->usage & RIN_VK_BUFFER_USAGE_TRANSFER_DST_BIT) == 0u)
+        valid = 0;
+    for (index = 0u; valid && index < region_count; ++index) {
+        uint64_t source_address;
+        uint64_t destination_address;
+        uint64_t size = source->memory_size;
+        if (regions[index].bufferRowLength != 0u ||
+            regions[index].bufferImageHeight != 0u ||
+            !image_region_valid(source, &regions[index].imageSubresource,
+                                &regions[index].imageOffset,
+                                &regions[index].imageExtent) ||
+            !checked_image_address(source, 0u, size, &source_address) ||
+            !checked_buffer_address(destination, regions[index].bufferOffset,
+                                    size, &destination_address)) {
+            valid = 0;
+            break;
+        }
+        operations[index].type = RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_TO_BUFFER;
+        operations[index].source_allocation = source->memory->product_allocation;
+        operations[index].destination_allocation =
+            destination->memory->product_allocation;
+        operations[index].source_gpu_address = source_address;
+        operations[index].destination_gpu_address = destination_address;
+        operations[index].size_bytes = size;
+    }
+done:
+    if (valid) record_transfer_ops(core, operations, region_count);
+    else rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime, core);
+}
+
 static int snapshot_submission_packet(
     const struct RinVkDevice_T* device, uint32_t queue_family_index,
     RinGpuVulkanCommandBufferV1* const* command_buffers,
@@ -2564,6 +2805,77 @@ static int snapshot_submission_packet(
     return 1;
 }
 
+static int snapshot_submission_packet_v2(
+    const struct RinVkDevice_T* device, uint32_t queue_family_index,
+    RinGpuVulkanCommandBufferV1* const* command_buffers,
+    uint32_t command_buffer_count, RinGpuVulkanTransferPacketV2* packet,
+    RinVulkanProductResourceV1* resources, uint32_t* resource_count_out) {
+    uint32_t buffer_index;
+    uint32_t resource_count = 0u;
+    if (!device || !command_buffers || command_buffer_count == 0u ||
+        command_buffer_count > RIN_VK_MAX_SUBMIT_COMMAND_BUFFERS || !packet ||
+        !resources || !resource_count_out)
+        return 0;
+    memset(packet, 0, sizeof(*packet));
+    memset(resources, 0, sizeof(RinVulkanProductResourceV1) *
+                             RIN_VULKAN_PRODUCT_MAX_RESOURCES_PER_SUBMISSION);
+    packet->struct_size = sizeof(*packet);
+    packet->version = RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_2;
+    for (buffer_index = 0u; buffer_index < command_buffer_count;
+         ++buffer_index) {
+        const RinGpuVulkanCommandBufferV1* buffer = command_buffers[buffer_index];
+        uint32_t copy_index;
+        uint32_t operation_index;
+        if (!buffer || buffer->owner != (uintptr_t)device || !buffer->pool ||
+            buffer->pool->queue_family_index != queue_family_index ||
+            buffer->copy_count > RIN_GPU_VULKAN_COMMAND_MAX_COPIES ||
+            buffer->transfer_op_count > RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS ||
+            buffer->copy_count > RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS ||
+            buffer->transfer_op_count >
+                RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS - buffer->copy_count ||
+            packet->op_count > RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS -
+                                buffer->copy_count - buffer->transfer_op_count)
+            return 0;
+        for (copy_index = 0u; copy_index < buffer->copy_count; ++copy_index) {
+            const RinGpuVulkanBufferCopyCommandV1* copy =
+                &buffer->copies[copy_index];
+            RinGpuVulkanTransferOpV2* operation =
+                &packet->operations[packet->op_count++];
+            if (!append_submission_resource(resources, &resource_count,
+                                            copy->source_allocation,
+                                            RIN_VULKAN_PRODUCT_MEMORY_GPU_READ) ||
+                !append_submission_resource(resources, &resource_count,
+                                            copy->destination_allocation,
+                                            RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE))
+                return 0;
+            operation->type = RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_COPY;
+            operation->source_allocation = copy->source_allocation;
+            operation->destination_allocation = copy->destination_allocation;
+            operation->source_gpu_address = copy->source_gpu_address;
+            operation->destination_gpu_address = copy->destination_gpu_address;
+            operation->size_bytes = copy->size_bytes;
+        }
+        for (operation_index = 0u;
+             operation_index < buffer->transfer_op_count; ++operation_index) {
+            const RinGpuVulkanTransferOpV2* source =
+                &buffer->transfer_ops[operation_index];
+            RinGpuVulkanTransferOpV2* operation =
+                &packet->operations[packet->op_count++];
+            if (!append_submission_resource(resources, &resource_count,
+                                            source->source_allocation,
+                                            RIN_VULKAN_PRODUCT_MEMORY_GPU_READ) ||
+                !append_submission_resource(resources, &resource_count,
+                                            source->destination_allocation,
+                                            RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE))
+                return 0;
+            *operation = *source;
+        }
+    }
+    if (packet->op_count == 0u) return 0;
+    *resource_count_out = resource_count;
+    return 1;
+}
+
 RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     RinVkQueue queue, uint32_t submit_count, const RinVkSubmitInfo* submits,
     uint64_t fence) {
@@ -2575,6 +2887,7 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     RinVulkanProductResourceV1
         resources[RIN_VULKAN_PRODUCT_MAX_RESOURCES_PER_SUBMISSION];
     RinGpuVulkanTransferPacketV1 validation_packet;
+    RinGpuVulkanTransferPacketV2 validation_packet_v2;
     RinVulkanProductSubmissionV1 submission;
     RinVulkanProductPlatformV1* product = NULL;
     RinVkSubmissionSlot* slot = NULL;
@@ -2585,6 +2898,7 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     uint32_t index;
     int product_result;
     int sync_locked = 0;
+    int extended_packet = 0;
 
     if (!queue_slot_value) return RIN_VK_ERROR_INITIALIZATION_FAILED;
     if (__atomic_exchange_n(&queue_slot_value->submit_lock, 1u,
@@ -2686,14 +3000,22 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     for (index = 0u; index < request.commandBufferCount; ++index) {
         command_buffers[index] =
             (RinGpuVulkanCommandBufferV1*)(void*)request.pCommandBuffers[index];
+        if (command_buffers[index] &&
+            command_buffers[index]->transfer_op_count != 0u)
+            extended_packet = 1;
     }
     if (rin_gpu_vulkan_command_buffers_validate_submit(
             &g_command_runtime, request.commandBufferCount,
             command_buffers) != RIN_GPU_VULKAN_COMMAND_OK ||
-        !snapshot_submission_packet(device, queue_slot_value->queue_family_index,
-                                    command_buffers, request.commandBufferCount,
-                                    &validation_packet,
-                                    resources, &resource_count)) {
+        (extended_packet
+             ? !snapshot_submission_packet_v2(
+                   device, queue_slot_value->queue_family_index, command_buffers,
+                   request.commandBufferCount, &validation_packet_v2, resources,
+                   &resource_count)
+             : !snapshot_submission_packet(
+                   device, queue_slot_value->queue_family_index, command_buffers,
+                   request.commandBufferCount, &validation_packet, resources,
+                   &resource_count))) {
         result = RIN_VK_ERROR_INITIALIZATION_FAILED;
         goto done;
     }
@@ -2707,10 +3029,15 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     slot->command_buffer_count = request.commandBufferCount;
     memcpy(slot->command_buffers, command_buffers,
            sizeof(*command_buffers) * request.commandBufferCount);
-    if (!snapshot_submission_packet(device, queue_slot_value->queue_family_index,
-                                    command_buffers, request.commandBufferCount,
-                                    &slot->packet, resources,
-                                    &resource_count) ||
+    if ((extended_packet
+             ? !snapshot_submission_packet_v2(
+                   device, queue_slot_value->queue_family_index, command_buffers,
+                   request.commandBufferCount, &slot->extended_packet, resources,
+                   &resource_count)
+             : !snapshot_submission_packet(
+                   device, queue_slot_value->queue_family_index, command_buffers,
+                   request.commandBufferCount, &slot->packet, resources,
+                   &resource_count)) ||
         rin_gpu_vulkan_command_buffers_mark_submitted(
             &g_command_runtime, request.commandBufferCount,
             command_buffers) != RIN_GPU_VULKAN_COMMAND_OK) {
@@ -2728,8 +3055,14 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         goto done;
     }
     memset(&submission, 0, sizeof(submission));
+    slot->packet_version = extended_packet
+                               ? RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_2
+                               : RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION;
     product_result = product->prepare_submission(
-        product->context, slot->queue_id, (uint64_t)(uintptr_t)&slot->packet,
+        product->context, slot->queue_id,
+        (uint64_t)(uintptr_t)(extended_packet
+                                  ? (const void*)&slot->extended_packet
+                                  : (const void*)&slot->packet),
         &submission);
     if (product_result == RIN_VULKAN_PRODUCT_OK) {
         product_result = product->submit(
@@ -3006,6 +3339,8 @@ RinVkResult RIN_VKAPI_CALL vkCreateImage(
     image->usage = request.usage;
     image->memory_size = memory_size;
     image->memory_offset = 0u;
+    image->width = request.extent.width;
+    image->height = request.extent.height;
     __atomic_store_n(&image->state, 1u, __ATOMIC_RELEASE);
     *image_out = resource_handle(RIN_VK_IMAGE_TAG, index,
                                   image->generation);
@@ -3104,6 +3439,12 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
         return (RinVkVoidFunction)vkResetCommandBuffer;
     if (name_equal(name, "vkCmdCopyBuffer"))
         return (RinVkVoidFunction)vkCmdCopyBuffer;
+    if (name_equal(name, "vkCmdCopyImage"))
+        return (RinVkVoidFunction)vkCmdCopyImage;
+    if (name_equal(name, "vkCmdCopyBufferToImage"))
+        return (RinVkVoidFunction)vkCmdCopyBufferToImage;
+    if (name_equal(name, "vkCmdCopyImageToBuffer"))
+        return (RinVkVoidFunction)vkCmdCopyImageToBuffer;
     if (name_equal(name, "vkAllocateMemory"))
         return (RinVkVoidFunction)vkAllocateMemory;
     if (name_equal(name, "vkFreeMemory"))
