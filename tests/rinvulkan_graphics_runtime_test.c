@@ -288,6 +288,7 @@ int main(void)
     RinGpuBufferDescV1 buffer_desc;
     RinGpuBufferDescV1 vertex_buffer_desc;
     RinGpuBufferDescV1 index_buffer_desc;
+    RinGpuBufferDescV1 indirect_buffer_desc;
     RinGpuBufferBindingV1 buffer_binding;
     RinGpuDispatchV1 dispatch;
     RinGpuImageReadbackV1 readback_desc;
@@ -301,6 +302,7 @@ int main(void)
     RinGpuHandle buffer = 0u;
     RinGpuHandle vertex_buffer = 0u;
     RinGpuHandle index_buffer = 0u;
+    RinGpuHandle indirect_buffer = 0u;
     RinGpuHandle compute_pipeline = 0u;
     RinGpuHandle compute_group = 0u;
     RinGpuHandle command_list = 0u;
@@ -383,6 +385,21 @@ int main(void)
                   &runtime, index_buffer, 0u, &vertex_index,
                   sizeof(vertex_index)) == RIN_GPU_OK);
     }
+    memset(&indirect_buffer_desc, 0, sizeof(indirect_buffer_desc));
+    indirect_buffer_desc.abi_version = RIN_GPU_ABI_VERSION;
+    indirect_buffer_desc.struct_size = sizeof(indirect_buffer_desc);
+    indirect_buffer_desc.size_bytes = 20u;
+    indirect_buffer_desc.usage = RIN_GPU_BUFFER_INDIRECT |
+                                 RIN_GPU_BUFFER_COPY_DESTINATION;
+    indirect_buffer_desc.flags = RIN_GPU_BUFFER_CPU_VISIBLE;
+    CHECK(rin_gpu_vulkan_graphics_runtime_create_buffer(
+              &runtime, &indirect_buffer_desc, &indirect_buffer) == RIN_GPU_OK);
+    {
+        const uint32_t indirect_draw[5] = {1u, 1u, 0u, 0u, 0u};
+        CHECK(rin_gpu_vulkan_graphics_runtime_upload_buffer(
+                  &runtime, indirect_buffer, 0u, indirect_draw,
+                  sizeof(indirect_draw)) == RIN_GPU_OK);
+    }
 
     memset(&image_desc, 0, sizeof(image_desc));
     image_desc.abi_version = RIN_GPU_ABI_VERSION;
@@ -462,6 +479,39 @@ int main(void)
     indexed_draw.vertex_buffers[0].offset = 0u;
     CHECK(rin_gpu_vulkan_graphics_runtime_draw_indexed(
               &runtime, command_list, &indexed_draw) == RIN_GPU_OK);
+    {
+        RinGpuDrawIndirectV1 indirect_draw = {0};
+        indirect_draw.abi_version = RIN_GPU_ABI_VERSION;
+        indirect_draw.struct_size = sizeof(indirect_draw);
+        indirect_draw.pipeline = indexed_pipeline;
+        indirect_draw.color_target = image;
+        indirect_draw.indirect_buffer = indirect_buffer;
+        indirect_draw.draw_count = 1u;
+        indirect_draw.stride = 20u;
+        indirect_draw.binding_count = 1u;
+        indirect_draw.vertex_buffers[0].binding = 0u;
+        indirect_draw.vertex_buffers[0].buffer = vertex_buffer;
+        CHECK(rin_gpu_vulkan_graphics_runtime_draw_indirect(
+                  &runtime, command_list, &indirect_draw) == RIN_GPU_OK);
+    }
+    {
+        RinGpuDrawIndexedIndirectV1 indirect_draw = {0};
+        indirect_draw.abi_version = RIN_GPU_ABI_VERSION;
+        indirect_draw.struct_size = sizeof(indirect_draw);
+        indirect_draw.pipeline = indexed_pipeline;
+        indirect_draw.color_target = image;
+        indirect_draw.index_buffer = index_buffer;
+        indirect_draw.indirect_buffer = indirect_buffer;
+        indirect_draw.index_format = RIN_GPU_INDEX_UINT8;
+        indirect_draw.draw_count = 1u;
+        indirect_draw.stride = 20u;
+        indirect_draw.vertex_count = 1u;
+        indirect_draw.binding_count = 1u;
+        indirect_draw.vertex_buffers[0].binding = 0u;
+        indirect_draw.vertex_buffers[0].buffer = vertex_buffer;
+        CHECK(rin_gpu_vulkan_graphics_runtime_draw_indexed_indirect(
+                  &runtime, command_list, &indirect_draw) == RIN_GPU_OK);
+    }
     CHECK(rin_gpu_vulkan_graphics_runtime_end_render_pass(
               &runtime, command_list) == RIN_GPU_OK);
     transition.before_state = RIN_GPU_IMAGE_STATE_COLOR_TARGET;

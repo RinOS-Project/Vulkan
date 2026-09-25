@@ -106,12 +106,21 @@ int rin_gpu_vulkan_graphics_runtime_draw_vertices(
 int rin_gpu_vulkan_graphics_runtime_draw_indexed(
     RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
     const RinGpuDrawIndexedV2* draw);
+int rin_gpu_vulkan_graphics_runtime_draw_indirect(
+    RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
+    const RinGpuDrawIndirectV1* draw);
+int rin_gpu_vulkan_graphics_runtime_draw_indexed_indirect(
+    RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
+    const RinGpuDrawIndexedIndirectV1* draw);
 int rin_gpu_vulkan_graphics_runtime_set_raster_state(
     RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
     const RinGpuRasterStateV1* state);
 int rin_gpu_vulkan_graphics_runtime_dispatch(
     RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
     const RinGpuDispatchV1* dispatch);
+int rin_gpu_vulkan_graphics_runtime_dispatch_indirect(
+    RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
+    const RinGpuDispatchIndirectV1* dispatch);
 int rin_gpu_vulkan_graphics_runtime_end_render_pass(
     RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list);
 int rin_gpu_vulkan_graphics_runtime_close_command_list(

@@ -513,6 +513,24 @@ int rin_gpu_vulkan_graphics_runtime_draw_indexed(
                                                   command_list, draw);
 }
 
+int rin_gpu_vulkan_graphics_runtime_draw_indirect(
+    RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
+    const RinGpuDrawIndirectV1* draw)
+{
+    if (!runtime_valid(runtime)) return RIN_GPU_ERROR_STATE;
+    return ringpu_runtime_command_draw_indirect(runtime->runtime,
+                                                command_list, draw);
+}
+
+int rin_gpu_vulkan_graphics_runtime_draw_indexed_indirect(
+    RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
+    const RinGpuDrawIndexedIndirectV1* draw)
+{
+    if (!runtime_valid(runtime)) return RIN_GPU_ERROR_STATE;
+    return ringpu_runtime_command_draw_indexed_indirect(
+        runtime->runtime, command_list, draw);
+}
+
 int rin_gpu_vulkan_graphics_runtime_set_raster_state(
     RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
     const RinGpuRasterStateV1* state)
@@ -529,6 +547,15 @@ int rin_gpu_vulkan_graphics_runtime_dispatch(
     if (!runtime_valid(runtime)) return RIN_GPU_ERROR_STATE;
     return ringpu_runtime_command_dispatch(runtime->runtime, command_list,
                                             dispatch);
+}
+
+int rin_gpu_vulkan_graphics_runtime_dispatch_indirect(
+    RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
+    const RinGpuDispatchIndirectV1* dispatch)
+{
+    if (!runtime_valid(runtime)) return RIN_GPU_ERROR_STATE;
+    return ringpu_runtime_command_dispatch_indirect(runtime->runtime,
+                                                    command_list, dispatch);
 }
 
 int rin_gpu_vulkan_graphics_runtime_end_render_pass(
