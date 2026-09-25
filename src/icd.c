@@ -1502,6 +1502,8 @@ static uint32_t descriptor_runtime_type(uint32_t type) {
         return RIN_GPU_VULKAN_DESCRIPTOR_STORAGE_BUFFER;
     case RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
         return RIN_GPU_VULKAN_DESCRIPTOR_SAMPLED_IMAGE;
+    case RIN_VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+        return RIN_GPU_VULKAN_DESCRIPTOR_STORAGE_IMAGE;
     case RIN_VK_DESCRIPTOR_TYPE_SAMPLER:
         return RIN_GPU_VULKAN_DESCRIPTOR_SAMPLER;
     default:
@@ -5419,7 +5421,8 @@ void RIN_VKAPI_CALL vkUpdateDescriptorSets(
                       source->descriptorCount > RIN_SHADER_MAX_RESOURCES ||
                       type == 0u;
         if (source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_SAMPLER ||
-            source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE)
+            source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
+            source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
             invalid = invalid || !source->pImageInfo;
         else if (source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
                  source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ||
@@ -5480,7 +5483,10 @@ void RIN_VKAPI_CALL vkUpdateDescriptorSets(
                         RIN_VK_IMAGE_TAG,
                         (uint32_t)(view->image - &g_images[0]),
                         view->image->generation);
-                    destination->access = RIN_GPU_RESOURCE_READ;
+                    destination->access =
+                        source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+                            ? RIN_GPU_RESOURCE_READ | RIN_GPU_RESOURCE_WRITE
+                            : RIN_GPU_RESOURCE_READ;
                 }
             }
         }

@@ -45,7 +45,7 @@ static uint32_t next_generation(uint32_t generation) {
 
 static int descriptor_type_valid(uint32_t descriptor_type) {
     return descriptor_type >= RIN_GPU_VULKAN_DESCRIPTOR_UNIFORM_BUFFER &&
-           descriptor_type <= RIN_GPU_VULKAN_DESCRIPTOR_COMPARISON_SAMPLER;
+           descriptor_type <= RIN_GPU_VULKAN_DESCRIPTOR_STORAGE_IMAGE;
 }
 
 static int layout_binding_valid(

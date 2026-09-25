@@ -177,6 +177,50 @@ static void make_surface(RinGpuRuntimeSoftwareSurfaceDescV1* surface,
     surface->acquire_image = acquire;
 }
 
+static int storage_image_descriptor_profile(void)
+{
+    RinSpirvTranslationInfoV1 vertex = {0};
+    RinSpirvTranslationInfoV1 fragment = {0};
+    RinGpuVulkanDescriptorSetLayoutBindingV1 layout = {0};
+    RinGpuVulkanDescriptorWriteV1 write = {0};
+    RinGpuVulkanDescriptorSetPlanV1 plan = {0};
+
+    vertex.struct_size = sizeof(vertex);
+    vertex.stage = RIN_SHADER_STAGE_VERTEX;
+    vertex.shader.abi_version = RIN_GPU_ABI_VERSION;
+    vertex.shader.struct_size = sizeof(vertex.shader);
+    vertex.shader.stage = RIN_SHADER_STAGE_VERTEX;
+    fragment.struct_size = sizeof(fragment);
+    fragment.stage = RIN_SHADER_STAGE_FRAGMENT;
+    fragment.shader.abi_version = RIN_GPU_ABI_VERSION;
+    fragment.shader.struct_size = sizeof(fragment.shader);
+    fragment.shader.stage = RIN_SHADER_STAGE_FRAGMENT;
+    fragment.shader.resource_count = 1u;
+    fragment.descriptor_count = 1u;
+    fragment.descriptors[0].set = 0u;
+    fragment.descriptors[0].binding = 3u;
+    fragment.descriptors[0].resource_index = 0u;
+    fragment.descriptors[0].resource_kind = RIN_SHADER_RESOURCE_STORAGE_IMAGE;
+    layout.set = 0u;
+    layout.binding = 3u;
+    layout.descriptor_type = RIN_GPU_VULKAN_DESCRIPTOR_STORAGE_IMAGE;
+    layout.descriptor_count = 1u;
+    layout.stage_flags = 1u;
+    write.set = 0u;
+    write.binding = 3u;
+    write.descriptor_type = RIN_GPU_VULKAN_DESCRIPTOR_STORAGE_IMAGE;
+    write.access = RIN_GPU_RESOURCE_READ | RIN_GPU_RESOURCE_WRITE;
+    write.resource = 1u;
+    CHECK(ringpu_vulkan_graphics_build_descriptor_set(
+              &vertex, &fragment, &layout, 1u, &write, 1u, &plan) ==
+          RIN_GPU_VULKAN_GRAPHICS_OK);
+    CHECK(plan.binding_count == 1u);
+    CHECK(plan.bindings[0].kind == RIN_SHADER_RESOURCE_STORAGE_IMAGE);
+    CHECK(plan.bindings[0].access ==
+          (RIN_GPU_RESOURCE_READ | RIN_GPU_RESOURCE_WRITE));
+    return 0;
+}
+
 int main(void)
 {
     RinGpuRuntimeSoftwareSurfaceDescV1 surface;
@@ -210,6 +254,7 @@ int main(void)
               &runtime, &surface,
               RIN_GPU_QUEUE_COPY | RIN_GPU_QUEUE_COMPUTE |
                   RIN_GPU_QUEUE_GRAPHICS) == RIN_GPU_OK);
+    CHECK(storage_image_descriptor_profile() == 0);
     make_constant_vertex(&vertex);
     make_constant_fragment(&fragment);
     memset(&plan, 0, sizeof(plan));

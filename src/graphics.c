@@ -34,7 +34,8 @@ static int descriptor_kind_valid(uint32_t kind) {
            kind == RIN_SHADER_RESOURCE_SAMPLED_IMAGE ||
            kind == RIN_SHADER_RESOURCE_SAMPLER ||
            kind == RIN_SHADER_RESOURCE_SAMPLED_DEPTH_IMAGE ||
-           kind == RIN_SHADER_RESOURCE_COMPARISON_SAMPLER;
+           kind == RIN_SHADER_RESOURCE_COMPARISON_SAMPLER ||
+           kind == RIN_SHADER_RESOURCE_STORAGE_IMAGE;
 }
 
 int ringpu_vulkan_graphics_translate_shader(
@@ -79,6 +80,8 @@ static uint32_t descriptor_resource_kind(uint32_t descriptor_type) {
             return RIN_SHADER_RESOURCE_SAMPLED_DEPTH_IMAGE;
         case RIN_GPU_VULKAN_DESCRIPTOR_COMPARISON_SAMPLER:
             return RIN_SHADER_RESOURCE_COMPARISON_SAMPLER;
+        case RIN_GPU_VULKAN_DESCRIPTOR_STORAGE_IMAGE:
+            return RIN_SHADER_RESOURCE_STORAGE_IMAGE;
         default:
             return RIN_SHADER_RESOURCE_NONE;
     }
@@ -448,6 +451,12 @@ int ringpu_vulkan_graphics_build_descriptor_set(
             if (write->descriptor_type ==
                     RIN_GPU_VULKAN_DESCRIPTOR_UNIFORM_BUFFER &&
                 write->access != RIN_GPU_RESOURCE_READ)
+                return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
+        } else if (kinds[index] == RIN_SHADER_RESOURCE_STORAGE_IMAGE) {
+            if (write->access == 0u ||
+                (write->access & ~RIN_GPU_RESOURCE_KNOWN_ACCESS) != 0u ||
+                write->offset != 0u || write->size_bytes != 0u ||
+                write->flags != 0u)
                 return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
         } else if (kinds[index] == RIN_SHADER_RESOURCE_SAMPLED_IMAGE ||
                    kinds[index] == RIN_SHADER_RESOURCE_SAMPLED_DEPTH_IMAGE) {
