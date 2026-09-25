@@ -19,8 +19,11 @@ public capability claim.
 `RinGpuVulkanSoftwarePlatformV1` is the host-only product owner used by the
 software-path regression. It owns zeroed allocation bytes, validates GPU
 address ranges and resource leases, executes the versioned transfer packet,
-and publishes completion through `poll`. It does not advertise or emulate a
-physical GPU, and malformed or unsupported packets fail closed.
+and publishes completion through `poll`. The host profile includes bounded
+2D RGBA8 single-mip/layer `vkCmdCopyImage`, buffer-to-image, and
+image-to-buffer operations with actual byte movement and readback. It does
+not advertise or emulate a physical GPU, and malformed or unsupported
+packets fail closed.
 
 Build and test:
 

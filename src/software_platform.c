@@ -316,7 +316,8 @@ static int software_allocate(void* context,
         return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
     *handle_out = 0u;
     if (descriptor->size_bytes > platform->max_total_bytes -
-                                  platform->total_bytes)
+                                   platform->total_bytes ||
+        descriptor->size_bytes > (uint64_t)SIZE_MAX)
         return RIN_VULKAN_PRODUCT_NO_SPACE;
     for (index = 0u; index < RIN_GPU_VULKAN_SOFTWARE_MAX_ALLOCATIONS;
          ++index) {
