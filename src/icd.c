@@ -20,6 +20,7 @@
 #define RIN_VK_MAX_SUBMIT_SEMAPHORES 8u
 #define RIN_VK_MAX_IMAGE_VIEWS 128u
 #define RIN_VK_MAX_SAMPLERS 128u
+#define RIN_VK_MAX_PIPELINE_LAYOUTS 64u
 #define RIN_VK_RESOURCE_ALIGNMENT UINT64_C(2097152)
 #define RIN_VK_BUFFER_TAG UINT64_C(0x5242)
 #define RIN_VK_IMAGE_TAG UINT64_C(0x5249)
@@ -28,6 +29,7 @@
 #define RIN_VK_SEMAPHORE_TAG UINT64_C(0x5253)
 #define RIN_VK_IMAGE_VIEW_TAG UINT64_C(0x5256)
 #define RIN_VK_SAMPLER_TAG UINT64_C(0x5254)
+#define RIN_VK_PIPELINE_LAYOUT_TAG UINT64_C(0x5250)
 
 typedef struct RinVkBaseFeatureStructure {
     RinVkStructureType sType;
@@ -151,6 +153,14 @@ typedef struct RinVkSamplerSlot {
     uint32_t compare_op;
 } RinVkSamplerSlot;
 
+typedef struct RinVkPipelineLayoutSlot {
+    uint32_t state;
+    uint32_t generation;
+    struct RinVkDevice_T* owner;
+    uint32_t set_layout_count;
+    RinVkDescriptorSetLayout set_layouts[RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS];
+} RinVkPipelineLayoutSlot;
+
 typedef struct RinVkFenceSlot {
     uint32_t state;
     uint32_t generation;
@@ -198,6 +208,7 @@ static RinVkBufferSlot g_buffers[RIN_VK_MAX_BUFFERS];
 static RinVkImageSlot g_images[RIN_VK_MAX_IMAGES];
 static RinVkImageViewSlot g_image_views[RIN_VK_MAX_IMAGE_VIEWS];
 static RinVkSamplerSlot g_samplers[RIN_VK_MAX_SAMPLERS];
+static RinVkPipelineLayoutSlot g_pipeline_layouts[RIN_VK_MAX_PIPELINE_LAYOUTS];
 static RinVkFenceSlot g_fences[RIN_VK_MAX_FENCES];
 static RinVkSemaphoreSlot g_semaphores[RIN_VK_MAX_SEMAPHORES];
 static RinVkSubmissionSlot g_submissions[RIN_VK_MAX_SUBMISSIONS];
@@ -683,6 +694,23 @@ static RinVkSamplerSlot* sampler_slot(RinVkDevice device,
     return slot;
 }
 
+static RinVkPipelineLayoutSlot* pipeline_layout_slot(
+        RinVkDevice device, RinVkPipelineLayout handle) {
+    struct RinVkDevice_T* owner = device_slot(device);
+    uint32_t index_field = (uint32_t)(handle & UINT64_C(0xffff));
+    uint32_t generation = (uint32_t)(handle >> 16u);
+    RinVkPipelineLayoutSlot* slot;
+    if (!owner || (handle >> 48u) != RIN_VK_PIPELINE_LAYOUT_TAG ||
+        index_field == 0u || index_field > RIN_VK_MAX_PIPELINE_LAYOUTS ||
+        generation == 0u)
+        return NULL;
+    slot = &g_pipeline_layouts[index_field - 1u];
+    if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) != 1u ||
+        slot->generation != generation || slot->owner != owner)
+        return NULL;
+    return slot;
+}
+
 static RinVkFenceSlot* fence_slot(RinVkDevice device, RinVkFence handle) {
     struct RinVkDevice_T* owner = device_slot(device);
     uint32_t index_field = (uint32_t)(handle & UINT64_C(0xffff));
@@ -875,6 +903,32 @@ static RinVkSamplerSlot* reserve_sampler_slot(
     uint32_t index;
     for (index = 0u; index < RIN_VK_MAX_SAMPLERS; ++index) {
         RinVkSamplerSlot* slot = &g_samplers[index];
+        uint32_t expected = 0u;
+        uint32_t generation;
+        if (!__atomic_compare_exchange_n(&slot->state, &expected, 2u, 0,
+                                         __ATOMIC_ACQUIRE,
+                                         __ATOMIC_RELAXED))
+            continue;
+        generation = slot->generation;
+        if (generation == UINT32_MAX) {
+            __atomic_store_n(&slot->state, 3u, __ATOMIC_RELEASE);
+            continue;
+        }
+        memset(slot, 0, sizeof(*slot));
+        slot->generation = generation + 1u;
+        slot->owner = owner;
+        __atomic_store_n(&slot->state, 2u, __ATOMIC_RELEASE);
+        *index_out = index;
+        return slot;
+    }
+    return NULL;
+}
+
+static RinVkPipelineLayoutSlot* reserve_pipeline_layout_slot(
+        struct RinVkDevice_T* owner, uint32_t* index_out) {
+    uint32_t index;
+    for (index = 0u; index < RIN_VK_MAX_PIPELINE_LAYOUTS; ++index) {
+        RinVkPipelineLayoutSlot* slot = &g_pipeline_layouts[index];
         uint32_t expected = 0u;
         uint32_t generation;
         if (!__atomic_compare_exchange_n(&slot->state, &expected, 2u, 0,
@@ -1092,6 +1146,14 @@ static void clear_sampler_slot(RinVkSamplerSlot* slot) {
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
 }
 
+static void clear_pipeline_layout_slot(RinVkPipelineLayoutSlot* slot) {
+    if (!slot) return;
+    slot->owner = NULL;
+    slot->set_layout_count = 0u;
+    memset(slot->set_layouts, 0, sizeof(slot->set_layouts));
+    __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
+}
+
 static int image_has_views(const RinVkImageSlot* image) {
     uint32_t index;
     if (!image) return 0;
@@ -1120,6 +1182,13 @@ static int device_view_sampler_active(
              __atomic_load_n(&g_samplers[index].state, __ATOMIC_ACQUIRE) ==
                  2u) &&
             g_samplers[index].owner == device)
+            return 1;
+    for (index = 0u; index < RIN_VK_MAX_PIPELINE_LAYOUTS; ++index)
+        if ((__atomic_load_n(&g_pipeline_layouts[index].state,
+                             __ATOMIC_ACQUIRE) == 1u ||
+             __atomic_load_n(&g_pipeline_layouts[index].state,
+                             __ATOMIC_ACQUIRE) == 2u) &&
+            g_pipeline_layouts[index].owner == device)
             return 1;
     return 0;
 }
@@ -4185,6 +4254,117 @@ void RIN_VKAPI_CALL vkUpdateDescriptorSets(
     }
 }
 
+RinVkResult RIN_VKAPI_CALL vkCreatePipelineLayout(
+        RinVkDevice device, const RinVkPipelineLayoutCreateInfo* info,
+        const void* allocator, RinVkPipelineLayout* layout_out) {
+    struct RinVkDevice_T* owner = device_slot(device);
+    RinVkPipelineLayoutSlot* layout;
+    uint32_t index;
+    (void)allocator;
+    if (!layout_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    *layout_out = 0u;
+    if (!owner || !info ||
+        info->sType != RIN_VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO ||
+        info->pNext || info->flags != 0u ||
+        info->setLayoutCount > RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS ||
+        (info->setLayoutCount != 0u && !info->pSetLayouts) ||
+        info->pushConstantRangeCount != 0u || info->pPushConstantRanges)
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    for (index = 0u; index < info->setLayoutCount; ++index)
+        if (!rin_gpu_vulkan_descriptor_layout_is_valid(
+                &owner->descriptor_runtime,
+                (RinGpuVulkanDescriptorHandleV1)info->pSetLayouts[index]))
+            return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    layout = reserve_pipeline_layout_slot(owner, &index);
+    if (!layout) return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+    layout->set_layout_count = info->setLayoutCount;
+    if (info->setLayoutCount != 0u)
+        memcpy(layout->set_layouts, info->pSetLayouts,
+               sizeof(*info->pSetLayouts) * info->setLayoutCount);
+    __atomic_store_n(&layout->state, 1u, __ATOMIC_RELEASE);
+    *layout_out = resource_handle(RIN_VK_PIPELINE_LAYOUT_TAG, index,
+                                  layout->generation);
+    return RIN_VK_SUCCESS;
+}
+
+void RIN_VKAPI_CALL vkDestroyPipelineLayout(RinVkDevice device,
+                                            RinVkPipelineLayout handle,
+                                            const void* allocator) {
+    RinVkPipelineLayoutSlot* layout;
+    (void)allocator;
+    layout = pipeline_layout_slot(device, handle);
+    if (layout) clear_pipeline_layout_slot(layout);
+}
+
+void RIN_VKAPI_CALL vkCmdBindDescriptorSets(
+        RinVkCommandBuffer command_buffer, uint32_t pipeline_bind_point,
+        RinVkPipelineLayout layout_handle, uint32_t first_set,
+        uint32_t descriptor_set_count, const RinVkDescriptorSet* descriptor_sets,
+        uint32_t dynamic_offset_count, const uint32_t* dynamic_offsets) {
+    RinGpuVulkanCommandBufferV1* command =
+        (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
+    RinVkPipelineLayoutSlot* layout;
+    uintptr_t owner_address = 0u;
+    struct RinVkDevice_T* owner;
+    uint64_t set_handles[RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS];
+    uint32_t dynamic_cursor = 0u;
+    uint32_t index;
+    int result;
+    if (pipeline_bind_point > 1u || first_set > UINT32_MAX - descriptor_set_count ||
+        descriptor_set_count == 0u ||
+        descriptor_set_count > RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS ||
+        !descriptor_sets || dynamic_offset_count >
+            RIN_GPU_VULKAN_COMMAND_MAX_DYNAMIC_OFFSETS ||
+        (dynamic_offset_count != 0u && !dynamic_offsets)) {
+        rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime,
+                                                     command);
+        return;
+    }
+    result = rin_gpu_vulkan_command_buffer_owner(
+        &g_command_runtime, command, &owner_address);
+    owner = result == RIN_GPU_VULKAN_COMMAND_OK
+                ? device_slot((RinVkDevice)(void*)owner_address)
+                : NULL;
+    layout = owner ? pipeline_layout_slot(owner, layout_handle) : NULL;
+    if (!owner || !layout || first_set > layout->set_layout_count ||
+        descriptor_set_count > layout->set_layout_count - first_set) {
+        rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime,
+                                                     command);
+        return;
+    }
+    for (index = 0u; index < descriptor_set_count; ++index) {
+        uint32_t required = 0u;
+        result = rin_gpu_vulkan_descriptor_set_dynamic_offset_count(
+            &owner->descriptor_runtime,
+            (RinGpuVulkanDescriptorHandleV1)descriptor_sets[index], &required);
+        if (result != RIN_GPU_VULKAN_GRAPHICS_OK ||
+            !rin_gpu_vulkan_descriptor_set_matches_layout(
+                &owner->descriptor_runtime,
+                (RinGpuVulkanDescriptorHandleV1)descriptor_sets[index],
+                (RinGpuVulkanDescriptorHandleV1)layout->set_layouts[first_set +
+                                                                      index]) ||
+            required > dynamic_offset_count - dynamic_cursor ||
+            rin_gpu_vulkan_descriptor_set_validate_dynamic_offsets(
+                &owner->descriptor_runtime,
+                (RinGpuVulkanDescriptorHandleV1)descriptor_sets[index],
+                dynamic_offsets ? dynamic_offsets + dynamic_cursor : NULL,
+                required, &required) != RIN_GPU_VULKAN_GRAPHICS_OK) {
+            rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime,
+                                                         command);
+            return;
+        }
+        set_handles[index] = descriptor_sets[index];
+        dynamic_cursor += required;
+    }
+    if (dynamic_cursor != dynamic_offset_count ||
+        rin_gpu_vulkan_command_buffer_record_descriptor_bind(
+            &g_command_runtime, command, first_set, set_handles,
+            descriptor_set_count, dynamic_offsets, dynamic_offset_count) !=
+            RIN_GPU_VULKAN_COMMAND_OK)
+        rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime,
+                                                     command);
+}
+
 RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
         RinVkDevice device, const char* name) {
     if (!device_slot(device) || !name) return NULL;
@@ -4286,6 +4466,12 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
         return (RinVkVoidFunction)vkFreeDescriptorSets;
     if (name_equal(name, "vkUpdateDescriptorSets"))
         return (RinVkVoidFunction)vkUpdateDescriptorSets;
+    if (name_equal(name, "vkCreatePipelineLayout"))
+        return (RinVkVoidFunction)vkCreatePipelineLayout;
+    if (name_equal(name, "vkDestroyPipelineLayout"))
+        return (RinVkVoidFunction)vkDestroyPipelineLayout;
+    if (name_equal(name, "vkCmdBindDescriptorSets"))
+        return (RinVkVoidFunction)vkCmdBindDescriptorSets;
     return NULL;
 }
 

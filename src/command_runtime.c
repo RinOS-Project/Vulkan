@@ -83,6 +83,13 @@ static void reset_recording(RinGpuVulkanCommandBufferV1* buffer) {
     memset(buffer->copies, 0, sizeof(buffer->copies));
     buffer->transfer_op_count = 0u;
     memset(buffer->transfer_ops, 0, sizeof(buffer->transfer_ops));
+    buffer->descriptor_bind_recorded = 0u;
+    buffer->descriptor_bind_first_set = 0u;
+    buffer->descriptor_bind_set_count = 0u;
+    buffer->descriptor_dynamic_offset_count = 0u;
+    memset(buffer->descriptor_sets, 0, sizeof(buffer->descriptor_sets));
+    memset(buffer->descriptor_dynamic_offsets, 0,
+           sizeof(buffer->descriptor_dynamic_offsets));
 }
 
 static int pool_has_in_flight(const RinGpuVulkanCommandRuntimeV1* runtime,
@@ -511,6 +518,31 @@ int rin_gpu_vulkan_command_buffer_record_transfer_ops(
     memcpy(&buffer->transfer_ops[buffer->transfer_op_count], operations,
            sizeof(*operations) * (size_t)operation_count);
     buffer->transfer_op_count += operation_count;
+    return RIN_GPU_VULKAN_COMMAND_OK;
+}
+
+int rin_gpu_vulkan_command_buffer_record_descriptor_bind(
+        RinGpuVulkanCommandRuntimeV1* runtime,
+        RinGpuVulkanCommandBufferV1* handle, uint32_t first_set,
+        const uint64_t* descriptor_sets, uint32_t descriptor_set_count,
+        const uint32_t* dynamic_offsets, uint32_t dynamic_offset_count) {
+    RinGpuVulkanCommandBufferV1* buffer = buffer_slot(runtime, handle);
+    if (!buffer || buffer->lifecycle != RIN_GPU_VULKAN_COMMAND_BUFFER_RECORDING ||
+        !descriptor_sets || descriptor_set_count == 0u ||
+        descriptor_set_count > RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS ||
+        dynamic_offset_count > RIN_GPU_VULKAN_COMMAND_MAX_DYNAMIC_OFFSETS ||
+        (dynamic_offset_count != 0u && !dynamic_offsets) ||
+        buffer->descriptor_bind_recorded != 0u)
+        return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
+    buffer->descriptor_bind_recorded = 1u;
+    buffer->descriptor_bind_first_set = first_set;
+    buffer->descriptor_bind_set_count = descriptor_set_count;
+    buffer->descriptor_dynamic_offset_count = dynamic_offset_count;
+    memcpy(buffer->descriptor_sets, descriptor_sets,
+           sizeof(*descriptor_sets) * descriptor_set_count);
+    if (dynamic_offset_count != 0u)
+        memcpy(buffer->descriptor_dynamic_offsets, dynamic_offsets,
+               sizeof(*dynamic_offsets) * dynamic_offset_count);
     return RIN_GPU_VULKAN_COMMAND_OK;
 }
 

@@ -12,6 +12,8 @@
 #define RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_2 2u
 #define RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS 16u
 #define RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS 8u
+#define RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS 4u
+#define RIN_GPU_VULKAN_COMMAND_MAX_DYNAMIC_OFFSETS 32u
 
 #define RIN_GPU_VULKAN_COMMAND_POOL_TRANSIENT 0x00000001u
 #define RIN_GPU_VULKAN_COMMAND_POOL_RESET_BUFFER 0x00000002u
@@ -125,6 +127,12 @@ struct RinGpuVulkanCommandBufferV1 {
     uint32_t transfer_op_count;
     RinGpuVulkanTransferOpV2
         transfer_ops[RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS];
+    uint32_t descriptor_bind_recorded;
+    uint32_t descriptor_bind_first_set;
+    uint32_t descriptor_bind_set_count;
+    uint32_t descriptor_dynamic_offset_count;
+    uint64_t descriptor_sets[RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS];
+    uint32_t descriptor_dynamic_offsets[RIN_GPU_VULKAN_COMMAND_MAX_DYNAMIC_OFFSETS];
 };
 
 typedef struct RinGpuVulkanCommandRuntimeV1 {
@@ -173,6 +181,11 @@ int rin_gpu_vulkan_command_buffer_record_transfer_ops(
     RinGpuVulkanCommandRuntimeV1* runtime,
     RinGpuVulkanCommandBufferV1* buffer,
     const RinGpuVulkanTransferOpV2* operations, uint32_t operation_count);
+int rin_gpu_vulkan_command_buffer_record_descriptor_bind(
+    RinGpuVulkanCommandRuntimeV1* runtime,
+    RinGpuVulkanCommandBufferV1* buffer, uint32_t first_set,
+    const uint64_t* descriptor_sets, uint32_t descriptor_set_count,
+    const uint32_t* dynamic_offsets, uint32_t dynamic_offset_count);
 void rin_gpu_vulkan_command_buffer_record_failure(
     RinGpuVulkanCommandRuntimeV1* runtime,
     RinGpuVulkanCommandBufferV1* buffer);

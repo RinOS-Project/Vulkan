@@ -67,6 +67,9 @@ int rin_gpu_vulkan_descriptor_layout_create(
 int rin_gpu_vulkan_descriptor_layout_destroy(
     RinGpuVulkanDescriptorRuntimeV1* runtime,
     RinGpuVulkanDescriptorHandleV1 layout);
+int rin_gpu_vulkan_descriptor_layout_is_valid(
+    const RinGpuVulkanDescriptorRuntimeV1* runtime,
+    RinGpuVulkanDescriptorHandleV1 layout);
 int rin_gpu_vulkan_descriptor_pool_create(
     RinGpuVulkanDescriptorRuntimeV1* runtime, uint32_t max_sets,
     RinGpuVulkanDescriptorHandleV1* pool_out);
@@ -89,6 +92,10 @@ int rin_gpu_vulkan_descriptor_set_free_from_pool(
     RinGpuVulkanDescriptorRuntimeV1* runtime,
     RinGpuVulkanDescriptorHandleV1 pool,
     RinGpuVulkanDescriptorHandleV1 set);
+int rin_gpu_vulkan_descriptor_set_matches_layout(
+    const RinGpuVulkanDescriptorRuntimeV1* runtime,
+    RinGpuVulkanDescriptorHandleV1 set,
+    RinGpuVulkanDescriptorHandleV1 layout);
 int rin_gpu_vulkan_descriptor_set_update(
     RinGpuVulkanDescriptorRuntimeV1* runtime,
     RinGpuVulkanDescriptorHandleV1 set,
@@ -97,6 +104,9 @@ int rin_gpu_vulkan_descriptor_set_validate_dynamic_offsets(
     RinGpuVulkanDescriptorRuntimeV1* runtime,
     RinGpuVulkanDescriptorHandleV1 set, const uint32_t* offsets,
     uint32_t offset_count, uint32_t* consumed_count_out);
+int rin_gpu_vulkan_descriptor_set_dynamic_offset_count(
+    const RinGpuVulkanDescriptorRuntimeV1* runtime,
+    RinGpuVulkanDescriptorHandleV1 set, uint32_t* count_out);
 int rin_gpu_vulkan_descriptor_set_build_plan(
     RinGpuVulkanDescriptorRuntimeV1* runtime,
     RinGpuVulkanDescriptorHandleV1 set,

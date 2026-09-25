@@ -39,9 +39,10 @@
 #define RIN_VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO 14
 #define RIN_VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO 15
 #define RIN_VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO 31
-#define RIN_VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO 30
+#define RIN_VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO 32
 #define RIN_VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO 33
 #define RIN_VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO 34
+#define RIN_VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO 30
 #define RIN_VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO 39
 #define RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO 40
 #define RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO 42
@@ -786,6 +787,16 @@ typedef struct RinVkDescriptorSetAllocateInfo {
     const RinVkDescriptorSetLayout* pSetLayouts;
 } RinVkDescriptorSetAllocateInfo;
 
+typedef struct RinVkPipelineLayoutCreateInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    uint32_t setLayoutCount;
+    const RinVkDescriptorSetLayout* pSetLayouts;
+    uint32_t pushConstantRangeCount;
+    const void* pPushConstantRanges;
+} RinVkPipelineLayoutCreateInfo;
+
 typedef struct RinVkDescriptorBufferInfo {
     RinVkBuffer buffer;
     uint64_t offset;
@@ -1450,6 +1461,13 @@ RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkUpdateDescriptorSets(RinVkDevice device, uint32_t write_count,
                        const RinVkWriteDescriptorSet* writes,
                        uint32_t copy_count, const void* copies);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkCreatePipelineLayout(RinVkDevice device,
+                       const RinVkPipelineLayoutCreateInfo* create_info,
+                       const void* allocator, RinVkPipelineLayout* layout_out);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkDestroyPipelineLayout(RinVkDevice device, RinVkPipelineLayout layout,
+                        const void* allocator);
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkCmdBindDescriptorSets(RinVkCommandBuffer command_buffer,
                          uint32_t pipeline_bind_point,
