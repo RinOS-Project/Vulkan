@@ -14,6 +14,7 @@ add_subdirectory("${RINGPU_DIR}" "ringpu-build" EXCLUDE_FROM_ALL)
 
 set(RINVULKAN_SOURCES
     src/command_runtime.c
+    src/descriptor_runtime.c
     src/graphics.c
     src/icd.c
     src/profile.c

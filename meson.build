@@ -4,6 +4,7 @@ ringpu_dep = dependency('ringpu', required: true)
 rinvulkan_inc = include_directories('include')
 rinvulkan_sources = files(
   'src/command_runtime.c',
+  'src/descriptor_runtime.c',
   'src/graphics.c',
   'src/icd.c',
   'src/profile.c',
