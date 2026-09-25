@@ -2,6 +2,7 @@
 #ifndef RINVULKAN_PUBLIC_GRAPHICS_H
 #define RINVULKAN_PUBLIC_GRAPHICS_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include <ringpu/compatibility.h>
@@ -115,6 +116,17 @@ typedef struct RinGpuVulkanDescriptorSetPlanV1 {
     uint32_t set_count;
     RinGpuGraphicsBindingV1 bindings[RIN_SHADER_MAX_RESOURCES];
 } RinGpuVulkanDescriptorSetPlanV1;
+
+/* Translate a caller-owned SPIR-V module through the RinGPU frontend before
+ * it is consumed by the Vulkan graphics plan builder.  Specialization
+ * overrides are applied while the module is translated; the returned RSH1
+ * bytes and metadata are published only after structural and shader
+ * validation succeeds. */
+int ringpu_vulkan_graphics_translate_shader(
+    const uint32_t* words, size_t word_count, uint32_t expected_stage,
+    const RinSpirvSpecializationValueV1* overrides, uint32_t override_count,
+    void* rin_shader_out, size_t rin_shader_capacity,
+    RinSpirvTranslationInfoV1* info_out);
 
 /* Build the pointer-free RinGPU graphics pipeline description from the
  * validated stage interfaces produced by ringpu_spirv_translate().  This is
