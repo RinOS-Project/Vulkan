@@ -208,7 +208,7 @@ static int software_submit(void* context,
         packet->reserved != 0u)
         return RIN_VULKAN_PRODUCT_PROTOCOL;
     if (packet->version == RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION) {
-        if (packet->struct_size != sizeof(*packet) ||
+        if (packet->struct_size != sizeof(*packet) || packet->copy_count == 0u ||
             packet->copy_count > RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_COPIES)
             return RIN_VULKAN_PRODUCT_PROTOCOL;
         for (copy_index = 0u; copy_index < packet->copy_count; ++copy_index) {
@@ -246,6 +246,7 @@ static int software_submit(void* context,
         packet_v2 = (const RinGpuVulkanTransferPacketV2*)(uintptr_t)
             submission->command_cookie;
         if (packet_v2->struct_size != sizeof(*packet_v2) ||
+            packet_v2->op_count == 0u ||
             packet_v2->op_count > RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS)
             return RIN_VULKAN_PRODUCT_PROTOCOL;
         for (operation_index = 0u; operation_index < packet_v2->op_count;

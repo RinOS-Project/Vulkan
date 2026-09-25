@@ -93,10 +93,6 @@ static void reset_recording(RinGpuVulkanCommandBufferV1* buffer) {
     buffer->barrier_count = 0u;
     buffer->reserved_barrier = 0u;
     memset(buffer->barriers, 0, sizeof(buffer->barriers));
-    buffer->query_command_count = 0u;
-    buffer->event_command_count = 0u;
-    memset(buffer->query_commands, 0, sizeof(buffer->query_commands));
-    memset(buffer->event_commands, 0, sizeof(buffer->event_commands));
 }
 
 static int pool_has_in_flight(const RinGpuVulkanCommandRuntimeV1* runtime,
@@ -575,44 +571,6 @@ int rin_gpu_vulkan_command_buffer_record_barrier(
     buffer->barriers[buffer->barrier_count].dst_stage_mask = dst_stage_mask;
     buffer->barriers[buffer->barrier_count].dst_access_mask = dst_access_mask;
     ++buffer->barrier_count;
-    return RIN_GPU_VULKAN_COMMAND_OK;
-}
-
-int rin_gpu_vulkan_command_buffer_record_query(
-        RinGpuVulkanCommandRuntimeV1* runtime,
-        RinGpuVulkanCommandBufferV1* handle, uint64_t query_pool,
-        uint32_t query, uint32_t flags, uint32_t operation) {
-    RinGpuVulkanCommandBufferV1* buffer = buffer_slot(runtime, handle);
-    if (!buffer || buffer->lifecycle != RIN_GPU_VULKAN_COMMAND_BUFFER_RECORDING ||
-        query_pool == 0u || operation < RIN_GPU_VULKAN_QUERY_COMMAND_BEGIN ||
-        operation > RIN_GPU_VULKAN_QUERY_COMMAND_TIMESTAMP ||
-        buffer->query_command_count >=
-            RIN_GPU_VULKAN_COMMAND_MAX_QUERY_COMMANDS)
-        return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
-    buffer->query_commands[buffer->query_command_count].query_pool = query_pool;
-    buffer->query_commands[buffer->query_command_count].query = query;
-    buffer->query_commands[buffer->query_command_count].flags = flags;
-    buffer->query_commands[buffer->query_command_count].operation = operation;
-    buffer->query_commands[buffer->query_command_count].reserved = 0u;
-    ++buffer->query_command_count;
-    return RIN_GPU_VULKAN_COMMAND_OK;
-}
-
-int rin_gpu_vulkan_command_buffer_record_event(
-        RinGpuVulkanCommandRuntimeV1* runtime,
-        RinGpuVulkanCommandBufferV1* handle, uint64_t event,
-        uint32_t operation) {
-    RinGpuVulkanCommandBufferV1* buffer = buffer_slot(runtime, handle);
-    if (!buffer || buffer->lifecycle != RIN_GPU_VULKAN_COMMAND_BUFFER_RECORDING ||
-        event == 0u || operation < RIN_GPU_VULKAN_EVENT_COMMAND_SET ||
-        operation > RIN_GPU_VULKAN_EVENT_COMMAND_WAIT ||
-        buffer->event_command_count >=
-            RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS)
-        return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
-    buffer->event_commands[buffer->event_command_count].event = event;
-    buffer->event_commands[buffer->event_command_count].operation = operation;
-    buffer->event_commands[buffer->event_command_count].reserved = 0u;
-    ++buffer->event_command_count;
     return RIN_GPU_VULKAN_COMMAND_OK;
 }
 

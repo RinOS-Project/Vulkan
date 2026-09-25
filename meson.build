@@ -6,6 +6,7 @@ rinvulkan_sources = files(
   'src/command_runtime.c',
   'src/descriptor_runtime.c',
   'src/graphics.c',
+  'src/graphics_runtime.c',
   'src/icd.c',
   'src/profile.c',
   'src/runtime.c',

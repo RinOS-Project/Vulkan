@@ -22,9 +22,6 @@
 #define RIN_VK_MAX_SAMPLERS 128u
 #define RIN_VK_MAX_PIPELINE_LAYOUTS 64u
 #define RIN_VK_MAX_PIPELINE_CACHES 32u
-#define RIN_VK_MAX_QUERY_POOLS 32u
-#define RIN_VK_MAX_EVENTS 128u
-#define RIN_VK_QUERY_POOL_MAX_QUERIES 64u
 #define RIN_VK_PIPELINE_CACHE_MAX_PAYLOAD 4096u
 #define RIN_VK_RESOURCE_ALIGNMENT UINT64_C(2097152)
 #define RIN_VK_BUFFER_TAG UINT64_C(0x5242)
@@ -36,8 +33,6 @@
 #define RIN_VK_SAMPLER_TAG UINT64_C(0x5254)
 #define RIN_VK_PIPELINE_LAYOUT_TAG UINT64_C(0x5250)
 #define RIN_VK_PIPELINE_CACHE_TAG UINT64_C(0x5243)
-#define RIN_VK_QUERY_POOL_TAG UINT64_C(0x5251)
-#define RIN_VK_EVENT_TAG UINT64_C(0x5245)
 #define RIN_VK_PIPELINE_CACHE_MAGIC UINT32_C(0x52494e43)
 #define RIN_VK_PIPELINE_CACHE_VERSION 1u
 
@@ -183,32 +178,6 @@ typedef struct RinVkPipelineCacheSlot {
     uint8_t payload[RIN_VK_PIPELINE_CACHE_MAX_PAYLOAD];
 } RinVkPipelineCacheSlot;
 
-typedef struct RinVkQueryValue {
-    uint64_t values[9];
-    uint64_t availability;
-    uint32_t active;
-    uint32_t pending;
-} RinVkQueryValue;
-
-typedef struct RinVkQueryPoolSlot {
-    uint32_t state;
-    uint32_t generation;
-    struct RinVkDevice_T* owner;
-    uint32_t query_type;
-    uint32_t query_count;
-    uint32_t pipeline_statistics;
-    uint32_t reserved;
-    RinVkQueryValue queries[RIN_VK_QUERY_POOL_MAX_QUERIES];
-} RinVkQueryPoolSlot;
-
-typedef struct RinVkEventSlot {
-    uint32_t state;
-    uint32_t generation;
-    struct RinVkDevice_T* owner;
-    volatile uint32_t signaled;
-    volatile uint32_t pending;
-} RinVkEventSlot;
-
 typedef struct RinVkFenceSlot {
     uint32_t state;
     uint32_t generation;
@@ -263,8 +232,6 @@ static RinVkImageViewSlot g_image_views[RIN_VK_MAX_IMAGE_VIEWS];
 static RinVkSamplerSlot g_samplers[RIN_VK_MAX_SAMPLERS];
 static RinVkPipelineLayoutSlot g_pipeline_layouts[RIN_VK_MAX_PIPELINE_LAYOUTS];
 static RinVkPipelineCacheSlot g_pipeline_caches[RIN_VK_MAX_PIPELINE_CACHES];
-static RinVkQueryPoolSlot g_query_pools[RIN_VK_MAX_QUERY_POOLS];
-static RinVkEventSlot g_events[RIN_VK_MAX_EVENTS];
 static RinVkFenceSlot g_fences[RIN_VK_MAX_FENCES];
 static RinVkSemaphoreSlot g_semaphores[RIN_VK_MAX_SEMAPHORES];
 static RinVkSubmissionSlot g_submissions[RIN_VK_MAX_SUBMISSIONS];
@@ -849,39 +816,6 @@ static RinVkPipelineCacheSlot* pipeline_cache_slot(
     return slot;
 }
 
-static RinVkQueryPoolSlot* query_pool_slot(
-        RinVkDevice device, RinVkQueryPool handle) {
-    struct RinVkDevice_T* owner = device_slot(device);
-    uint32_t index_field = (uint32_t)(handle & UINT64_C(0xffff));
-    uint32_t generation = (uint32_t)(handle >> 16u);
-    RinVkQueryPoolSlot* slot;
-    if (!owner || (handle >> 48u) != RIN_VK_QUERY_POOL_TAG ||
-        index_field == 0u || index_field > RIN_VK_MAX_QUERY_POOLS ||
-        generation == 0u)
-        return NULL;
-    slot = &g_query_pools[index_field - 1u];
-    if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) != 1u ||
-        slot->generation != generation || slot->owner != owner)
-        return NULL;
-    return slot;
-}
-
-static RinVkEventSlot* event_slot(RinVkDevice device, RinVkEvent handle) {
-    struct RinVkDevice_T* owner = device_slot(device);
-    uint32_t index_field = (uint32_t)(handle & UINT64_C(0xffff));
-    uint32_t generation = (uint32_t)(handle >> 16u);
-    RinVkEventSlot* slot;
-    if (!owner || (handle >> 48u) != RIN_VK_EVENT_TAG ||
-        index_field == 0u || index_field > RIN_VK_MAX_EVENTS ||
-        generation == 0u)
-        return NULL;
-    slot = &g_events[index_field - 1u];
-    if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) != 1u ||
-        slot->generation != generation || slot->owner != owner)
-        return NULL;
-    return slot;
-}
-
 static RinVkFenceSlot* fence_slot(RinVkDevice device, RinVkFence handle) {
     struct RinVkDevice_T* owner = device_slot(device);
     uint32_t index_field = (uint32_t)(handle & UINT64_C(0xffff));
@@ -1151,58 +1085,6 @@ static RinVkPipelineCacheSlot* reserve_pipeline_cache_slot(
     return NULL;
 }
 
-static RinVkQueryPoolSlot* reserve_query_pool_slot(
-        struct RinVkDevice_T* owner, uint32_t* index_out) {
-    uint32_t index;
-    for (index = 0u; index < RIN_VK_MAX_QUERY_POOLS; ++index) {
-        RinVkQueryPoolSlot* slot = &g_query_pools[index];
-        uint32_t expected = 0u;
-        uint32_t generation;
-        if (!__atomic_compare_exchange_n(&slot->state, &expected, 2u, 0,
-                                         __ATOMIC_ACQUIRE,
-                                         __ATOMIC_RELAXED))
-            continue;
-        generation = slot->generation;
-        if (generation == UINT32_MAX) {
-            __atomic_store_n(&slot->state, 3u, __ATOMIC_RELEASE);
-            continue;
-        }
-        memset(slot, 0, sizeof(*slot));
-        slot->generation = generation + 1u;
-        slot->owner = owner;
-        __atomic_store_n(&slot->state, 2u, __ATOMIC_RELEASE);
-        *index_out = index;
-        return slot;
-    }
-    return NULL;
-}
-
-static RinVkEventSlot* reserve_event_slot(
-        struct RinVkDevice_T* owner, uint32_t* index_out) {
-    uint32_t index;
-    for (index = 0u; index < RIN_VK_MAX_EVENTS; ++index) {
-        RinVkEventSlot* slot = &g_events[index];
-        uint32_t expected = 0u;
-        uint32_t generation;
-        if (!__atomic_compare_exchange_n(&slot->state, &expected, 2u, 0,
-                                         __ATOMIC_ACQUIRE,
-                                         __ATOMIC_RELAXED))
-            continue;
-        generation = slot->generation;
-        if (generation == UINT32_MAX) {
-            __atomic_store_n(&slot->state, 3u, __ATOMIC_RELEASE);
-            continue;
-        }
-        memset(slot, 0, sizeof(*slot));
-        slot->generation = generation + 1u;
-        slot->owner = owner;
-        __atomic_store_n(&slot->state, 2u, __ATOMIC_RELEASE);
-        *index_out = index;
-        return slot;
-    }
-    return NULL;
-}
-
 static void clear_memory_slot(RinVkMemorySlot* slot) {
     slot->owner = NULL;
     slot->product_allocation = 0u;
@@ -1416,24 +1298,6 @@ static void clear_pipeline_cache_slot(RinVkPipelineCacheSlot* slot) {
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
 }
 
-static void clear_query_pool_slot(RinVkQueryPoolSlot* slot) {
-    if (!slot) return;
-    slot->owner = NULL;
-    slot->query_type = 0u;
-    slot->query_count = 0u;
-    slot->pipeline_statistics = 0u;
-    memset(slot->queries, 0, sizeof(slot->queries));
-    __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
-}
-
-static void clear_event_slot(RinVkEventSlot* slot) {
-    if (!slot) return;
-    slot->owner = NULL;
-    __atomic_store_n(&slot->signaled, 0u, __ATOMIC_RELEASE);
-    __atomic_store_n(&slot->pending, 0u, __ATOMIC_RELEASE);
-    __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
-}
-
 static int image_has_views(const RinVkImageSlot* image) {
     uint32_t index;
     if (!image) return 0;
@@ -1476,18 +1340,6 @@ static int device_view_sampler_active(
              __atomic_load_n(&g_pipeline_caches[index].state,
                              __ATOMIC_ACQUIRE) == 2u) &&
             g_pipeline_caches[index].owner == device)
-            return 1;
-    for (index = 0u; index < RIN_VK_MAX_QUERY_POOLS; ++index)
-        if ((__atomic_load_n(&g_query_pools[index].state, __ATOMIC_ACQUIRE) ==
-                 1u ||
-             __atomic_load_n(&g_query_pools[index].state, __ATOMIC_ACQUIRE) ==
-                 2u) &&
-            g_query_pools[index].owner == device)
-            return 1;
-    for (index = 0u; index < RIN_VK_MAX_EVENTS; ++index)
-        if ((__atomic_load_n(&g_events[index].state, __ATOMIC_ACQUIRE) == 1u ||
-             __atomic_load_n(&g_events[index].state, __ATOMIC_ACQUIRE) == 2u) &&
-            g_events[index].owner == device)
             return 1;
     return 0;
 }
@@ -1598,191 +1450,6 @@ static void complete_submission_sync(const RinVkSubmissionSlot* submission) {
     }
 }
 
-static void complete_submission_query_events(
-        const RinVkSubmissionSlot* submission) {
-    uint32_t buffer_index;
-    if (!submission || !submission->owner) return;
-    for (buffer_index = 0u;
-         buffer_index < submission->command_buffer_count; ++buffer_index) {
-        const RinGpuVulkanCommandBufferV1* buffer =
-            submission->command_buffers[buffer_index];
-        uint32_t index;
-        if (!buffer) continue;
-        for (index = 0u; index < buffer->query_command_count; ++index) {
-            const RinGpuVulkanQueryCommandV1* command =
-                &buffer->query_commands[index];
-            RinVkQueryPoolSlot* pool = query_pool_slot(
-                (RinVkDevice)submission->owner,
-                (RinVkQueryPool)command->query_pool);
-            RinVkQueryValue* query;
-            if (!pool || command->query >= pool->query_count) continue;
-            query = &pool->queries[command->query];
-            if (command->operation == RIN_GPU_VULKAN_QUERY_COMMAND_RESET) {
-                memset(query, 0, sizeof(*query));
-            } else if (command->operation ==
-                       RIN_GPU_VULKAN_QUERY_COMMAND_TIMESTAMP) {
-                if (query->active == 0u) {
-                    query->values[0] = submission->sequence;
-                    query->availability = 1u;
-                }
-            } else if (command->operation ==
-                       RIN_GPU_VULKAN_QUERY_COMMAND_BEGIN) {
-                query->active = 1u;
-                query->availability = 0u;
-            } else if (command->operation ==
-                       RIN_GPU_VULKAN_QUERY_COMMAND_END) {
-                if (query->active != 0u) {
-                    query->active = 0u;
-                    query->availability = 1u;
-                }
-            }
-            query->pending = 0u;
-        }
-        for (index = 0u; index < buffer->event_command_count; ++index) {
-            const RinGpuVulkanEventCommandV1* command =
-                &buffer->event_commands[index];
-            RinVkEventSlot* event = event_slot(
-                (RinVkDevice)submission->owner, (RinVkEvent)command->event);
-            if (!event) continue;
-            if (command->operation == RIN_GPU_VULKAN_EVENT_COMMAND_SET)
-                __atomic_store_n(&event->signaled, 1u, __ATOMIC_RELEASE);
-            else if (command->operation == RIN_GPU_VULKAN_EVENT_COMMAND_RESET)
-                __atomic_store_n(&event->signaled, 0u, __ATOMIC_RELEASE);
-            __atomic_store_n(&event->pending, 0u, __ATOMIC_RELEASE);
-        }
-    }
-}
-
-static int validate_submission_query_events(
-        struct RinVkDevice_T* device, uint32_t command_buffer_count,
-        RinGpuVulkanCommandBufferV1* const* command_buffers) {
-    RinVkQueryValue* query_values[64];
-    RinVkEventSlot* event_slots[64];
-    uint32_t query_count = 0u;
-    uint32_t event_count = 0u;
-    uint8_t query_active[64] = {0};
-    uint8_t event_signaled[64] = {0};
-    uint32_t buffer_index;
-    if (!device || !command_buffers || command_buffer_count == 0u ||
-        command_buffer_count > RIN_VK_MAX_SUBMIT_COMMAND_BUFFERS)
-        return 0;
-    for (buffer_index = 0u; buffer_index < command_buffer_count;
-         ++buffer_index) {
-        RinGpuVulkanCommandBufferV1* buffer = command_buffers[buffer_index];
-        uint32_t index;
-        if (!buffer) return 0;
-        for (index = 0u; index < buffer->query_command_count; ++index) {
-            const RinGpuVulkanQueryCommandV1* command =
-                &buffer->query_commands[index];
-            RinVkQueryPoolSlot* pool = query_pool_slot(
-                (RinVkDevice)device, (RinVkQueryPool)command->query_pool);
-            RinVkQueryValue* query;
-            uint32_t query_index;
-            if (!pool || command->query >= pool->query_count ||
-                (command->flags != 0u &&
-                 command->flags != RIN_VK_QUERY_CONTROL_PRECISE_BIT))
-                return 0;
-            query = &pool->queries[command->query];
-            if (query->pending != 0u) return 0;
-            for (query_index = 0u; query_index < query_count; ++query_index)
-                if (query_values[query_index] == query)
-                    break;
-            if (query_index == query_count) {
-                if (query_count >= 64u) return 0;
-                query_values[query_count] = query;
-                query_active[query_count] = query->active != 0u;
-                ++query_count;
-            }
-            if (command->operation == RIN_GPU_VULKAN_QUERY_COMMAND_RESET) {
-                if (query_active[query_index] != 0u) return 0;
-                query_active[query_index] = 0u;
-            } else if (command->operation ==
-                       RIN_GPU_VULKAN_QUERY_COMMAND_TIMESTAMP) {
-                if (pool->query_type != RIN_VK_QUERY_TYPE_TIMESTAMP ||
-                    query_active[query_index] != 0u || command->flags != 0u)
-                    return 0;
-            } else if (command->operation ==
-                       RIN_GPU_VULKAN_QUERY_COMMAND_BEGIN) {
-                if (pool->query_type != RIN_VK_QUERY_TYPE_OCCLUSION ||
-                    query_active[query_index] != 0u ||
-                    (command->flags != 0u &&
-                     pool->query_type != RIN_VK_QUERY_TYPE_OCCLUSION))
-                    return 0;
-                query_active[query_index] = 1u;
-            } else if (command->operation ==
-                       RIN_GPU_VULKAN_QUERY_COMMAND_END) {
-                if (pool->query_type != RIN_VK_QUERY_TYPE_OCCLUSION ||
-                    query_active[query_index] == 0u)
-                    return 0;
-                query_active[query_index] = 0u;
-            } else {
-                return 0;
-            }
-        }
-        for (index = 0u; index < buffer->event_command_count; ++index) {
-            const RinGpuVulkanEventCommandV1* command =
-                &buffer->event_commands[index];
-            RinVkEventSlot* event = event_slot(
-                (RinVkDevice)device, (RinVkEvent)command->event);
-            uint32_t event_index;
-            if (!event || __atomic_load_n(&event->pending, __ATOMIC_ACQUIRE) != 0u)
-                return 0;
-            for (event_index = 0u; event_index < event_count; ++event_index)
-                if (event_slots[event_index] == event)
-                    break;
-            if (event_index == event_count) {
-                if (event_count >= 64u) return 0;
-                event_slots[event_count] = event;
-                event_signaled[event_count] =
-                    (uint8_t)(__atomic_load_n(&event->signaled,
-                                               __ATOMIC_ACQUIRE) != 0u);
-                ++event_count;
-            }
-            if (command->operation == RIN_GPU_VULKAN_EVENT_COMMAND_SET)
-                event_signaled[event_index] = 1u;
-            else if (command->operation == RIN_GPU_VULKAN_EVENT_COMMAND_RESET)
-                event_signaled[event_index] = 0u;
-            else if (command->operation == RIN_GPU_VULKAN_EVENT_COMMAND_WAIT) {
-                if (event_signaled[event_index] == 0u) return 0;
-            } else {
-                return 0;
-            }
-        }
-    }
-    for (uint32_t index = 0u; index < query_count; ++index)
-        if (query_active[index] != 0u) return 0;
-    return 1;
-}
-
-static void mark_submission_query_events(
-        const RinVkSubmissionSlot* submission, uint32_t pending) {
-    uint32_t buffer_index;
-    if (!submission || !submission->owner) return;
-    for (buffer_index = 0u;
-         buffer_index < submission->command_buffer_count; ++buffer_index) {
-        const RinGpuVulkanCommandBufferV1* buffer =
-            submission->command_buffers[buffer_index];
-        uint32_t index;
-        if (!buffer) continue;
-        for (index = 0u; index < buffer->query_command_count; ++index) {
-            const RinGpuVulkanQueryCommandV1* command =
-                &buffer->query_commands[index];
-            RinVkQueryPoolSlot* pool = query_pool_slot(
-                (RinVkDevice)submission->owner,
-                (RinVkQueryPool)command->query_pool);
-            if (pool && command->query < pool->query_count)
-                pool->queries[command->query].pending = pending;
-        }
-        for (index = 0u; index < buffer->event_command_count; ++index) {
-            RinVkEventSlot* event = event_slot(
-                (RinVkDevice)submission->owner,
-                (RinVkEvent)buffer->event_commands[index].event);
-            if (event)
-                __atomic_store_n(&event->pending, pending, __ATOMIC_RELEASE);
-        }
-    }
-}
-
 static void cancel_submission_sync(const RinVkSubmissionSlot* submission) {
     uint32_t index;
     RinVkFenceSlot* fence;
@@ -1817,20 +1484,6 @@ static void cleanup_device_sync_objects(struct RinVkDevice_T* device) {
             semaphore->owner == device) {
             clear_semaphore_slot(semaphore);
         }
-    }
-    for (index = 0u; index < RIN_VK_MAX_QUERY_POOLS; ++index) {
-        RinVkQueryPoolSlot* pool = &g_query_pools[index];
-        if ((__atomic_load_n(&pool->state, __ATOMIC_ACQUIRE) == 1u ||
-             __atomic_load_n(&pool->state, __ATOMIC_ACQUIRE) == 2u) &&
-            pool->owner == device)
-            clear_query_pool_slot(pool);
-    }
-    for (index = 0u; index < RIN_VK_MAX_EVENTS; ++index) {
-        RinVkEventSlot* event = &g_events[index];
-        if ((__atomic_load_n(&event->state, __ATOMIC_ACQUIRE) == 1u ||
-             __atomic_load_n(&event->state, __ATOMIC_ACQUIRE) == 2u) &&
-            event->owner == device)
-            clear_event_slot(event);
     }
 }
 
@@ -1871,7 +1524,6 @@ static void abort_device_submissions(struct RinVkDevice_T* device) {
         rin_gpu_vulkan_command_buffers_abort(
             &g_command_runtime, slot->command_buffer_count,
             slot->command_buffers);
-        mark_submission_query_events(slot, 0u);
         cancel_submission_sync(slot);
         clear_submission_slot(slot);
     }
@@ -1931,7 +1583,6 @@ static RinVkResult maintain_device_submissions(struct RinVkDevice_T* device) {
             sync_unlock();
             return RIN_VK_ERROR_DEVICE_LOST;
         }
-        complete_submission_query_events(slot);
         complete_submission_sync(slot);
         clear_submission_slot(slot);
     }
@@ -3682,322 +3333,6 @@ done:
         rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime, core);
 }
 
-static uint32_t query_value_count(const RinVkQueryPoolSlot* pool) {
-    return pool && pool->query_type == RIN_VK_QUERY_TYPE_TIMESTAMP ? 1u : 0u;
-}
-
-RinVkResult RIN_VKAPI_CALL vkCreateQueryPool(
-        RinVkDevice device, const RinVkQueryPoolCreateInfo* create_info,
-        const void* allocator, RinVkQueryPool* query_pool_out) {
-    struct RinVkDevice_T* owner = device_slot(device);
-    RinVkQueryPoolSlot* slot;
-    uint32_t index;
-    (void)allocator;
-    if (!query_pool_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    *query_pool_out = 0u;
-    if (!owner || !create_info ||
-        create_info->sType != RIN_VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO ||
-        create_info->pNext || create_info->flags != 0u ||
-        create_info->queryCount == 0u ||
-        create_info->queryCount > RIN_VK_QUERY_POOL_MAX_QUERIES ||
-        create_info->queryType > RIN_VK_QUERY_TYPE_TIMESTAMP)
-        return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    if (create_info->queryType != RIN_VK_QUERY_TYPE_TIMESTAMP ||
-        create_info->pipelineStatistics != 0u)
-        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
-    slot = reserve_query_pool_slot(owner, &index);
-    if (!slot) return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
-    slot->query_type = create_info->queryType;
-    slot->query_count = create_info->queryCount;
-    slot->pipeline_statistics = create_info->pipelineStatistics;
-    __atomic_store_n(&slot->state, 1u, __ATOMIC_RELEASE);
-    *query_pool_out = resource_handle(RIN_VK_QUERY_POOL_TAG, index,
-                                       slot->generation);
-    return RIN_VK_SUCCESS;
-}
-
-void RIN_VKAPI_CALL vkDestroyQueryPool(RinVkDevice device,
-                                       RinVkQueryPool query_pool,
-                                       const void* allocator) {
-    RinVkQueryPoolSlot* slot = query_pool_slot(device, query_pool);
-    uint32_t index;
-    (void)allocator;
-    if (!slot) return;
-    for (index = 0u; index < slot->query_count; ++index)
-        if (slot->queries[index].pending != 0u ||
-            slot->queries[index].active != 0u)
-            return;
-    clear_query_pool_slot(slot);
-}
-
-RinVkResult RIN_VKAPI_CALL vkGetQueryPoolResults(
-        RinVkDevice device, RinVkQueryPool query_pool, uint32_t first_query,
-        uint32_t query_count, size_t data_size, void* data, uint64_t stride,
-        uint32_t flags) {
-    RinVkQueryPoolSlot* pool = query_pool_slot(device, query_pool);
-    uint32_t value_count;
-    uint64_t per_query;
-    uint32_t index;
-    uint32_t unavailable = 0u;
-    if (!pool || (flags & ~RIN_VK_QUERY_RESULT_FLAGS_KNOWN) != 0u ||
-        (flags & RIN_VK_QUERY_RESULT_64_BIT) == 0u ||
-        (query_count != 0u && !data) ||
-        first_query > pool->query_count ||
-        query_count > pool->query_count - first_query)
-        return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    if (query_count == 0u) return RIN_VK_SUCCESS;
-    value_count = query_value_count(pool);
-    per_query = (uint64_t)value_count * sizeof(uint64_t);
-    if ((flags & RIN_VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) != 0u)
-        per_query += sizeof(uint64_t);
-    if (stride < per_query || stride > SIZE_MAX ||
-        (uint64_t)(query_count - 1u) >
-            (SIZE_MAX - per_query) / stride ||
-        per_query + (uint64_t)(query_count - 1u) * stride > data_size)
-        return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    for (index = 0u; index < query_count; ++index) {
-        if (pool->queries[first_query + index].availability == 0u)
-            unavailable = 1u;
-    }
-    if (unavailable != 0u &&
-        (flags & RIN_VK_QUERY_RESULT_WAIT_BIT) != 0u) {
-        RinVkResult maintained = rin_gpu_vulkan_icd_maintain(device);
-        if (maintained != RIN_VK_SUCCESS && maintained != RIN_VK_NOT_READY)
-            return maintained;
-        unavailable = 0u;
-        for (index = 0u; index < query_count; ++index)
-            if (pool->queries[first_query + index].availability == 0u)
-                unavailable = 1u;
-    }
-    if (unavailable != 0u &&
-        (flags & RIN_VK_QUERY_RESULT_PARTIAL_BIT) == 0u)
-        return RIN_VK_NOT_READY;
-    for (index = 0u; index < query_count; ++index) {
-        RinVkQueryValue* query = &pool->queries[first_query + index];
-        uint8_t* destination = (uint8_t*)data + (size_t)index * (size_t)stride;
-        uint32_t value_index;
-        for (value_index = 0u; value_index < value_count; ++value_index) {
-            uint64_t value = query->availability != 0u
-                                 ? query->values[value_index]
-                                 : 0u;
-            memcpy(destination + (size_t)value_index * sizeof(uint64_t),
-                   &value, sizeof(value));
-        }
-        if ((flags & RIN_VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) != 0u) {
-            uint64_t available = query->availability != 0u ? 1u : 0u;
-            memcpy(destination + (size_t)value_count * sizeof(uint64_t),
-                   &available, sizeof(available));
-        }
-    }
-    return unavailable != 0u ? RIN_VK_NOT_READY : RIN_VK_SUCCESS;
-}
-
-static void record_query_failure(RinGpuVulkanCommandBufferV1* core) {
-    rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime, core);
-}
-
-static int event_stage_mask_valid(uint64_t stage) {
-    const uint64_t known = RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT |
-                           RIN_VK_PIPELINE_STAGE_2_HOST_BIT |
-                           RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-    return stage != 0u && (stage & ~known) == 0u;
-}
-
-void RIN_VKAPI_CALL vkCmdResetQueryPool(
-        RinVkCommandBuffer command_buffer, RinVkQueryPool query_pool,
-        uint32_t first_query, uint32_t query_count) {
-    RinGpuVulkanCommandBufferV1* core =
-        (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
-    struct RinVkDevice_T* owner;
-    RinVkQueryPoolSlot* pool;
-    uint32_t index;
-    if (!command_owner_device(core, &owner) ||
-        !(pool = query_pool_slot((RinVkDevice)owner, query_pool)) ||
-        query_count == 0u || first_query > pool->query_count ||
-        query_count > pool->query_count - first_query ||
-        query_count > RIN_GPU_VULKAN_COMMAND_MAX_QUERY_COMMANDS) {
-        record_query_failure(core);
-        return;
-    }
-    for (index = 0u; index < query_count; ++index)
-        if (rin_gpu_vulkan_command_buffer_record_query(
-                &g_command_runtime, core, query_pool, first_query + index,
-                0u, RIN_GPU_VULKAN_QUERY_COMMAND_RESET) !=
-            RIN_GPU_VULKAN_COMMAND_OK) {
-            record_query_failure(core);
-            return;
-        }
-}
-
-void RIN_VKAPI_CALL vkCmdBeginQuery(
-        RinVkCommandBuffer command_buffer, RinVkQueryPool query_pool,
-        uint32_t query, uint32_t flags) {
-    RinGpuVulkanCommandBufferV1* core =
-        (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
-    struct RinVkDevice_T* owner;
-    RinVkQueryPoolSlot* pool;
-    if (!command_owner_device(core, &owner) ||
-        !(pool = query_pool_slot((RinVkDevice)owner, query_pool)) ||
-        query >= pool->query_count ||
-        (flags & ~RIN_VK_QUERY_CONTROL_PRECISE_BIT) != 0u ||
-        pool->query_type != RIN_VK_QUERY_TYPE_OCCLUSION ||
-        rin_gpu_vulkan_command_buffer_record_query(
-            &g_command_runtime, core, query_pool, query, flags,
-            RIN_GPU_VULKAN_QUERY_COMMAND_BEGIN) != RIN_GPU_VULKAN_COMMAND_OK)
-        record_query_failure(core);
-}
-
-void RIN_VKAPI_CALL vkCmdEndQuery(
-        RinVkCommandBuffer command_buffer, RinVkQueryPool query_pool,
-        uint32_t query) {
-    RinGpuVulkanCommandBufferV1* core =
-        (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
-    struct RinVkDevice_T* owner;
-    RinVkQueryPoolSlot* pool;
-    if (!command_owner_device(core, &owner) ||
-        !(pool = query_pool_slot((RinVkDevice)owner, query_pool)) ||
-        query >= pool->query_count ||
-        pool->query_type != RIN_VK_QUERY_TYPE_OCCLUSION ||
-        rin_gpu_vulkan_command_buffer_record_query(
-            &g_command_runtime, core, query_pool, query, 0u,
-            RIN_GPU_VULKAN_QUERY_COMMAND_END) != RIN_GPU_VULKAN_COMMAND_OK)
-        record_query_failure(core);
-}
-
-void RIN_VKAPI_CALL vkCmdWriteTimestamp(
-        RinVkCommandBuffer command_buffer, uint64_t stage,
-        RinVkQueryPool query_pool, uint32_t query) {
-    RinGpuVulkanCommandBufferV1* core =
-        (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
-    struct RinVkDevice_T* owner;
-    RinVkQueryPoolSlot* pool;
-    if (!command_owner_device(core, &owner) || !event_stage_mask_valid(stage) ||
-        !(pool = query_pool_slot((RinVkDevice)owner, query_pool)) ||
-        query >= pool->query_count ||
-        pool->query_type != RIN_VK_QUERY_TYPE_TIMESTAMP ||
-        rin_gpu_vulkan_command_buffer_record_query(
-            &g_command_runtime, core, query_pool, query, 0u,
-            RIN_GPU_VULKAN_QUERY_COMMAND_TIMESTAMP) != RIN_GPU_VULKAN_COMMAND_OK)
-        record_query_failure(core);
-}
-
-RinVkResult RIN_VKAPI_CALL vkCreateEvent(
-        RinVkDevice device, const RinVkEventCreateInfo* create_info,
-        const void* allocator, RinVkEvent* event_out) {
-    struct RinVkDevice_T* owner = device_slot(device);
-    RinVkEventSlot* slot;
-    uint32_t index;
-    (void)allocator;
-    if (!event_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    *event_out = 0u;
-    if (!owner || !create_info ||
-        create_info->sType != RIN_VK_STRUCTURE_TYPE_EVENT_CREATE_INFO ||
-        create_info->pNext || create_info->flags != 0u)
-        return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    slot = reserve_event_slot(owner, &index);
-    if (!slot) return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
-    __atomic_store_n(&slot->state, 1u, __ATOMIC_RELEASE);
-    *event_out = resource_handle(RIN_VK_EVENT_TAG, index, slot->generation);
-    return RIN_VK_SUCCESS;
-}
-
-void RIN_VKAPI_CALL vkDestroyEvent(RinVkDevice device, RinVkEvent event,
-                                   const void* allocator) {
-    RinVkEventSlot* slot = event_slot(device, event);
-    (void)allocator;
-    if (slot && __atomic_load_n(&slot->pending, __ATOMIC_ACQUIRE) == 0u)
-        clear_event_slot(slot);
-}
-
-RinVkResult RIN_VKAPI_CALL vkGetEventStatus(RinVkDevice device,
-                                            RinVkEvent event) {
-    RinVkEventSlot* slot = event_slot(device, event);
-    if (!slot) return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    return __atomic_load_n(&slot->signaled, __ATOMIC_ACQUIRE) != 0u
-               ? RIN_VK_EVENT_SET
-               : RIN_VK_EVENT_RESET;
-}
-
-RinVkResult RIN_VKAPI_CALL vkSetEvent(RinVkDevice device, RinVkEvent event) {
-    RinVkEventSlot* slot = event_slot(device, event);
-    if (!slot || __atomic_load_n(&slot->pending, __ATOMIC_ACQUIRE) != 0u)
-        return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    __atomic_store_n(&slot->signaled, 1u, __ATOMIC_RELEASE);
-    return RIN_VK_SUCCESS;
-}
-
-RinVkResult RIN_VKAPI_CALL vkResetEvent(RinVkDevice device, RinVkEvent event) {
-    RinVkEventSlot* slot = event_slot(device, event);
-    if (!slot || __atomic_load_n(&slot->pending, __ATOMIC_ACQUIRE) != 0u)
-        return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    __atomic_store_n(&slot->signaled, 0u, __ATOMIC_RELEASE);
-    return RIN_VK_SUCCESS;
-}
-
-static void record_event_operation(RinVkCommandBuffer command_buffer,
-                                   RinVkEvent event, uint32_t operation) {
-    RinGpuVulkanCommandBufferV1* core =
-        (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
-    struct RinVkDevice_T* owner;
-    if (!command_owner_device(core, &owner) || !event_slot((RinVkDevice)owner,
-                                                            event) ||
-        rin_gpu_vulkan_command_buffer_record_event(
-            &g_command_runtime, core, event, operation) !=
-            RIN_GPU_VULKAN_COMMAND_OK)
-        record_query_failure(core);
-}
-
-void RIN_VKAPI_CALL vkCmdSetEvent(RinVkCommandBuffer command_buffer,
-                                  RinVkEvent event, uint64_t stage) {
-    if (!event_stage_mask_valid(stage))
-        record_query_failure((RinGpuVulkanCommandBufferV1*)(void*)command_buffer);
-    else
-        record_event_operation(command_buffer, event,
-                               RIN_GPU_VULKAN_EVENT_COMMAND_SET);
-}
-
-void RIN_VKAPI_CALL vkCmdResetEvent(RinVkCommandBuffer command_buffer,
-                                    RinVkEvent event, uint64_t stage) {
-    if (!event_stage_mask_valid(stage))
-        record_query_failure((RinGpuVulkanCommandBufferV1*)(void*)command_buffer);
-    else
-        record_event_operation(command_buffer, event,
-                               RIN_GPU_VULKAN_EVENT_COMMAND_RESET);
-}
-
-void RIN_VKAPI_CALL vkCmdWaitEvents(
-        RinVkCommandBuffer command_buffer, uint32_t event_count,
-        const RinVkEvent* events, uint64_t src_stage_mask,
-        uint64_t dst_stage_mask, uint32_t memory_barrier_count,
-        const void* memory_barriers, uint32_t buffer_barrier_count,
-        const void* buffer_barriers, uint32_t image_barrier_count,
-        const void* image_barriers) {
-    RinGpuVulkanCommandBufferV1* core =
-        (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
-    struct RinVkDevice_T* owner;
-    uint32_t index;
-    if (!command_owner_device(core, &owner) || event_count == 0u ||
-        event_count > RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS || !events ||
-        !event_stage_mask_valid(src_stage_mask) ||
-        !event_stage_mask_valid(dst_stage_mask) ||
-        memory_barrier_count != 0u || memory_barriers ||
-        buffer_barrier_count != 0u || buffer_barriers ||
-        image_barrier_count != 0u || image_barriers) {
-        record_query_failure(core);
-        return;
-    }
-    for (index = 0u; index < event_count; ++index) {
-        if (!event_slot((RinVkDevice)owner, events[index]) ||
-            rin_gpu_vulkan_command_buffer_record_event(
-                &g_command_runtime, core, events[index],
-                RIN_GPU_VULKAN_EVENT_COMMAND_WAIT) !=
-                RIN_GPU_VULKAN_COMMAND_OK) {
-            record_query_failure(core);
-            return;
-        }
-    }
-}
-
 void RIN_VKAPI_CALL vkCmdCopyImage(
         RinVkCommandBuffer command_buffer, RinVkImage src_image,
         uint32_t src_image_layout, RinVkImage dst_image,
@@ -4627,11 +3962,9 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
             command_buffers[index]->transfer_op_count != 0u)
             extended_packet = 1;
     }
-        if (rin_gpu_vulkan_command_buffers_validate_submit(
+    if (rin_gpu_vulkan_command_buffers_validate_submit(
             &g_command_runtime, request.commandBufferCount,
             command_buffers) != RIN_GPU_VULKAN_COMMAND_OK ||
-        !validate_submission_query_events(device, request.commandBufferCount,
-                                           command_buffers) ||
         (extended_packet
              ? !snapshot_submission_packet_v2(
                    device, queue_slot_value->queue_family_index, command_buffers,
@@ -4654,7 +3987,7 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     slot->command_buffer_count = request.commandBufferCount;
     memcpy(slot->command_buffers, command_buffers,
            sizeof(*command_buffers) * request.commandBufferCount);
-        if ((extended_packet
+    if ((extended_packet
              ? !snapshot_submission_packet_v2(
                    device, queue_slot_value->queue_family_index, command_buffers,
                    request.commandBufferCount, &slot->extended_packet, resources,
@@ -4675,7 +4008,6 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         if (product) release_product();
         rin_gpu_vulkan_command_buffers_abort(
             &g_command_runtime, request.commandBufferCount, command_buffers);
-        mark_submission_query_events(slot, 0u);
         clear_submission_slot(slot);
         result = RIN_VK_ERROR_INITIALIZATION_FAILED;
         goto done;
@@ -4699,7 +4031,6 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     if (product_result != RIN_VULKAN_PRODUCT_OK) {
         rin_gpu_vulkan_command_buffers_abort(
             &g_command_runtime, request.commandBufferCount, command_buffers);
-        mark_submission_query_events(slot, 0u);
         clear_submission_slot(slot);
         result = map_product_result(product_result);
         goto done;
@@ -4730,7 +4061,6 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         if (semaphore->type == RIN_VK_SEMAPHORE_TYPE_TIMELINE)
             semaphore->pending_value = signal_values[index];
     }
-    mark_submission_query_events(slot, 1u);
     __atomic_store_n(&slot->state, 1u, __ATOMIC_RELEASE);
     result = RIN_VK_SUCCESS;
 
@@ -5846,36 +5176,6 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
         return (RinVkVoidFunction)vkCmdResolveImage;
     if (name_equal(name, "vkCmdClearColorImage"))
         return (RinVkVoidFunction)vkCmdClearColorImage;
-    if (name_equal(name, "vkCreateQueryPool"))
-        return (RinVkVoidFunction)vkCreateQueryPool;
-    if (name_equal(name, "vkDestroyQueryPool"))
-        return (RinVkVoidFunction)vkDestroyQueryPool;
-    if (name_equal(name, "vkGetQueryPoolResults"))
-        return (RinVkVoidFunction)vkGetQueryPoolResults;
-    if (name_equal(name, "vkCmdResetQueryPool"))
-        return (RinVkVoidFunction)vkCmdResetQueryPool;
-    if (name_equal(name, "vkCmdBeginQuery"))
-        return (RinVkVoidFunction)vkCmdBeginQuery;
-    if (name_equal(name, "vkCmdEndQuery"))
-        return (RinVkVoidFunction)vkCmdEndQuery;
-    if (name_equal(name, "vkCmdWriteTimestamp"))
-        return (RinVkVoidFunction)vkCmdWriteTimestamp;
-    if (name_equal(name, "vkCreateEvent"))
-        return (RinVkVoidFunction)vkCreateEvent;
-    if (name_equal(name, "vkDestroyEvent"))
-        return (RinVkVoidFunction)vkDestroyEvent;
-    if (name_equal(name, "vkGetEventStatus"))
-        return (RinVkVoidFunction)vkGetEventStatus;
-    if (name_equal(name, "vkSetEvent"))
-        return (RinVkVoidFunction)vkSetEvent;
-    if (name_equal(name, "vkResetEvent"))
-        return (RinVkVoidFunction)vkResetEvent;
-    if (name_equal(name, "vkCmdSetEvent"))
-        return (RinVkVoidFunction)vkCmdSetEvent;
-    if (name_equal(name, "vkCmdResetEvent"))
-        return (RinVkVoidFunction)vkCmdResetEvent;
-    if (name_equal(name, "vkCmdWaitEvents"))
-        return (RinVkVoidFunction)vkCmdWaitEvents;
     if (name_equal(name, "vkAllocateMemory"))
         return (RinVkVoidFunction)vkAllocateMemory;
     if (name_equal(name, "vkFreeMemory"))

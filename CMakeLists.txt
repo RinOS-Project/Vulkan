@@ -16,6 +16,7 @@ set(RINVULKAN_SOURCES
     src/command_runtime.c
     src/descriptor_runtime.c
     src/graphics.c
+    src/graphics_runtime.c
     src/icd.c
     src/profile.c
     src/runtime.c
@@ -38,4 +39,10 @@ if(BUILD_TESTING)
     add_executable(rinvulkan-abi-test tests/rinvulkan_abi_test.c)
     target_link_libraries(rinvulkan-abi-test PRIVATE RinVulkan::RinVulkan)
     add_test(NAME rinvulkan-abi COMMAND rinvulkan-abi-test)
+    add_executable(rinvulkan-graphics-runtime-test
+        tests/rinvulkan_graphics_runtime_test.c)
+    target_link_libraries(rinvulkan-graphics-runtime-test PRIVATE
+        RinVulkan::RinVulkan)
+    add_test(NAME rinvulkan-graphics-runtime
+        COMMAND rinvulkan-graphics-runtime-test)
 endif()
