@@ -259,7 +259,7 @@ static int software_submit(void* context,
             uint64_t destination_offset;
             if ((operation->type != RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_COPY &&
                  (operation->type < RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_COPY ||
-                  operation->type > RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BLIT)) ||
+                  operation->type > RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_RESOLVE)) ||
                 operation->reserved != 0u || operation->size_bytes == 0u ||
                 !resource_has_access(resources, resource_count,
                                      operation->destination_allocation,
@@ -386,6 +386,60 @@ static int software_submit(void* context,
                             out[channel] = (uint8_t)((top * (65536u - fy) +
                                                      bottom * fy + 32768u) >> 16);
                         }
+                    }
+                }
+                continue;
+            }
+            if (operation->type == RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_RESOLVE) {
+                uint64_t source_size;
+                uint64_t destination_size;
+                uint64_t pixel_count;
+                uint64_t pixel;
+                if (operation->source_width == 0u ||
+                    operation->source_height == 0u ||
+                    operation->source_width > 4096u ||
+                    operation->source_height > 4096u ||
+                    operation->destination_width > 4096u ||
+                    operation->destination_height > 4096u ||
+                    operation->source_width != operation->destination_width ||
+                    operation->source_height != operation->destination_height ||
+                    (operation->sample_count != 2u &&
+                     operation->sample_count != 4u) ||
+                    !resource_has_access(resources, resource_count,
+                                         operation->source_allocation,
+                                         RIN_VULKAN_PRODUCT_MEMORY_GPU_READ) ||
+                    source == destination)
+                    return RIN_VULKAN_PRODUCT_PROTOCOL;
+                source_size = (uint64_t)operation->source_width *
+                              operation->source_height * 4u *
+                              operation->sample_count;
+                destination_size = (uint64_t)operation->destination_width *
+                                   operation->destination_height * 4u;
+                pixel_count = (uint64_t)operation->destination_width *
+                              operation->destination_height;
+                if (operation->size_bytes != destination_size ||
+                    allocation_for_range(platform, operation->source_gpu_address,
+                                         source_size) != source ||
+                    allocation_for_range(platform,
+                                         operation->destination_gpu_address,
+                                         destination_size) != destination)
+                    return RIN_VULKAN_PRODUCT_PROTOCOL;
+                source_offset = operation->source_gpu_address -
+                                source->gpu_virtual_address;
+                for (pixel = 0u; pixel < pixel_count; ++pixel) {
+                    uint32_t channel;
+                    for (channel = 0u; channel < 4u; ++channel) {
+                        uint32_t sample;
+                        uint32_t sum = 0u;
+                        for (sample = 0u; sample < operation->sample_count;
+                             ++sample)
+                            sum += source->bytes[source_offset +
+                                ((uint64_t)sample * pixel_count + pixel) * 4u +
+                                channel];
+                        destination->bytes[destination_offset + pixel * 4u +
+                                           channel] = (uint8_t)((sum +
+                            operation->sample_count / 2u) /
+                            operation->sample_count);
                     }
                 }
                 continue;

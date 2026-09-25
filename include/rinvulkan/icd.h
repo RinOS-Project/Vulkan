@@ -715,6 +715,14 @@ typedef struct RinVkImageBlit {
     RinVkOffset3D dstOffsets[2];
 } RinVkImageBlit;
 
+typedef struct RinVkImageResolve {
+    RinVkImageSubresourceLayers srcSubresource;
+    RinVkOffset3D srcOffset;
+    RinVkImageSubresourceLayers dstSubresource;
+    RinVkOffset3D dstOffset;
+    RinVkExtent3D extent;
+} RinVkImageResolve;
+
 typedef union RinVkClearColorValue {
     float float32[4];
     int32_t int32[4];
@@ -737,6 +745,8 @@ typedef struct RinVkImageSubresourceRange {
 #define RIN_VK_FORMAT_R8G8B8A8_UNORM 37
 #define RIN_VK_IMAGE_TILING_OPTIMAL 0u
 #define RIN_VK_SAMPLE_COUNT_1_BIT 1u
+#define RIN_VK_SAMPLE_COUNT_2_BIT 2u
+#define RIN_VK_SAMPLE_COUNT_4_BIT 4u
 #define RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT UINT32_C(0x00000001)
 #define RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT UINT32_C(0x00000002)
 #define RIN_VK_IMAGE_USAGE_KNOWN \
@@ -1228,6 +1238,11 @@ vkCmdBlitImage(RinVkCommandBuffer command_buffer, RinVkImage src_image,
                uint32_t src_image_layout, RinVkImage dst_image,
                uint32_t dst_image_layout, uint32_t region_count,
                const RinVkImageBlit* regions, uint32_t filter);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdResolveImage(RinVkCommandBuffer command_buffer, RinVkImage src_image,
+                  uint32_t src_image_layout, RinVkImage dst_image,
+                  uint32_t dst_image_layout, uint32_t region_count,
+                  const RinVkImageResolve* regions);
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkCmdClearColorImage(RinVkCommandBuffer command_buffer, RinVkImage image,
                      uint32_t image_layout,

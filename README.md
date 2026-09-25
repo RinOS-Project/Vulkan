@@ -24,8 +24,9 @@ and publishes completion through `poll`. The host profile includes bounded
 image-to-buffer operations with actual byte movement and readback. The same
 host profile also executes full-image packed-RGBA8 `vkCmdClearColorImage`
 operations and bounded full-image RGBA8 `vkCmdBlitImage` with nearest/linear
-sampling. It does not advertise or emulate a physical GPU, and malformed or
-unsupported packets fail closed.
+sampling. It also resolves full-image RGBA8 sample-major 2x/4x images into a
+single-sample image using integer averaging. It does not advertise or emulate
+a physical GPU, and malformed or unsupported packets fail closed.
 
 Build and test:
 
