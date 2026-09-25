@@ -15,6 +15,8 @@
 #define RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS 4u
 #define RIN_GPU_VULKAN_COMMAND_MAX_DYNAMIC_OFFSETS 32u
 #define RIN_GPU_VULKAN_COMMAND_MAX_BARRIERS 8u
+#define RIN_GPU_VULKAN_COMMAND_MAX_QUERY_COMMANDS 16u
+#define RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS 16u
 
 #define RIN_GPU_VULKAN_COMMAND_POOL_TRANSIENT 0x00000001u
 #define RIN_GPU_VULKAN_COMMAND_POOL_RESET_BUFFER 0x00000002u
@@ -40,6 +42,19 @@
      RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_WRITE)
 
 #define RIN_GPU_VULKAN_COMMAND_RESET_RELEASE_RESOURCES 0x00000001u
+
+enum {
+    RIN_GPU_VULKAN_QUERY_COMMAND_BEGIN = 1u,
+    RIN_GPU_VULKAN_QUERY_COMMAND_END = 2u,
+    RIN_GPU_VULKAN_QUERY_COMMAND_RESET = 3u,
+    RIN_GPU_VULKAN_QUERY_COMMAND_TIMESTAMP = 4u
+};
+
+enum {
+    RIN_GPU_VULKAN_EVENT_COMMAND_SET = 1u,
+    RIN_GPU_VULKAN_EVENT_COMMAND_RESET = 2u,
+    RIN_GPU_VULKAN_EVENT_COMMAND_WAIT = 3u
+};
 
 enum {
     RIN_GPU_VULKAN_COMMAND_OK = 0,
@@ -126,6 +141,20 @@ typedef struct RinGpuVulkanTransferPacketV2 {
         operations[RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS];
 } RinGpuVulkanTransferPacketV2;
 
+typedef struct RinGpuVulkanQueryCommandV1 {
+    uint64_t query_pool;
+    uint32_t query;
+    uint32_t flags;
+    uint32_t operation;
+    uint32_t reserved;
+} RinGpuVulkanQueryCommandV1;
+
+typedef struct RinGpuVulkanEventCommandV1 {
+    uint64_t event;
+    uint32_t operation;
+    uint32_t reserved;
+} RinGpuVulkanEventCommandV1;
+
 struct RinGpuVulkanCommandBufferV1 {
     uintptr_t loader_magic;
     uint32_t state;
@@ -157,6 +186,12 @@ struct RinGpuVulkanCommandBufferV1 {
         uint64_t dst_stage_mask;
         uint64_t dst_access_mask;
     } barriers[RIN_GPU_VULKAN_COMMAND_MAX_BARRIERS];
+    uint32_t query_command_count;
+    uint32_t event_command_count;
+    RinGpuVulkanQueryCommandV1
+        query_commands[RIN_GPU_VULKAN_COMMAND_MAX_QUERY_COMMANDS];
+    RinGpuVulkanEventCommandV1
+        event_commands[RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS];
 };
 
 typedef struct RinGpuVulkanCommandRuntimeV1 {
@@ -214,7 +249,15 @@ int rin_gpu_vulkan_command_buffer_record_barrier(
     RinGpuVulkanCommandRuntimeV1* runtime,
     RinGpuVulkanCommandBufferV1* buffer, uint64_t src_stage_mask,
     uint64_t src_access_mask, uint64_t dst_stage_mask,
-    uint64_t dst_access_mask);
+        uint64_t dst_access_mask);
+int rin_gpu_vulkan_command_buffer_record_query(
+    RinGpuVulkanCommandRuntimeV1* runtime,
+    RinGpuVulkanCommandBufferV1* buffer, uint64_t query_pool,
+    uint32_t query, uint32_t flags, uint32_t operation);
+int rin_gpu_vulkan_command_buffer_record_event(
+    RinGpuVulkanCommandRuntimeV1* runtime,
+    RinGpuVulkanCommandBufferV1* buffer, uint64_t event,
+    uint32_t operation);
 void rin_gpu_vulkan_command_buffer_record_failure(
     RinGpuVulkanCommandRuntimeV1* runtime,
     RinGpuVulkanCommandBufferV1* buffer);

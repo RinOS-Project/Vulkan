@@ -39,6 +39,8 @@
 #define RIN_VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO 14
 #define RIN_VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO 15
 #define RIN_VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO 17
+#define RIN_VK_STRUCTURE_TYPE_EVENT_CREATE_INFO 10
+#define RIN_VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO 28
 #define RIN_VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO 31
 #define RIN_VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO 32
 #define RIN_VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO 33
@@ -93,6 +95,8 @@
 #define RIN_VK_ERROR_INCOMPATIBLE_DRIVER (-9)
 #define RIN_VK_ERROR_TOO_MANY_OBJECTS (-10)
 #define RIN_VK_ERROR_UNKNOWN (-13)
+#define RIN_VK_EVENT_RESET 0
+#define RIN_VK_EVENT_SET 3
 
 #define RIN_VK_COMMAND_POOL_CREATE_TRANSIENT_BIT 0x00000001u
 #define RIN_VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT 0x00000002u
@@ -104,6 +108,46 @@
 #define RIN_VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT 0x00000001u
 #define RIN_VK_COMMAND_BUFFER_LEVEL_PRIMARY 0
 #define RIN_VK_COMMAND_BUFFER_LEVEL_SECONDARY 1
+
+#define RIN_VK_QUERY_TYPE_OCCLUSION 0u
+#define RIN_VK_QUERY_TYPE_PIPELINE_STATISTICS 1u
+#define RIN_VK_QUERY_TYPE_TIMESTAMP 2u
+#define RIN_VK_QUERY_CONTROL_PRECISE_BIT 0x00000001u
+#define RIN_VK_QUERY_RESULT_64_BIT 0x00000001u
+#define RIN_VK_QUERY_RESULT_WAIT_BIT 0x00000002u
+#define RIN_VK_QUERY_RESULT_WITH_AVAILABILITY_BIT 0x00000004u
+#define RIN_VK_QUERY_RESULT_PARTIAL_BIT 0x00000008u
+#define RIN_VK_QUERY_RESULT_FLAGS_KNOWN \
+    (RIN_VK_QUERY_RESULT_64_BIT | RIN_VK_QUERY_RESULT_WAIT_BIT | \
+     RIN_VK_QUERY_RESULT_WITH_AVAILABILITY_BIT | RIN_VK_QUERY_RESULT_PARTIAL_BIT)
+#define RIN_VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT \
+    0x00000001u
+#define RIN_VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_PRIMITIVES_BIT \
+    0x00000002u
+#define RIN_VK_QUERY_PIPELINE_STATISTIC_VERTEX_SHADER_INVOCATIONS_BIT \
+    0x00000004u
+#define RIN_VK_QUERY_PIPELINE_STATISTIC_GEOMETRY_SHADER_INVOCATIONS_BIT \
+    0x00000008u
+#define RIN_VK_QUERY_PIPELINE_STATISTIC_GEOMETRY_SHADER_PRIMITIVES_BIT \
+    0x00000010u
+#define RIN_VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT \
+    0x00000020u
+#define RIN_VK_QUERY_PIPELINE_STATISTIC_CLIPPING_PRIMITIVES_BIT \
+    0x00000040u
+#define RIN_VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT \
+    0x00000080u
+#define RIN_VK_QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT \
+    0x00000100u
+#define RIN_VK_QUERY_PIPELINE_STATISTIC_KNOWN \
+    (RIN_VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT | \
+     RIN_VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_PRIMITIVES_BIT | \
+     RIN_VK_QUERY_PIPELINE_STATISTIC_VERTEX_SHADER_INVOCATIONS_BIT | \
+     RIN_VK_QUERY_PIPELINE_STATISTIC_GEOMETRY_SHADER_INVOCATIONS_BIT | \
+     RIN_VK_QUERY_PIPELINE_STATISTIC_GEOMETRY_SHADER_PRIMITIVES_BIT | \
+     RIN_VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT | \
+     RIN_VK_QUERY_PIPELINE_STATISTIC_CLIPPING_PRIMITIVES_BIT | \
+     RIN_VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT | \
+     RIN_VK_QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT)
 
 typedef int32_t RinVkResult;
 typedef int32_t RinVkStructureType;
@@ -131,6 +175,8 @@ typedef uint64_t RinVkDescriptorPool;
 typedef uint64_t RinVkDescriptorSet;
 typedef uint64_t RinVkPipelineLayout;
 typedef uint64_t RinVkPipelineCache;
+typedef uint64_t RinVkQueryPool;
+typedef uint64_t RinVkEvent;
 
 typedef struct RinVkPhysicalDeviceSynchronization2Features {
     RinVkStructureType sType;
@@ -750,6 +796,32 @@ typedef struct RinVkSemaphoreWaitInfo {
     const RinVkSemaphore* pSemaphores;
     const uint64_t* pValues;
 } RinVkSemaphoreWaitInfo;
+
+typedef struct RinVkQueryPoolCreateInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    uint32_t queryType;
+    uint32_t queryCount;
+    uint32_t pipelineStatistics;
+} RinVkQueryPoolCreateInfo;
+
+typedef struct RinVkEventCreateInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+} RinVkEventCreateInfo;
+
+typedef struct RinVkCommandBufferInheritanceInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint64_t renderPass;
+    uint32_t subpass;
+    uint64_t framebuffer;
+    uint32_t occlusionQueryEnable;
+    uint32_t queryFlags;
+    uint32_t pipelineStatistics;
+} RinVkCommandBufferInheritanceInfo;
 
 typedef struct RinVkMemoryAllocateInfo {
     RinVkStructureType sType;
@@ -1621,6 +1693,55 @@ vkCmdBindDescriptorSets(RinVkCommandBuffer command_buffer,
                          const RinVkDescriptorSet* descriptor_sets,
                          uint32_t dynamic_offset_count,
                          const uint32_t* dynamic_offsets);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkCreateQueryPool(RinVkDevice device,
+                  const RinVkQueryPoolCreateInfo* create_info,
+                  const void* allocator, RinVkQueryPool* query_pool_out);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkDestroyQueryPool(RinVkDevice device, RinVkQueryPool query_pool,
+                   const void* allocator);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkGetQueryPoolResults(RinVkDevice device, RinVkQueryPool query_pool,
+                      uint32_t first_query, uint32_t query_count,
+                      size_t data_size, void* data, uint64_t stride,
+                      uint32_t flags);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdResetQueryPool(RinVkCommandBuffer command_buffer,
+                    RinVkQueryPool query_pool, uint32_t first_query,
+                    uint32_t query_count);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdBeginQuery(RinVkCommandBuffer command_buffer, RinVkQueryPool query_pool,
+                uint32_t query, uint32_t flags);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdEndQuery(RinVkCommandBuffer command_buffer, RinVkQueryPool query_pool,
+              uint32_t query);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdWriteTimestamp(RinVkCommandBuffer command_buffer, uint64_t stage,
+                    RinVkQueryPool query_pool, uint32_t query);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkCreateEvent(RinVkDevice device, const RinVkEventCreateInfo* create_info,
+              const void* allocator, RinVkEvent* event_out);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkDestroyEvent(RinVkDevice device, RinVkEvent event, const void* allocator);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkGetEventStatus(RinVkDevice device, RinVkEvent event);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkSetEvent(RinVkDevice device, RinVkEvent event);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkResetEvent(RinVkDevice device, RinVkEvent event);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdSetEvent(RinVkCommandBuffer command_buffer, RinVkEvent event,
+              uint64_t stage);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdResetEvent(RinVkCommandBuffer command_buffer, RinVkEvent event,
+                uint64_t stage);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdWaitEvents(RinVkCommandBuffer command_buffer, uint32_t event_count,
+                const RinVkEvent* events, uint64_t src_stage_mask,
+                uint64_t dst_stage_mask, uint32_t memory_barrier_count,
+                const void* memory_barriers, uint32_t buffer_barrier_count,
+                const void* buffer_barriers, uint32_t image_barrier_count,
+                const void* image_barriers);
 RIN_VKAPI_ATTR RinVkVoidFunction RIN_VKAPI_CALL
 vkGetDeviceProcAddr(RinVkDevice device, const char* name);
 RIN_VKAPI_ATTR RinVkVoidFunction RIN_VKAPI_CALL
