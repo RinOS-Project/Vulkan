@@ -21,6 +21,8 @@
 #define RIN_VK_MAX_IMAGE_VIEWS 128u
 #define RIN_VK_MAX_SAMPLERS 128u
 #define RIN_VK_MAX_PIPELINE_LAYOUTS 64u
+#define RIN_VK_MAX_PIPELINE_CACHES 32u
+#define RIN_VK_PIPELINE_CACHE_MAX_PAYLOAD 4096u
 #define RIN_VK_RESOURCE_ALIGNMENT UINT64_C(2097152)
 #define RIN_VK_BUFFER_TAG UINT64_C(0x5242)
 #define RIN_VK_IMAGE_TAG UINT64_C(0x5249)
@@ -30,6 +32,9 @@
 #define RIN_VK_IMAGE_VIEW_TAG UINT64_C(0x5256)
 #define RIN_VK_SAMPLER_TAG UINT64_C(0x5254)
 #define RIN_VK_PIPELINE_LAYOUT_TAG UINT64_C(0x5250)
+#define RIN_VK_PIPELINE_CACHE_TAG UINT64_C(0x5243)
+#define RIN_VK_PIPELINE_CACHE_MAGIC UINT32_C(0x52494e43)
+#define RIN_VK_PIPELINE_CACHE_VERSION 1u
 
 typedef struct RinVkBaseFeatureStructure {
     RinVkStructureType sType;
@@ -162,6 +167,15 @@ typedef struct RinVkPipelineLayoutSlot {
     RinVkDescriptorSetLayout set_layouts[RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS];
 } RinVkPipelineLayoutSlot;
 
+typedef struct RinVkPipelineCacheSlot {
+    uint32_t state;
+    uint32_t generation;
+    struct RinVkDevice_T* owner;
+    uint32_t payload_size;
+    uint32_t reserved;
+    uint8_t payload[RIN_VK_PIPELINE_CACHE_MAX_PAYLOAD];
+} RinVkPipelineCacheSlot;
+
 typedef struct RinVkFenceSlot {
     uint32_t state;
     uint32_t generation;
@@ -215,6 +229,7 @@ static RinVkImageSlot g_images[RIN_VK_MAX_IMAGES];
 static RinVkImageViewSlot g_image_views[RIN_VK_MAX_IMAGE_VIEWS];
 static RinVkSamplerSlot g_samplers[RIN_VK_MAX_SAMPLERS];
 static RinVkPipelineLayoutSlot g_pipeline_layouts[RIN_VK_MAX_PIPELINE_LAYOUTS];
+static RinVkPipelineCacheSlot g_pipeline_caches[RIN_VK_MAX_PIPELINE_CACHES];
 static RinVkFenceSlot g_fences[RIN_VK_MAX_FENCES];
 static RinVkSemaphoreSlot g_semaphores[RIN_VK_MAX_SEMAPHORES];
 static RinVkSubmissionSlot g_submissions[RIN_VK_MAX_SUBMISSIONS];
@@ -741,6 +756,23 @@ static RinVkPipelineLayoutSlot* pipeline_layout_slot(
     return slot;
 }
 
+static RinVkPipelineCacheSlot* pipeline_cache_slot(
+        RinVkDevice device, RinVkPipelineCache handle) {
+    struct RinVkDevice_T* owner = device_slot(device);
+    uint32_t index_field = (uint32_t)(handle & UINT64_C(0xffff));
+    uint32_t generation = (uint32_t)(handle >> 16u);
+    RinVkPipelineCacheSlot* slot;
+    if (!owner || (handle >> 48u) != RIN_VK_PIPELINE_CACHE_TAG ||
+        index_field == 0u || index_field > RIN_VK_MAX_PIPELINE_CACHES ||
+        generation == 0u)
+        return NULL;
+    slot = &g_pipeline_caches[index_field - 1u];
+    if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) != 1u ||
+        slot->generation != generation || slot->owner != owner)
+        return NULL;
+    return slot;
+}
+
 static RinVkFenceSlot* fence_slot(RinVkDevice device, RinVkFence handle) {
     struct RinVkDevice_T* owner = device_slot(device);
     uint32_t index_field = (uint32_t)(handle & UINT64_C(0xffff));
@@ -984,6 +1016,32 @@ static RinVkPipelineLayoutSlot* reserve_pipeline_layout_slot(
     return NULL;
 }
 
+static RinVkPipelineCacheSlot* reserve_pipeline_cache_slot(
+        struct RinVkDevice_T* owner, uint32_t* index_out) {
+    uint32_t index;
+    for (index = 0u; index < RIN_VK_MAX_PIPELINE_CACHES; ++index) {
+        RinVkPipelineCacheSlot* slot = &g_pipeline_caches[index];
+        uint32_t expected = 0u;
+        uint32_t generation;
+        if (!__atomic_compare_exchange_n(&slot->state, &expected, 2u, 0,
+                                         __ATOMIC_ACQUIRE,
+                                         __ATOMIC_RELAXED))
+            continue;
+        generation = slot->generation;
+        if (generation == UINT32_MAX) {
+            __atomic_store_n(&slot->state, 3u, __ATOMIC_RELEASE);
+            continue;
+        }
+        memset(slot, 0, sizeof(*slot));
+        slot->generation = generation + 1u;
+        slot->owner = owner;
+        __atomic_store_n(&slot->state, 2u, __ATOMIC_RELEASE);
+        *index_out = index;
+        return slot;
+    }
+    return NULL;
+}
+
 static void clear_memory_slot(RinVkMemorySlot* slot) {
     slot->owner = NULL;
     slot->product_allocation = 0u;
@@ -1188,6 +1246,15 @@ static void clear_pipeline_layout_slot(RinVkPipelineLayoutSlot* slot) {
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
 }
 
+static void clear_pipeline_cache_slot(RinVkPipelineCacheSlot* slot) {
+    if (!slot) return;
+    slot->owner = NULL;
+    slot->payload_size = 0u;
+    slot->reserved = 0u;
+    memset(slot->payload, 0, sizeof(slot->payload));
+    __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
+}
+
 static int image_has_views(const RinVkImageSlot* image) {
     uint32_t index;
     if (!image) return 0;
@@ -1223,6 +1290,13 @@ static int device_view_sampler_active(
              __atomic_load_n(&g_pipeline_layouts[index].state,
                              __ATOMIC_ACQUIRE) == 2u) &&
             g_pipeline_layouts[index].owner == device)
+            return 1;
+    for (index = 0u; index < RIN_VK_MAX_PIPELINE_CACHES; ++index)
+        if ((__atomic_load_n(&g_pipeline_caches[index].state,
+                             __ATOMIC_ACQUIRE) == 1u ||
+             __atomic_load_n(&g_pipeline_caches[index].state,
+                             __ATOMIC_ACQUIRE) == 2u) &&
+            g_pipeline_caches[index].owner == device)
             return 1;
     return 0;
 }
@@ -4576,6 +4650,178 @@ void RIN_VKAPI_CALL vkCmdBindDescriptorSets(
                                                      command);
 }
 
+typedef struct RinVkPipelineCacheBlobHeader {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t payload_size;
+    uint32_t reserved;
+    uint8_t device_uuid[16];
+    uint8_t driver_digest[32];
+} RinVkPipelineCacheBlobHeader;
+
+static void pipeline_cache_header(const struct RinVkDevice_T* device,
+                                  uint32_t payload_size,
+                                  RinVkPipelineCacheBlobHeader* header) {
+    memset(header, 0, sizeof(*header));
+    header->magic = RIN_VK_PIPELINE_CACHE_MAGIC;
+    header->version = RIN_VK_PIPELINE_CACHE_VERSION;
+    header->payload_size = payload_size;
+    memcpy(header->device_uuid, device->physical_profile.device_uuid,
+           sizeof(header->device_uuid));
+    memcpy(header->driver_digest, device->physical_profile.driver_digest,
+           sizeof(header->driver_digest));
+}
+
+static int pipeline_cache_blob_valid(const struct RinVkDevice_T* device,
+                                     const void* data, size_t data_size,
+                                     const RinVkPipelineCacheBlobHeader**
+                                         header_out) {
+    const RinVkPipelineCacheBlobHeader* header;
+    if (!device || !data || data_size < sizeof(*header)) return 0;
+    header = (const RinVkPipelineCacheBlobHeader*)data;
+    if (header->magic != RIN_VK_PIPELINE_CACHE_MAGIC ||
+        header->version != RIN_VK_PIPELINE_CACHE_VERSION ||
+        header->reserved != 0u ||
+        header->payload_size > RIN_VK_PIPELINE_CACHE_MAX_PAYLOAD ||
+        sizeof(*header) + (size_t)header->payload_size != data_size ||
+        memcmp(header->device_uuid, device->physical_profile.device_uuid,
+               sizeof(header->device_uuid)) != 0 ||
+        memcmp(header->driver_digest, device->physical_profile.driver_digest,
+               sizeof(header->driver_digest)) != 0)
+        return 0;
+    if (header_out) *header_out = header;
+    return 1;
+}
+
+RinVkResult RIN_VKAPI_CALL vkCreatePipelineCache(
+        RinVkDevice device, const RinVkPipelineCacheCreateInfo* info,
+        const void* allocator, RinVkPipelineCache* cache_out) {
+    struct RinVkDevice_T* owner = device_slot(device);
+    RinVkPipelineCacheSlot* cache;
+    const RinVkPipelineCacheBlobHeader* header = NULL;
+    uint32_t index;
+    (void)allocator;
+    if (!cache_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    *cache_out = 0u;
+    if (!owner || !info ||
+        info->sType != RIN_VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO ||
+        info->pNext || info->flags != 0u ||
+        (info->initialDataSize != 0u && !info->pInitialData) ||
+        info->initialDataSize > sizeof(RinVkPipelineCacheBlobHeader) +
+                                    RIN_VK_PIPELINE_CACHE_MAX_PAYLOAD ||
+        (info->initialDataSize != 0u &&
+         !pipeline_cache_blob_valid(owner, info->pInitialData,
+                                    info->initialDataSize, &header)))
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    if (!sync_try_lock()) return RIN_VK_NOT_READY;
+    cache = reserve_pipeline_cache_slot(owner, &index);
+    if (!cache) {
+        sync_unlock();
+        return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+    if (header) {
+        cache->payload_size = header->payload_size;
+        memcpy(cache->payload,
+               (const uint8_t*)info->pInitialData + sizeof(*header),
+               cache->payload_size);
+    }
+    __atomic_store_n(&cache->state, 1u, __ATOMIC_RELEASE);
+    *cache_out = resource_handle(RIN_VK_PIPELINE_CACHE_TAG, index,
+                                 cache->generation);
+    sync_unlock();
+    return RIN_VK_SUCCESS;
+}
+
+void RIN_VKAPI_CALL vkDestroyPipelineCache(
+        RinVkDevice device, RinVkPipelineCache cache, const void* allocator) {
+    RinVkPipelineCacheSlot* slot;
+    (void)allocator;
+    if (cache == 0u || !sync_try_lock()) return;
+    slot = pipeline_cache_slot(device, cache);
+    if (slot) clear_pipeline_cache_slot(slot);
+    sync_unlock();
+}
+
+RinVkResult RIN_VKAPI_CALL vkGetPipelineCacheData(
+        RinVkDevice device, RinVkPipelineCache cache, size_t* data_size,
+        void* data) {
+    RinVkPipelineCacheSlot* slot;
+    RinVkPipelineCacheBlobHeader header;
+    size_t required;
+    size_t capacity;
+    if (!data_size) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    if (!sync_try_lock()) return RIN_VK_NOT_READY;
+    slot = pipeline_cache_slot(device, cache);
+    if (!slot) {
+        sync_unlock();
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    }
+    pipeline_cache_header(slot->owner, slot->payload_size, &header);
+    required = sizeof(header) + slot->payload_size;
+    capacity = *data_size;
+    *data_size = required;
+    if (data) {
+        if (capacity != 0u)
+            memcpy(data, &header, capacity < sizeof(header) ? capacity
+                                                               : sizeof(header));
+        if (capacity > sizeof(header))
+            memcpy((uint8_t*)data + sizeof(header), slot->payload,
+                   (capacity - sizeof(header)) < slot->payload_size
+                       ? capacity - sizeof(header)
+                       : slot->payload_size);
+    }
+    sync_unlock();
+    return data && capacity < required ? RIN_VK_INCOMPLETE : RIN_VK_SUCCESS;
+}
+
+RinVkResult RIN_VKAPI_CALL vkMergePipelineCaches(
+        RinVkDevice device, RinVkPipelineCache dst_cache,
+        uint32_t src_cache_count, const RinVkPipelineCache* src_caches) {
+    RinVkPipelineCacheSlot* destination;
+    RinVkPipelineCacheSlot* sources[RIN_VK_MAX_PIPELINE_CACHES];
+    uint32_t index;
+    uint32_t total;
+    if (src_cache_count > RIN_VK_MAX_PIPELINE_CACHES ||
+        (src_cache_count != 0u && !src_caches))
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    if (!sync_try_lock()) return RIN_VK_NOT_READY;
+    destination = pipeline_cache_slot(device, dst_cache);
+    if (!destination) {
+        sync_unlock();
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    }
+    total = destination->payload_size;
+    for (index = 0u; index < src_cache_count; ++index) {
+        uint32_t prior;
+        sources[index] = pipeline_cache_slot(device, src_caches[index]);
+        if (!sources[index] || src_caches[index] == dst_cache) {
+            sync_unlock();
+            return RIN_VK_ERROR_INITIALIZATION_FAILED;
+        }
+        for (prior = 0u; prior < index; ++prior)
+            if (src_caches[prior] == src_caches[index]) {
+                sync_unlock();
+                return RIN_VK_ERROR_INITIALIZATION_FAILED;
+            }
+        if (UINT32_MAX - total < sources[index]->payload_size ||
+            total + sources[index]->payload_size >
+                RIN_VK_PIPELINE_CACHE_MAX_PAYLOAD) {
+            sync_unlock();
+            return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+        }
+        total += sources[index]->payload_size;
+    }
+    total = destination->payload_size;
+    for (index = 0u; index < src_cache_count; ++index) {
+        memcpy(destination->payload + total, sources[index]->payload,
+               sources[index]->payload_size);
+        total += sources[index]->payload_size;
+    }
+    destination->payload_size = total;
+    sync_unlock();
+    return RIN_VK_SUCCESS;
+}
+
 RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
         RinVkDevice device, const char* name) {
     if (!device_slot(device) || !name) return NULL;
@@ -4689,6 +4935,14 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
         return (RinVkVoidFunction)vkDestroyPipelineLayout;
     if (name_equal(name, "vkCmdBindDescriptorSets"))
         return (RinVkVoidFunction)vkCmdBindDescriptorSets;
+    if (name_equal(name, "vkCreatePipelineCache"))
+        return (RinVkVoidFunction)vkCreatePipelineCache;
+    if (name_equal(name, "vkDestroyPipelineCache"))
+        return (RinVkVoidFunction)vkDestroyPipelineCache;
+    if (name_equal(name, "vkGetPipelineCacheData"))
+        return (RinVkVoidFunction)vkGetPipelineCacheData;
+    if (name_equal(name, "vkMergePipelineCaches"))
+        return (RinVkVoidFunction)vkMergePipelineCaches;
     return NULL;
 }
 

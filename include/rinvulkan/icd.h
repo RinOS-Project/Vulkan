@@ -38,6 +38,7 @@
 #define RIN_VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO 12
 #define RIN_VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO 14
 #define RIN_VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO 15
+#define RIN_VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO 17
 #define RIN_VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO 31
 #define RIN_VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO 32
 #define RIN_VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO 33
@@ -114,6 +115,7 @@ typedef uint64_t RinVkDescriptorSetLayout;
 typedef uint64_t RinVkDescriptorPool;
 typedef uint64_t RinVkDescriptorSet;
 typedef uint64_t RinVkPipelineLayout;
+typedef uint64_t RinVkPipelineCache;
 
 typedef struct RinVkApplicationInfo {
     RinVkStructureType sType;
@@ -831,6 +833,14 @@ typedef struct RinVkPipelineLayoutCreateInfo {
     const void* pPushConstantRanges;
 } RinVkPipelineLayoutCreateInfo;
 
+typedef struct RinVkPipelineCacheCreateInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    size_t initialDataSize;
+    const void* pInitialData;
+} RinVkPipelineCacheCreateInfo;
+
 typedef struct RinVkDescriptorBufferInfo {
     RinVkBuffer buffer;
     uint64_t offset;
@@ -1511,6 +1521,20 @@ vkCreatePipelineLayout(RinVkDevice device,
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkDestroyPipelineLayout(RinVkDevice device, RinVkPipelineLayout layout,
                         const void* allocator);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkCreatePipelineCache(RinVkDevice device,
+                      const RinVkPipelineCacheCreateInfo* create_info,
+                      const void* allocator, RinVkPipelineCache* cache_out);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkDestroyPipelineCache(RinVkDevice device, RinVkPipelineCache cache,
+                       const void* allocator);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkGetPipelineCacheData(RinVkDevice device, RinVkPipelineCache cache,
+                       size_t* data_size, void* data);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkMergePipelineCaches(RinVkDevice device, RinVkPipelineCache dst_cache,
+                      uint32_t src_cache_count,
+                      const RinVkPipelineCache* src_caches);
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkCmdBindDescriptorSets(RinVkCommandBuffer command_buffer,
                          uint32_t pipeline_bind_point,
