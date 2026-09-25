@@ -64,6 +64,48 @@ static void make_constant_vertex(ShaderBlob* shader)
                 RIN_SHADER_UNUSED, 0u);
 }
 
+static void make_streamed_vertex(ShaderBlob* shader)
+{
+    memset(shader, 0, sizeof(*shader));
+    shader->header.magic = RIN_SHADER_MAGIC;
+    shader->header.version = RIN_SHADER_IR_VERSION;
+    shader->header.header_size = sizeof(shader->header);
+    shader->header.stage = RIN_SHADER_STAGE_VERTEX;
+    shader->header.instruction_count = 9u;
+    shader->header.register_count = 4u;
+    shader->header.input_count = 1u;
+    shader->header.output_count = 4u;
+    shader->header.total_size = sizeof(shader->header) +
+                                9u * sizeof(shader->instructions[0]);
+    instruction(&shader->instructions[0], RIN_SHADER_OP_LOAD_INPUT_F32,
+                0u, RIN_SHADER_UNUSED, RIN_SHADER_UNUSED, RIN_SHADER_UNUSED,
+                0u);
+    instruction(&shader->instructions[1], RIN_SHADER_OP_CONST_F32, 1u,
+                RIN_SHADER_UNUSED, RIN_SHADER_UNUSED, RIN_SHADER_UNUSED,
+                f32_bits(0.0f));
+    instruction(&shader->instructions[2], RIN_SHADER_OP_CONST_F32, 2u,
+                RIN_SHADER_UNUSED, RIN_SHADER_UNUSED, RIN_SHADER_UNUSED,
+                f32_bits(0.0f));
+    instruction(&shader->instructions[3], RIN_SHADER_OP_CONST_F32, 3u,
+                RIN_SHADER_UNUSED, RIN_SHADER_UNUSED, RIN_SHADER_UNUSED,
+                f32_bits(1.0f));
+    instruction(&shader->instructions[4], RIN_SHADER_OP_STORE_OUTPUT_F32,
+                RIN_SHADER_UNUSED, 0u, RIN_SHADER_UNUSED, RIN_SHADER_UNUSED,
+                0u);
+    instruction(&shader->instructions[5], RIN_SHADER_OP_STORE_OUTPUT_F32,
+                RIN_SHADER_UNUSED, 1u, RIN_SHADER_UNUSED, RIN_SHADER_UNUSED,
+                1u);
+    instruction(&shader->instructions[6], RIN_SHADER_OP_STORE_OUTPUT_F32,
+                RIN_SHADER_UNUSED, 2u, RIN_SHADER_UNUSED, RIN_SHADER_UNUSED,
+                2u);
+    instruction(&shader->instructions[7], RIN_SHADER_OP_STORE_OUTPUT_F32,
+                RIN_SHADER_UNUSED, 3u, RIN_SHADER_UNUSED, RIN_SHADER_UNUSED,
+                3u);
+    instruction(&shader->instructions[8], RIN_SHADER_OP_RETURN,
+                RIN_SHADER_UNUSED, RIN_SHADER_UNUSED, RIN_SHADER_UNUSED,
+                RIN_SHADER_UNUSED, 0u);
+}
+
 static void make_constant_fragment(ShaderBlob* shader)
 {
     static const float color[8] = {
@@ -229,10 +271,12 @@ int main(void)
     RinGpuRuntimeSoftwareSurfaceDescV1 surface;
     RinGpuVulkanGraphicsRuntimeV1 runtime;
     ShaderBlob vertex;
+    ShaderBlob streamed_vertex;
     ShaderBlob fragment;
     uint8_t compute[sizeof(RinShaderHeaderV1) +
                     4u * sizeof(RinShaderInstructionV1)];
     RinGpuVulkanGraphicsPipelinePlanV1 plan;
+    RinGpuVulkanGraphicsPipelinePlanV1 indexed_plan;
     RinGpuVulkanGraphicsPipelinePlanV1 depth_plan;
     RinGpuImageDescV1 image_desc;
     RinGpuImageDescV1 depth_image_desc;
@@ -240,8 +284,10 @@ int main(void)
     RinGpuRenderPassDepthDescV1 depth_pass;
     RinGpuRasterStateV1 raster_state;
     RinGpuImageTransitionV1 transition;
-    RinGpuDrawV1 draw;
+    RinGpuDrawIndexedV2 indexed_draw;
     RinGpuBufferDescV1 buffer_desc;
+    RinGpuBufferDescV1 vertex_buffer_desc;
+    RinGpuBufferDescV1 index_buffer_desc;
     RinGpuBufferBindingV1 buffer_binding;
     RinGpuDispatchV1 dispatch;
     RinGpuImageReadbackV1 readback_desc;
@@ -250,8 +296,11 @@ int main(void)
     RinGpuHandle depth_color_image = 0u;
     RinGpuHandle depth_image = 0u;
     RinGpuHandle pipeline = 0u;
+    RinGpuHandle indexed_pipeline = 0u;
     RinGpuHandle depth_pipeline = 0u;
     RinGpuHandle buffer = 0u;
+    RinGpuHandle vertex_buffer = 0u;
+    RinGpuHandle index_buffer = 0u;
     RinGpuHandle compute_pipeline = 0u;
     RinGpuHandle compute_group = 0u;
     RinGpuHandle command_list = 0u;
@@ -283,6 +332,56 @@ int main(void)
             &runtime, &plan, &vertex, vertex.header.total_size, &fragment,
             fragment.header.total_size, &pipeline);
         CHECK(pipeline_result == RIN_GPU_OK);
+    }
+
+    make_streamed_vertex(&streamed_vertex);
+    indexed_plan = plan;
+    indexed_plan.backend.vertex_input_count = 1u;
+    indexed_plan.backend.vertex_binding_count = 1u;
+    indexed_plan.backend.vertex_stride = sizeof(float);
+    indexed_plan.backend.vertex_bindings[0].binding = 0u;
+    indexed_plan.backend.vertex_bindings[0].stride = sizeof(float);
+    indexed_plan.backend.vertex_bindings[0].flags = 0u;
+    indexed_plan.backend.vertex_bindings[0].reserved = 0u;
+    indexed_plan.backend.vertex_attributes[0].location = 0u;
+    indexed_plan.backend.vertex_attributes[0].binding = 0u;
+    indexed_plan.backend.vertex_attributes[0].format = RIN_GPU_VERTEX_FLOAT32;
+    indexed_plan.backend.vertex_attributes[0].offset = 0u;
+    indexed_plan.backend.vertex_attributes[0].flags = 0u;
+    CHECK(rin_gpu_vulkan_graphics_runtime_create_graphics_pipeline(
+              &runtime, &indexed_plan, &streamed_vertex,
+              streamed_vertex.header.total_size, &fragment,
+              fragment.header.total_size, &indexed_pipeline) == RIN_GPU_OK);
+
+    memset(&vertex_buffer_desc, 0, sizeof(vertex_buffer_desc));
+    vertex_buffer_desc.abi_version = RIN_GPU_ABI_VERSION;
+    vertex_buffer_desc.struct_size = sizeof(vertex_buffer_desc);
+    vertex_buffer_desc.size_bytes = sizeof(float);
+    vertex_buffer_desc.usage = RIN_GPU_BUFFER_VERTEX |
+                               RIN_GPU_BUFFER_COPY_DESTINATION;
+    vertex_buffer_desc.flags = RIN_GPU_BUFFER_CPU_VISIBLE;
+    CHECK(rin_gpu_vulkan_graphics_runtime_create_buffer(
+              &runtime, &vertex_buffer_desc, &vertex_buffer) == RIN_GPU_OK);
+    {
+        const float position_x = 0.0f;
+        CHECK(rin_gpu_vulkan_graphics_runtime_upload_buffer(
+                  &runtime, vertex_buffer, 0u, &position_x,
+                  sizeof(position_x)) == RIN_GPU_OK);
+    }
+    memset(&index_buffer_desc, 0, sizeof(index_buffer_desc));
+    index_buffer_desc.abi_version = RIN_GPU_ABI_VERSION;
+    index_buffer_desc.struct_size = sizeof(index_buffer_desc);
+    index_buffer_desc.size_bytes = 1u;
+    index_buffer_desc.usage = RIN_GPU_BUFFER_INDEX |
+                              RIN_GPU_BUFFER_COPY_DESTINATION;
+    index_buffer_desc.flags = RIN_GPU_BUFFER_CPU_VISIBLE;
+    CHECK(rin_gpu_vulkan_graphics_runtime_create_buffer(
+              &runtime, &index_buffer_desc, &index_buffer) == RIN_GPU_OK);
+    {
+        const uint8_t vertex_index = 0u;
+        CHECK(rin_gpu_vulkan_graphics_runtime_upload_buffer(
+                  &runtime, index_buffer, 0u, &vertex_index,
+                  sizeof(vertex_index)) == RIN_GPU_OK);
     }
 
     memset(&image_desc, 0, sizeof(image_desc));
@@ -347,15 +446,22 @@ int main(void)
     raster_state.scissor.enabled = 1u;
     CHECK(rin_gpu_vulkan_graphics_runtime_set_raster_state(
               &runtime, command_list, &raster_state) == RIN_GPU_OK);
-    memset(&draw, 0, sizeof(draw));
-    draw.abi_version = RIN_GPU_ABI_VERSION;
-    draw.struct_size = sizeof(draw);
-    draw.pipeline = pipeline;
-    draw.color_target = image;
-    draw.vertex_count = 1u;
-    draw.instance_count = 1u;
-    CHECK(rin_gpu_vulkan_graphics_runtime_draw(
-              &runtime, command_list, &draw) == RIN_GPU_OK);
+    memset(&indexed_draw, 0, sizeof(indexed_draw));
+    indexed_draw.abi_version = RIN_GPU_ABI_VERSION;
+    indexed_draw.struct_size = sizeof(indexed_draw);
+    indexed_draw.pipeline = indexed_pipeline;
+    indexed_draw.color_target = image;
+    indexed_draw.index_buffer = index_buffer;
+    indexed_draw.index_format = RIN_GPU_INDEX_UINT8;
+    indexed_draw.index_count = 1u;
+    indexed_draw.instance_count = 2u;
+    indexed_draw.vertex_count = 1u;
+    indexed_draw.binding_count = 1u;
+    indexed_draw.vertex_buffers[0].binding = 0u;
+    indexed_draw.vertex_buffers[0].buffer = vertex_buffer;
+    indexed_draw.vertex_buffers[0].offset = 0u;
+    CHECK(rin_gpu_vulkan_graphics_runtime_draw_indexed(
+              &runtime, command_list, &indexed_draw) == RIN_GPU_OK);
     CHECK(rin_gpu_vulkan_graphics_runtime_end_render_pass(
               &runtime, command_list) == RIN_GPU_OK);
     transition.before_state = RIN_GPU_IMAGE_STATE_COLOR_TARGET;
@@ -407,15 +513,23 @@ int main(void)
     }
 
     depth_plan = plan;
-    depth_plan.backend.depth_format = RIN_GPU_FORMAT_D32_FLOAT;
+    depth_plan.backend.depth_format = RIN_GPU_FORMAT_D32_FLOAT_S8_UINT;
     depth_plan.backend.depth_compare = RIN_GPU_COMPARE_ALWAYS;
     depth_plan.backend.depth_write_enabled = 1u;
+    depth_plan.backend.stencil_test_enabled = 1u;
+    depth_plan.backend.stencil_compare = RIN_GPU_COMPARE_EQUAL;
+    depth_plan.backend.stencil_reference = 0x2au;
+    depth_plan.backend.stencil_read_mask = 0xffu;
+    depth_plan.backend.stencil_write_mask = 0xffu;
+    depth_plan.backend.stencil_fail_operation = RIN_GPU_STENCIL_KEEP;
+    depth_plan.backend.stencil_depth_fail_operation = RIN_GPU_STENCIL_KEEP;
+    depth_plan.backend.stencil_pass_operation = RIN_GPU_STENCIL_KEEP;
     CHECK(rin_gpu_vulkan_graphics_runtime_create_graphics_pipeline(
               &runtime, &depth_plan, &vertex, vertex.header.total_size,
               &fragment, fragment.header.total_size, &depth_pipeline) ==
           RIN_GPU_OK);
     depth_image_desc = image_desc;
-    depth_image_desc.format = RIN_GPU_FORMAT_D32_FLOAT;
+    depth_image_desc.format = RIN_GPU_FORMAT_D32_FLOAT_S8_UINT;
     depth_image_desc.usage = RIN_GPU_IMAGE_DEPTH_STENCIL |
                              RIN_GPU_IMAGE_COPY_SOURCE;
     CHECK(rin_gpu_vulkan_graphics_runtime_create_image(
@@ -442,8 +556,12 @@ int main(void)
     depth_pass.color_store_op = RIN_GPU_RENDER_STORE;
     depth_pass.depth_load_op = RIN_GPU_RENDER_CLEAR;
     depth_pass.depth_store_op = RIN_GPU_RENDER_STORE;
+    depth_pass.stencil_load_op = RIN_GPU_RENDER_CLEAR;
+    depth_pass.stencil_store_op = RIN_GPU_RENDER_STORE;
     depth_pass.clear_alpha = 1.0f;
     depth_pass.clear_depth = 1.0f;
+    depth_pass.clear_stencil = 0x2au;
+    depth_pass.stencil_write_mask = 0xffu;
     depth_pass.color_write_mask = RIN_GPU_COLOR_WRITE_ALL;
     CHECK(rin_gpu_vulkan_graphics_runtime_begin_render_pass_depth(
               &runtime, depth_command_list, &depth_pass) == RIN_GPU_OK);
