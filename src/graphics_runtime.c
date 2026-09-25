@@ -374,6 +374,33 @@ int rin_gpu_vulkan_graphics_runtime_begin_render_pass(
                                                      command_list, render_pass);
 }
 
+int rin_gpu_vulkan_graphics_runtime_begin_render_pass_mrt(
+    RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
+    const RinGpuRenderPassMrtDescV1* render_pass)
+{
+    if (!runtime_valid(runtime)) return RIN_GPU_ERROR_STATE;
+    return ringpu_runtime_command_begin_render_pass_mrt(
+        runtime->runtime, command_list, render_pass);
+}
+
+int rin_gpu_vulkan_graphics_runtime_begin_render_pass_depth(
+    RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
+    const RinGpuRenderPassDepthDescV1* render_pass)
+{
+    if (!runtime_valid(runtime)) return RIN_GPU_ERROR_STATE;
+    return ringpu_runtime_command_begin_render_pass_depth(
+        runtime->runtime, command_list, render_pass);
+}
+
+int rin_gpu_vulkan_graphics_runtime_begin_render_pass_depth_stencil(
+    RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
+    const RinGpuRenderPassDepthStencilDescV1* render_pass)
+{
+    if (!runtime_valid(runtime)) return RIN_GPU_ERROR_STATE;
+    return ringpu_runtime_command_begin_render_pass_depth_stencil(
+        runtime->runtime, command_list, render_pass);
+}
+
 int rin_gpu_vulkan_graphics_runtime_bind_graphics_resources(
     RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
     RinGpuHandle bind_group)
@@ -407,6 +434,15 @@ int rin_gpu_vulkan_graphics_runtime_draw_indexed(
     if (!runtime_valid(runtime)) return RIN_GPU_ERROR_STATE;
     return ringpu_runtime_command_draw_indexed_v2(runtime->runtime,
                                                   command_list, draw);
+}
+
+int rin_gpu_vulkan_graphics_runtime_set_raster_state(
+    RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
+    const RinGpuRasterStateV1* state)
+{
+    if (!runtime_valid(runtime)) return RIN_GPU_ERROR_STATE;
+    return ringpu_runtime_command_set_raster_state(runtime->runtime,
+                                                   command_list, state);
 }
 
 int rin_gpu_vulkan_graphics_runtime_dispatch(

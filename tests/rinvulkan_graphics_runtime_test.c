@@ -12,7 +12,7 @@
 
 typedef struct ShaderBlob {
     RinShaderHeaderV1 header;
-    RinShaderInstructionV1 instructions[9];
+    RinShaderInstructionV1 instructions[17];
 } ShaderBlob;
 
 static void instruction(RinShaderInstructionV1* out, uint16_t opcode,
@@ -66,28 +66,31 @@ static void make_constant_vertex(ShaderBlob* shader)
 
 static void make_constant_fragment(ShaderBlob* shader)
 {
-    static const float color[4] = { 1.0f, 0.25f, 0.0f, 1.0f };
+    static const float color[8] = {
+        1.0f, 0.25f, 0.0f, 1.0f,
+        0.0f, 1.0f, 0.25f, 1.0f
+    };
     uint32_t index;
     memset(shader, 0, sizeof(*shader));
     shader->header.magic = RIN_SHADER_MAGIC;
     shader->header.version = RIN_SHADER_IR_VERSION;
     shader->header.header_size = sizeof(shader->header);
     shader->header.stage = RIN_SHADER_STAGE_FRAGMENT;
-    shader->header.instruction_count = 9u;
-    shader->header.register_count = 4u;
-    shader->header.output_count = 4u;
+    shader->header.instruction_count = 17u;
+    shader->header.register_count = 8u;
+    shader->header.output_count = 8u;
     shader->header.total_size = sizeof(shader->header) +
-                                9u * sizeof(shader->instructions[0]);
-    for (index = 0u; index < 4u; ++index) {
+                                17u * sizeof(shader->instructions[0]);
+    for (index = 0u; index < 8u; ++index) {
         instruction(&shader->instructions[index], RIN_SHADER_OP_CONST_F32,
                     (uint16_t)index, RIN_SHADER_UNUSED, RIN_SHADER_UNUSED,
                     RIN_SHADER_UNUSED, f32_bits(color[index]));
-        instruction(&shader->instructions[4u + index],
+        instruction(&shader->instructions[8u + index],
                     RIN_SHADER_OP_STORE_OUTPUT_F32, RIN_SHADER_UNUSED,
                     (uint16_t)index, RIN_SHADER_UNUSED, RIN_SHADER_UNUSED,
                     index);
     }
-    instruction(&shader->instructions[8], RIN_SHADER_OP_RETURN,
+    instruction(&shader->instructions[16], RIN_SHADER_OP_RETURN,
                 RIN_SHADER_UNUSED, RIN_SHADER_UNUSED, RIN_SHADER_UNUSED,
                 RIN_SHADER_UNUSED, 0u);
 }
@@ -230,8 +233,12 @@ int main(void)
     uint8_t compute[sizeof(RinShaderHeaderV1) +
                     4u * sizeof(RinShaderInstructionV1)];
     RinGpuVulkanGraphicsPipelinePlanV1 plan;
+    RinGpuVulkanGraphicsPipelinePlanV1 depth_plan;
     RinGpuImageDescV1 image_desc;
-    RinGpuRenderPassDescV1 render_pass;
+    RinGpuImageDescV1 depth_image_desc;
+    RinGpuRenderPassMrtDescV1 render_pass_mrt;
+    RinGpuRenderPassDepthDescV1 depth_pass;
+    RinGpuRasterStateV1 raster_state;
     RinGpuImageTransitionV1 transition;
     RinGpuDrawV1 draw;
     RinGpuBufferDescV1 buffer_desc;
@@ -239,11 +246,16 @@ int main(void)
     RinGpuDispatchV1 dispatch;
     RinGpuImageReadbackV1 readback_desc;
     RinGpuHandle image = 0u;
+    RinGpuHandle image2 = 0u;
+    RinGpuHandle depth_color_image = 0u;
+    RinGpuHandle depth_image = 0u;
     RinGpuHandle pipeline = 0u;
+    RinGpuHandle depth_pipeline = 0u;
     RinGpuHandle buffer = 0u;
     RinGpuHandle compute_pipeline = 0u;
     RinGpuHandle compute_group = 0u;
     RinGpuHandle command_list = 0u;
+    RinGpuHandle depth_command_list = 0u;
     RinGpuHandle compute_list = 0u;
     RinGpuHandle fence = 0u;
     uint8_t presented[64u] = {0};
@@ -289,6 +301,8 @@ int main(void)
     image_desc.flags = RIN_GPU_IMAGE_CPU_READABLE;
     CHECK(rin_gpu_vulkan_graphics_runtime_create_image(
               &runtime, &image_desc, &image) == RIN_GPU_OK);
+    CHECK(rin_gpu_vulkan_graphics_runtime_create_image(
+              &runtime, &image_desc, &image2) == RIN_GPU_OK);
     CHECK(ringpu_runtime_create_fence(runtime.runtime, 0u, &fence) ==
           RIN_GPU_OK);
     CHECK(rin_gpu_vulkan_graphics_runtime_create_command_list(
@@ -303,18 +317,36 @@ int main(void)
     CHECK(ringpu_runtime_command_transition_image(runtime.runtime, command_list,
                                                   image, &transition) ==
           RIN_GPU_OK);
-    memset(&render_pass, 0, sizeof(render_pass));
-    render_pass.abi_version = RIN_GPU_ABI_VERSION;
-    render_pass.struct_size = sizeof(render_pass);
-    render_pass.color_target = image;
-    render_pass.load_op = RIN_GPU_RENDER_CLEAR;
-    render_pass.store_op = RIN_GPU_RENDER_STORE;
-    render_pass.clear_red = 0.0f;
-    render_pass.clear_green = 0.0f;
-    render_pass.clear_blue = 0.0f;
-    render_pass.clear_alpha = 1.0f;
-    CHECK(rin_gpu_vulkan_graphics_runtime_begin_render_pass(
-              &runtime, command_list, &render_pass) == RIN_GPU_OK);
+    CHECK(ringpu_runtime_command_transition_image(runtime.runtime, command_list,
+                                                  image2, &transition) ==
+          RIN_GPU_OK);
+    memset(&render_pass_mrt, 0, sizeof(render_pass_mrt));
+    render_pass_mrt.abi_version = RIN_GPU_ABI_VERSION;
+    render_pass_mrt.struct_size = sizeof(render_pass_mrt);
+    render_pass_mrt.active_color_mask = 3u;
+    render_pass_mrt.color_attachments[0].target = image;
+    render_pass_mrt.color_attachments[1].target = image2;
+    render_pass_mrt.color_load_op = RIN_GPU_RENDER_CLEAR;
+    render_pass_mrt.color_store_op = RIN_GPU_RENDER_STORE;
+    render_pass_mrt.clear_alpha = 1.0f;
+    render_pass_mrt.color_write_mask = RIN_GPU_COLOR_WRITE_ALL;
+    CHECK(rin_gpu_vulkan_graphics_runtime_begin_render_pass_mrt(
+              &runtime, command_list, &render_pass_mrt) == RIN_GPU_OK);
+    memset(&raster_state, 0, sizeof(raster_state));
+    raster_state.abi_version = RIN_GPU_ABI_VERSION;
+    raster_state.struct_size = sizeof(raster_state);
+    raster_state.viewport.abi_version = RIN_GPU_ABI_VERSION;
+    raster_state.viewport.struct_size = sizeof(raster_state.viewport);
+    raster_state.viewport.width = 4.0f;
+    raster_state.viewport.height = 4.0f;
+    raster_state.viewport.max_depth = 1.0f;
+    raster_state.scissor.abi_version = RIN_GPU_ABI_VERSION;
+    raster_state.scissor.struct_size = sizeof(raster_state.scissor);
+    raster_state.scissor.width = 4u;
+    raster_state.scissor.height = 4u;
+    raster_state.scissor.enabled = 1u;
+    CHECK(rin_gpu_vulkan_graphics_runtime_set_raster_state(
+              &runtime, command_list, &raster_state) == RIN_GPU_OK);
     memset(&draw, 0, sizeof(draw));
     draw.abi_version = RIN_GPU_ABI_VERSION;
     draw.struct_size = sizeof(draw);
@@ -331,10 +363,19 @@ int main(void)
     CHECK(ringpu_runtime_command_transition_image(runtime.runtime, command_list,
                                                   image, &transition) ==
           RIN_GPU_OK);
+    CHECK(ringpu_runtime_command_transition_image(runtime.runtime, command_list,
+                                                  image2, &transition) ==
+          RIN_GPU_OK);
     CHECK(rin_gpu_vulkan_graphics_runtime_close_command_list(
               &runtime, command_list) == RIN_GPU_OK);
-    CHECK(rin_gpu_vulkan_graphics_runtime_submit(&runtime, command_list, fence,
-                                                1u) == RIN_GPU_OK);
+    {
+        int submit_result = rin_gpu_vulkan_graphics_runtime_submit(
+            &runtime, command_list, fence, 1u);
+        if (submit_result != RIN_GPU_OK) {
+            fprintf(stderr, "MRT submit error %d\n", submit_result);
+            return 1;
+        }
+    }
     CHECK(rin_gpu_vulkan_graphics_runtime_wait_fence(
               &runtime, fence, 1u, RIN_GPU_TIMEOUT_INFINITE) == RIN_GPU_OK);
     memset(&readback_desc, 0, sizeof(readback_desc));
@@ -346,6 +387,98 @@ int main(void)
     CHECK(rin_gpu_vulkan_graphics_runtime_readback_image(
               &runtime, image, &readback_desc, readback, sizeof(readback)) ==
           RIN_GPU_OK);
+    {
+        uint32_t index;
+        int nonzero = 0;
+        for (index = 0u; index < sizeof(readback); ++index)
+            if (readback[index] != 0u) nonzero = 1;
+        CHECK(nonzero);
+    }
+    memset(readback, 0, sizeof(readback));
+    CHECK(rin_gpu_vulkan_graphics_runtime_readback_image(
+              &runtime, image2, &readback_desc, readback, sizeof(readback)) ==
+          RIN_GPU_OK);
+    {
+        uint32_t index;
+        int nonzero = 0;
+        for (index = 0u; index < sizeof(readback); ++index)
+            if (readback[index] != 0u) nonzero = 1;
+        CHECK(nonzero);
+    }
+
+    depth_plan = plan;
+    depth_plan.backend.depth_format = RIN_GPU_FORMAT_D32_FLOAT;
+    depth_plan.backend.depth_compare = RIN_GPU_COMPARE_ALWAYS;
+    depth_plan.backend.depth_write_enabled = 1u;
+    CHECK(rin_gpu_vulkan_graphics_runtime_create_graphics_pipeline(
+              &runtime, &depth_plan, &vertex, vertex.header.total_size,
+              &fragment, fragment.header.total_size, &depth_pipeline) ==
+          RIN_GPU_OK);
+    depth_image_desc = image_desc;
+    depth_image_desc.format = RIN_GPU_FORMAT_D32_FLOAT;
+    depth_image_desc.usage = RIN_GPU_IMAGE_DEPTH_STENCIL |
+                             RIN_GPU_IMAGE_COPY_SOURCE;
+    CHECK(rin_gpu_vulkan_graphics_runtime_create_image(
+              &runtime, &depth_image_desc, &depth_image) == RIN_GPU_OK);
+    CHECK(rin_gpu_vulkan_graphics_runtime_create_image(
+              &runtime, &image_desc, &depth_color_image) == RIN_GPU_OK);
+    CHECK(rin_gpu_vulkan_graphics_runtime_create_command_list(
+              &runtime, &depth_command_list) == RIN_GPU_OK);
+    transition.before_state = RIN_GPU_IMAGE_STATE_UNDEFINED;
+    transition.after_state = RIN_GPU_IMAGE_STATE_COLOR_TARGET;
+    CHECK(ringpu_runtime_command_transition_image(
+              runtime.runtime, depth_command_list, depth_color_image,
+              &transition) == RIN_GPU_OK);
+    transition.after_state = RIN_GPU_IMAGE_STATE_DEPTH_TARGET;
+    CHECK(ringpu_runtime_command_transition_image(
+              runtime.runtime, depth_command_list, depth_image, &transition) ==
+          RIN_GPU_OK);
+    memset(&depth_pass, 0, sizeof(depth_pass));
+    depth_pass.abi_version = RIN_GPU_ABI_VERSION;
+    depth_pass.struct_size = sizeof(depth_pass);
+    depth_pass.color_target = depth_color_image;
+    depth_pass.depth_target = depth_image;
+    depth_pass.color_load_op = RIN_GPU_RENDER_CLEAR;
+    depth_pass.color_store_op = RIN_GPU_RENDER_STORE;
+    depth_pass.depth_load_op = RIN_GPU_RENDER_CLEAR;
+    depth_pass.depth_store_op = RIN_GPU_RENDER_STORE;
+    depth_pass.clear_alpha = 1.0f;
+    depth_pass.clear_depth = 1.0f;
+    depth_pass.color_write_mask = RIN_GPU_COLOR_WRITE_ALL;
+    CHECK(rin_gpu_vulkan_graphics_runtime_begin_render_pass_depth(
+              &runtime, depth_command_list, &depth_pass) == RIN_GPU_OK);
+    {
+        RinGpuDrawV1 depth_draw = {0};
+        depth_draw.abi_version = RIN_GPU_ABI_VERSION;
+        depth_draw.struct_size = sizeof(depth_draw);
+        depth_draw.pipeline = depth_pipeline;
+        depth_draw.color_target = depth_color_image;
+        depth_draw.vertex_count = 1u;
+        depth_draw.instance_count = 1u;
+        CHECK(rin_gpu_vulkan_graphics_runtime_draw(
+                  &runtime, depth_command_list, &depth_draw) == RIN_GPU_OK);
+    }
+    CHECK(rin_gpu_vulkan_graphics_runtime_end_render_pass(
+              &runtime, depth_command_list) == RIN_GPU_OK);
+    transition.before_state = RIN_GPU_IMAGE_STATE_COLOR_TARGET;
+    transition.after_state = RIN_GPU_IMAGE_STATE_COPY_SOURCE;
+    CHECK(ringpu_runtime_command_transition_image(
+              runtime.runtime, depth_command_list, depth_color_image,
+              &transition) == RIN_GPU_OK);
+    transition.before_state = RIN_GPU_IMAGE_STATE_DEPTH_TARGET;
+    CHECK(ringpu_runtime_command_transition_image(
+              runtime.runtime, depth_command_list, depth_image, &transition) ==
+          RIN_GPU_OK);
+    CHECK(rin_gpu_vulkan_graphics_runtime_close_command_list(
+              &runtime, depth_command_list) == RIN_GPU_OK);
+    CHECK(rin_gpu_vulkan_graphics_runtime_submit(
+              &runtime, depth_command_list, fence, 2u) == RIN_GPU_OK);
+    CHECK(rin_gpu_vulkan_graphics_runtime_wait_fence(
+              &runtime, fence, 2u, RIN_GPU_TIMEOUT_INFINITE) == RIN_GPU_OK);
+    memset(readback, 0, sizeof(readback));
+    CHECK(rin_gpu_vulkan_graphics_runtime_readback_image(
+              &runtime, depth_color_image, &readback_desc, readback,
+              sizeof(readback)) == RIN_GPU_OK);
     {
         uint32_t index;
         int nonzero = 0;
@@ -396,9 +529,9 @@ int main(void)
     CHECK(rin_gpu_vulkan_graphics_runtime_close_command_list(
               &runtime, compute_list) == RIN_GPU_OK);
     CHECK(rin_gpu_vulkan_graphics_runtime_submit(&runtime, compute_list, fence,
-                                                2u) == RIN_GPU_OK);
+                                                3u) == RIN_GPU_OK);
     CHECK(rin_gpu_vulkan_graphics_runtime_wait_fence(
-              &runtime, fence, 2u, RIN_GPU_TIMEOUT_INFINITE) == RIN_GPU_OK);
+              &runtime, fence, 3u, RIN_GPU_TIMEOUT_INFINITE) == RIN_GPU_OK);
     CHECK(rin_gpu_vulkan_graphics_runtime_shutdown(&runtime) == RIN_GPU_OK);
     return 0;
 }

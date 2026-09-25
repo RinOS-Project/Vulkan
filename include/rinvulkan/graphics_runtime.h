@@ -76,6 +76,15 @@ int rin_gpu_vulkan_graphics_runtime_reset_command_list(
 int rin_gpu_vulkan_graphics_runtime_begin_render_pass(
     RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
     const RinGpuRenderPassDescV1* render_pass);
+int rin_gpu_vulkan_graphics_runtime_begin_render_pass_mrt(
+    RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
+    const RinGpuRenderPassMrtDescV1* render_pass);
+int rin_gpu_vulkan_graphics_runtime_begin_render_pass_depth(
+    RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
+    const RinGpuRenderPassDepthDescV1* render_pass);
+int rin_gpu_vulkan_graphics_runtime_begin_render_pass_depth_stencil(
+    RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
+    const RinGpuRenderPassDepthStencilDescV1* render_pass);
 int rin_gpu_vulkan_graphics_runtime_bind_graphics_resources(
     RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
     RinGpuHandle bind_group);
@@ -88,6 +97,9 @@ int rin_gpu_vulkan_graphics_runtime_draw_vertices(
 int rin_gpu_vulkan_graphics_runtime_draw_indexed(
     RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
     const RinGpuDrawIndexedV2* draw);
+int rin_gpu_vulkan_graphics_runtime_set_raster_state(
+    RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
+    const RinGpuRasterStateV1* state);
 int rin_gpu_vulkan_graphics_runtime_dispatch(
     RinGpuVulkanGraphicsRuntimeV1* runtime, RinGpuHandle command_list,
     const RinGpuDispatchV1* dispatch);
