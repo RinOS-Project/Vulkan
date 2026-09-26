@@ -24,20 +24,19 @@ static int plan_valid(const RinGpuVulkanGraphicsPipelinePlanV1* plan)
 
 int rin_gpu_vulkan_graphics_runtime_init(
     RinGpuVulkanGraphicsRuntimeV1* runtime,
-    const RinGpuRuntimeSoftwareSurfaceDescV1* surface,
+    const RinGpuRuntimeDescV1* desc,
     uint32_t queue_capabilities)
 {
     RinGpuQueueDescV1 queue_desc;
     int result;
 
-    if (!runtime || !surface || queue_capabilities == 0u ||
+    if (!runtime || !desc || queue_capabilities == 0u ||
         (queue_capabilities & ~RIN_GPU_QUEUE_KNOWN_CAPABILITIES) != 0u)
         return RIN_GPU_ERROR_INVALID_ARGUMENT;
     memset(runtime, 0, sizeof(*runtime));
     runtime->struct_size = sizeof(*runtime);
     runtime->version = RIN_GPU_VULKAN_GRAPHICS_RUNTIME_VERSION;
-    result = ringpu_runtime_software_surface_create(surface,
-                                                     &runtime->runtime);
+    result = ringpu_runtime_create(desc, &runtime->runtime);
     if (result != RIN_GPU_OK) {
         memset(runtime, 0, sizeof(*runtime));
         return result;

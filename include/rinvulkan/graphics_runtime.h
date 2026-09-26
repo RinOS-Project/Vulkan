@@ -15,10 +15,9 @@
  * Vulkan VkRenderingInfo ABI is a separate loader boundary. */
 typedef RinGpuRenderPassMrtDescV1 RinGpuVulkanDynamicRenderingV1;
 
-/* This is the host software execution owner for the bounded Vulkan graphics
- * profile.  It deliberately receives a caller-owned RinGPU software surface
- * descriptor, so presentation and image acquisition are real callbacks rather
- * than an implicit success path.  It does not advertise physical execution. */
+/* Bounded Vulkan graphics owner.  The runtime descriptor explicitly selects
+ * the reference software backend or an admitted physical backend operation
+ * table; this API never substitutes software for a physical descriptor. */
 typedef struct RinGpuVulkanGraphicsRuntimeV1 {
     uint32_t struct_size;
     uint32_t version;
@@ -30,7 +29,7 @@ typedef struct RinGpuVulkanGraphicsRuntimeV1 {
 
 int rin_gpu_vulkan_graphics_runtime_init(
     RinGpuVulkanGraphicsRuntimeV1* runtime,
-    const RinGpuRuntimeSoftwareSurfaceDescV1* surface,
+    const RinGpuRuntimeDescV1* desc,
     uint32_t queue_capabilities);
 int rin_gpu_vulkan_graphics_runtime_shutdown(
     RinGpuVulkanGraphicsRuntimeV1* runtime);
