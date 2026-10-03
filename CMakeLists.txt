@@ -47,4 +47,9 @@ if(BUILD_TESTING)
         RinVulkan::RinVulkan)
     add_test(NAME rinvulkan-graphics-runtime
         COMMAND rinvulkan-graphics-runtime-test)
+    add_executable(rinvulkan-atomic-compat-test
+        tests/rinvulkan_atomic_compat_test.c)
+    target_compile_features(rinvulkan-atomic-compat-test PRIVATE c_std_11)
+    add_test(NAME rinvulkan-atomic-compat
+        COMMAND rinvulkan-atomic-compat-test)
 endif()

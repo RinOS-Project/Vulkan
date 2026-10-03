@@ -2,6 +2,8 @@
 
 #include <rinvulkan/runtime.h>
 
+#include "atomic_compat.h"
+
 #include <stddef.h>
 #include <string.h>
 

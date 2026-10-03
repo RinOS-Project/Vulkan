@@ -6,6 +6,8 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "atomic_compat.h"
+
 #define RIN_GPU_VULKAN_COMMAND_POOL_TAG UINT64_C(0x5243)
 
 static int overlaps_runtime(const RinGpuVulkanCommandRuntimeV1* runtime,

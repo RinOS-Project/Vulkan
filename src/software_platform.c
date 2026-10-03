@@ -3,9 +3,14 @@
 #include <rinvulkan/software_platform.h>
 #include <rinvulkan/icd.h>
 
-#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if defined(_MSC_VER)
+#include <intrin.h>
+#else
+#include <stdatomic.h>
+#endif
 
 #define RIN_GPU_VULKAN_SOFTWARE_ADDRESS_BASE UINT64_C(0x1000000000)
 #define RIN_GPU_VULKAN_SOFTWARE_ADDRESS_ALIGNMENT UINT64_C(2097152)
@@ -302,7 +307,11 @@ static int software_submit(void* context,
                     (operation->barrier.dst_access_mask &
                      ~RIN_GPU_VULKAN_BARRIER_ACCESS_ALL) != 0u)
                     return RIN_VULKAN_PRODUCT_PROTOCOL;
+#if defined(_MSC_VER)
+                _mm_mfence();
+#else
                 atomic_thread_fence(memory_order_seq_cst);
+#endif
                 continue;
             }
             if (operation->type ==
@@ -373,7 +382,11 @@ static int software_submit(void* context,
                        dst_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED) ||
                       src_queue_family == dst_queue_family))
                     return RIN_VULKAN_PRODUCT_PROTOCOL;
+#if defined(_MSC_VER)
+                _mm_mfence();
+#else
                 atomic_thread_fence(memory_order_seq_cst);
+#endif
                 continue;
             }
             if ((operation->type != RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_COPY &&
