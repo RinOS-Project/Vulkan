@@ -2,6 +2,7 @@
 
 #include <rinvulkan/software_platform.h>
 
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -256,10 +257,31 @@ static int software_submit(void* context,
             RinGpuVulkanSoftwareAllocationV1* destination;
             uint64_t source_offset;
             uint64_t destination_offset;
+            if (operation->reserved != 0u)
+                return RIN_VULKAN_PRODUCT_PROTOCOL;
+            if (operation->type ==
+                RIN_GPU_VULKAN_TRANSFER_OP_MEMORY_BARRIER) {
+                if (operation->source_allocation != 0u ||
+                    operation->destination_allocation != 0u ||
+                    operation->source_gpu_address != 0u ||
+                    operation->destination_gpu_address != 0u ||
+                    operation->size_bytes != 0u ||
+                    (operation->barrier.src_stage_mask &
+                     ~RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS) != 0u ||
+                    (operation->barrier.src_access_mask &
+                     ~RIN_GPU_VULKAN_BARRIER_ACCESS_ALL) != 0u ||
+                    (operation->barrier.dst_stage_mask &
+                     ~RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS) != 0u ||
+                    (operation->barrier.dst_access_mask &
+                     ~RIN_GPU_VULKAN_BARRIER_ACCESS_ALL) != 0u)
+                    return RIN_VULKAN_PRODUCT_PROTOCOL;
+                atomic_thread_fence(memory_order_seq_cst);
+                continue;
+            }
             if ((operation->type != RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_COPY &&
                  (operation->type < RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_COPY ||
                   operation->type > RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_RESOLVE)) ||
-                operation->reserved != 0u || operation->size_bytes == 0u ||
+                operation->size_bytes == 0u ||
                 !resource_has_access(resources, resource_count,
                                      operation->destination_allocation,
                                      RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE))

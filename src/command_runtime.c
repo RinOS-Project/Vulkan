@@ -490,21 +490,40 @@ int rin_gpu_vulkan_command_buffer_record_transfer_ops(
                          sizeof(*operations) * (size_t)operation_count))
         return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
     for (index = 0u; index < operation_count; ++index) {
-        if (operations[index].type < RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_COPY ||
-            operations[index].type > RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_RESOLVE ||
-            operations[index].reserved != 0u ||
-            operations[index].destination_allocation == 0u ||
-            operations[index].destination_gpu_address == 0u ||
-            operations[index].size_bytes == 0u)
+        const RinGpuVulkanTransferOpV2* operation = &operations[index];
+        if (operation->type < RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_COPY ||
+            operation->type > RIN_GPU_VULKAN_TRANSFER_OP_MEMORY_BARRIER ||
+            operation->reserved != 0u)
             return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
-        if (operations[index].type != RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_CLEAR &&
-            (operations[index].source_allocation == 0u ||
-             operations[index].source_gpu_address == 0u))
+        if (operation->type == RIN_GPU_VULKAN_TRANSFER_OP_MEMORY_BARRIER) {
+            if (operation->source_allocation != 0u ||
+                operation->destination_allocation != 0u ||
+                operation->source_gpu_address != 0u ||
+                operation->destination_gpu_address != 0u ||
+                operation->size_bytes != 0u ||
+                (operation->barrier.src_stage_mask &
+                 ~RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS) != 0u ||
+                (operation->barrier.src_access_mask &
+                 ~RIN_GPU_VULKAN_BARRIER_ACCESS_ALL) != 0u ||
+                (operation->barrier.dst_stage_mask &
+                 ~RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS) != 0u ||
+                (operation->barrier.dst_access_mask &
+                 ~RIN_GPU_VULKAN_BARRIER_ACCESS_ALL) != 0u)
+                return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
+            continue;
+        }
+        if (operation->destination_allocation == 0u ||
+            operation->destination_gpu_address == 0u ||
+            operation->size_bytes == 0u)
             return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
-        if (operations[index].type == RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_CLEAR &&
-            (operations[index].source_allocation != 0u ||
-             operations[index].source_gpu_address != 0u ||
-             (operations[index].size_bytes & 3u) != 0u))
+        if (operation->type != RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_CLEAR &&
+            (operation->source_allocation == 0u ||
+             operation->source_gpu_address == 0u))
+            return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
+        if (operation->type == RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_CLEAR &&
+            (operation->source_allocation != 0u ||
+             operation->source_gpu_address != 0u ||
+             (operation->size_bytes & 3u) != 0u))
             return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
         if (operations[index].type == RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BLIT &&
             (operations[index].source_width == 0u ||
@@ -559,23 +578,21 @@ int rin_gpu_vulkan_command_buffer_record_barrier(
         uint64_t src_access_mask, uint64_t dst_stage_mask,
         uint64_t dst_access_mask) {
     RinGpuVulkanCommandBufferV1* buffer = buffer_slot(runtime, handle);
+    RinGpuVulkanTransferOpV2 operation;
     if (!buffer || buffer->lifecycle != RIN_GPU_VULKAN_COMMAND_BUFFER_RECORDING ||
-        src_stage_mask == 0u ||
         (src_stage_mask & ~RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS) != 0u ||
-        src_access_mask == 0u ||
         (src_access_mask & ~RIN_GPU_VULKAN_BARRIER_ACCESS_ALL) != 0u ||
-        dst_stage_mask == 0u ||
         (dst_stage_mask & ~RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS) != 0u ||
-        dst_access_mask == 0u ||
-        (dst_access_mask & ~RIN_GPU_VULKAN_BARRIER_ACCESS_ALL) != 0u ||
-        buffer->barrier_count >= RIN_GPU_VULKAN_COMMAND_MAX_BARRIERS)
+        (dst_access_mask & ~RIN_GPU_VULKAN_BARRIER_ACCESS_ALL) != 0u)
         return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
-    buffer->barriers[buffer->barrier_count].src_stage_mask = src_stage_mask;
-    buffer->barriers[buffer->barrier_count].src_access_mask = src_access_mask;
-    buffer->barriers[buffer->barrier_count].dst_stage_mask = dst_stage_mask;
-    buffer->barriers[buffer->barrier_count].dst_access_mask = dst_access_mask;
-    ++buffer->barrier_count;
-    return RIN_GPU_VULKAN_COMMAND_OK;
+    memset(&operation, 0, sizeof(operation));
+    operation.type = RIN_GPU_VULKAN_TRANSFER_OP_MEMORY_BARRIER;
+    operation.barrier.src_stage_mask = (uint32_t)src_stage_mask;
+    operation.barrier.src_access_mask = (uint32_t)src_access_mask;
+    operation.barrier.dst_stage_mask = (uint32_t)dst_stage_mask;
+    operation.barrier.dst_access_mask = (uint32_t)dst_access_mask;
+    return rin_gpu_vulkan_command_buffer_record_transfer_ops(
+        runtime, handle, &operation, 1u);
 }
 
 int rin_gpu_vulkan_command_buffer_record_query(

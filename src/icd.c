@@ -3445,12 +3445,13 @@ void RIN_VKAPI_CALL vkCmdCopyBuffer(
     const RinVkBufferCopy* regions) {
     RinGpuVulkanCommandBufferV1* core =
         (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
-    RinGpuVulkanBufferCopyCommandV1 copies[RIN_GPU_VULKAN_COMMAND_MAX_COPIES];
+    RinGpuVulkanTransferOpV2 operations[
+        RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS];
     RinVkBufferSlot* source;
     RinVkBufferSlot* destination;
     struct RinVkDevice_T* owner;
     uintptr_t owner_address = 0u;
-    uint32_t copy_count = 0u;
+    uint32_t operation_count = 0u;
     uint32_t index;
     int valid = 1;
 
@@ -3458,7 +3459,7 @@ void RIN_VKAPI_CALL vkCmdCopyBuffer(
             &g_command_runtime, core, &owner_address) !=
             RIN_GPU_VULKAN_COMMAND_OK ||
         !(owner = device_slot((RinVkDevice)(void*)owner_address)) ||
-        region_count > RIN_GPU_VULKAN_COMMAND_MAX_COPIES ||
+        region_count > RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS ||
         (region_count != 0u && !regions)) {
         valid = 0;
         goto done;
@@ -3471,7 +3472,7 @@ void RIN_VKAPI_CALL vkCmdCopyBuffer(
         valid = 0;
         goto done;
     }
-    memset(copies, 0, sizeof(copies));
+    memset(operations, 0, sizeof(operations));
     for (index = 0u; index < region_count; ++index) {
         uint64_t source_address;
         uint64_t destination_address;
@@ -3485,18 +3486,22 @@ void RIN_VKAPI_CALL vkCmdCopyBuffer(
             goto done;
         }
         if (regions[index].size == 0u) continue;
-        copies[copy_count].source_allocation =
+        operations[operation_count].type =
+            RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_COPY;
+        operations[operation_count].source_allocation =
             source->memory->product_allocation;
-        copies[copy_count].destination_allocation =
+        operations[operation_count].destination_allocation =
             destination->memory->product_allocation;
-        copies[copy_count].source_gpu_address = source_address;
-        copies[copy_count].destination_gpu_address = destination_address;
-        copies[copy_count].size_bytes = regions[index].size;
-        ++copy_count;
+        operations[operation_count].source_gpu_address = source_address;
+        operations[operation_count].destination_gpu_address =
+            destination_address;
+        operations[operation_count].size_bytes = regions[index].size;
+        ++operation_count;
     }
-    if (copy_count != 0u && rin_gpu_vulkan_command_buffer_record_copies(
-                               &g_command_runtime, core, copies,
-                               copy_count) != RIN_GPU_VULKAN_COMMAND_OK) {
+    if (operation_count != 0u &&
+        rin_gpu_vulkan_command_buffer_record_transfer_ops(
+            &g_command_runtime, core, operations, operation_count) !=
+            RIN_GPU_VULKAN_COMMAND_OK) {
         valid = 0;
     }
 
@@ -3615,8 +3620,7 @@ static int synchronization2_stage_mask(
                      RIN_VK_PIPELINE_STAGE_2_HOST_BIT |
                      RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     uint64_t runtime_mask = 0u;
-    if (!runtime_mask_out || public_mask == 0u ||
-        (public_mask & ~known) != 0u)
+    if (!runtime_mask_out || (public_mask & ~known) != 0u)
         return 0;
     if ((public_mask & RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) != 0u)
         runtime_mask = RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS;
@@ -3627,7 +3631,7 @@ static int synchronization2_stage_mask(
             runtime_mask |= RIN_GPU_VULKAN_BARRIER_STAGE_HOST;
     }
     *runtime_mask_out = runtime_mask;
-    return runtime_mask != 0u;
+    return 1;
 }
 
 static int synchronization2_access_mask(
@@ -3637,8 +3641,7 @@ static int synchronization2_access_mask(
                      RIN_VK_ACCESS_2_HOST_READ_BIT |
                      RIN_VK_ACCESS_2_HOST_WRITE_BIT;
     uint64_t runtime_mask = 0u;
-    if (!runtime_mask_out || public_mask == 0u ||
-        (public_mask & ~known) != 0u)
+    if (!runtime_mask_out || (public_mask & ~known) != 0u)
         return 0;
     if ((public_mask & RIN_VK_ACCESS_2_TRANSFER_READ_BIT) != 0u)
         runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_READ;
@@ -3649,7 +3652,25 @@ static int synchronization2_access_mask(
     if ((public_mask & RIN_VK_ACCESS_2_HOST_WRITE_BIT) != 0u)
         runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_WRITE;
     *runtime_mask_out = runtime_mask;
-    return runtime_mask != 0u;
+    return 1;
+}
+
+static int synchronization2_access_stage_valid(uint64_t stage_mask,
+                                               uint64_t access_mask) {
+    const uint64_t transfer_access = RIN_VK_ACCESS_2_TRANSFER_READ_BIT |
+                                     RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    const uint64_t host_access = RIN_VK_ACCESS_2_HOST_READ_BIT |
+                                 RIN_VK_ACCESS_2_HOST_WRITE_BIT;
+    const uint64_t all_commands = RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    if ((access_mask & transfer_access) != 0u &&
+        (stage_mask & (RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT |
+                       all_commands)) == 0u)
+        return 0;
+    if ((access_mask & host_access) != 0u &&
+        (stage_mask & (RIN_VK_PIPELINE_STAGE_2_HOST_BIT |
+                       all_commands)) == 0u)
+        return 0;
+    return 1;
 }
 
 void RIN_VKAPI_CALL vkCmdPipelineBarrier2(
@@ -3658,9 +3679,12 @@ void RIN_VKAPI_CALL vkCmdPipelineBarrier2(
     RinGpuVulkanCommandBufferV1* core =
         (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
     struct RinVkDevice_T* owner;
+    RinGpuVulkanTransferOpV2 operations[
+        RIN_GPU_VULKAN_COMMAND_MAX_BARRIERS];
     uint32_t index;
     int valid = 1;
 
+    memset(operations, 0, sizeof(operations));
     if (!dependency_info ||
         !command_owner_device(core, &owner) ||
         !owner->synchronization2_enabled ||
@@ -3692,13 +3716,25 @@ void RIN_VKAPI_CALL vkCmdPipelineBarrier2(
             !synchronization2_stage_mask(barrier->dstStageMask, &dst_stage) ||
             !synchronization2_access_mask(barrier->dstAccessMask,
                                           &dst_access) ||
-            rin_gpu_vulkan_command_buffer_record_barrier(
-                &g_command_runtime, core, src_stage, src_access, dst_stage,
-                dst_access) != RIN_GPU_VULKAN_COMMAND_OK) {
+            !synchronization2_access_stage_valid(barrier->srcStageMask,
+                                                 barrier->srcAccessMask) ||
+            !synchronization2_access_stage_valid(barrier->dstStageMask,
+                                                 barrier->dstAccessMask)) {
             valid = 0;
             goto done;
         }
+        operations[index].type =
+            RIN_GPU_VULKAN_TRANSFER_OP_MEMORY_BARRIER;
+        operations[index].barrier.src_stage_mask = (uint32_t)src_stage;
+        operations[index].barrier.src_access_mask = (uint32_t)src_access;
+        operations[index].barrier.dst_stage_mask = (uint32_t)dst_stage;
+        operations[index].barrier.dst_access_mask = (uint32_t)dst_access;
     }
+    if (rin_gpu_vulkan_command_buffer_record_transfer_ops(
+            &g_command_runtime, core, operations,
+            dependency_info->memoryBarrierCount) !=
+        RIN_GPU_VULKAN_COMMAND_OK)
+        valid = 0;
 
 done:
     if (!valid)
@@ -4500,6 +4536,10 @@ static int snapshot_submission_packet_v2(
                 &buffer->transfer_ops[operation_index];
             RinGpuVulkanTransferOpV2* operation =
                 &packet->operations[packet->op_count++];
+            if (source->type == RIN_GPU_VULKAN_TRANSFER_OP_MEMORY_BARRIER) {
+                *operation = *source;
+                continue;
+            }
             if ((source->type != RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_CLEAR &&
                  !append_submission_resource(
                      resources, &resource_count, source->source_allocation,
