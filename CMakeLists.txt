@@ -15,6 +15,7 @@ if(NOT TARGET RinGPU::RinGPU)
 endif()
 
 set(RINVULKAN_SOURCES
+    src/buffer_ownership.c
     src/command_runtime.c
     src/descriptor_runtime.c
     src/graphics.c
@@ -66,4 +67,13 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME rinvulkan-resource-thread
         COMMAND rinvulkan-resource-thread-test)
+    add_executable(rinvulkan-buffer-ownership-test
+        tests/rinvulkan_buffer_ownership_test.c
+        src/buffer_ownership.c)
+    target_compile_features(rinvulkan-buffer-ownership-test PRIVATE c_std_11)
+    target_include_directories(rinvulkan-buffer-ownership-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME rinvulkan-buffer-ownership
+        COMMAND rinvulkan-buffer-ownership-test)
 endif()

@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "atomic_compat.h"
+#include "buffer_ownership.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -32,8 +33,6 @@
 #define RIN_VK_MAX_SEMAPHORES 128u
 #define RIN_VK_MAX_SUBMISSIONS 64u
 #define RIN_VK_MAX_SUBMIT_COMMAND_BUFFERS 4u
-#define RIN_VK_MAX_SUBMIT_SEMAPHORES 8u
-#define RIN_VK_MAX_BUFFER_OWNERSHIP_RANGES 32u
 #define RIN_VK_SUBMISSION_ACTIVE 1u
 #define RIN_VK_SUBMISSION_RESERVED 2u
 #define RIN_VK_SUBMISSION_WAITING 3u
@@ -137,27 +136,6 @@ typedef struct RinVkMemorySlot {
     uint32_t memory_type_index;
     uint32_t bound_resource_count;
 } RinVkMemorySlot;
-
-typedef struct RinVkBufferOwnershipRange {
-    uint64_t offset;
-    uint64_t size;
-    uint32_t owner_queue_family;
-    uint32_t transfer_pending;
-    uint32_t transfer_source_family;
-    uint32_t transfer_destination_family;
-    uint32_t transfer_semaphore_count;
-    uint32_t reserved;
-    uint64_t transfer_offset;
-    uint64_t transfer_size;
-    RinVkSemaphore transfer_semaphores[RIN_VK_MAX_SUBMIT_SEMAPHORES];
-    uint64_t transfer_semaphore_values[RIN_VK_MAX_SUBMIT_SEMAPHORES];
-} RinVkBufferOwnershipRange;
-
-typedef struct RinVkBufferOwnershipState {
-    uint32_t range_count;
-    uint32_t reserved;
-    RinVkBufferOwnershipRange ranges[RIN_VK_MAX_BUFFER_OWNERSHIP_RANGES];
-} RinVkBufferOwnershipState;
 
 typedef struct RinVkBufferSlot {
     uint32_t state;
@@ -5729,86 +5707,6 @@ static int buffer_ownership_wait_matches(
         wait_values);
 }
 
-static int buffer_ownership_split_at(RinVkBufferOwnershipState* state,
-                                     uint64_t position) {
-    uint32_t index;
-    for (index = 0u; index < state->range_count; ++index) {
-        RinVkBufferOwnershipRange* range = &state->ranges[index];
-        const uint64_t range_end = range->offset + range->size;
-        if (position <= range->offset || position >= range_end) continue;
-        if (state->range_count >= RIN_VK_MAX_BUFFER_OWNERSHIP_RANGES)
-            return 0;
-        memmove(&state->ranges[index + 2u], &state->ranges[index + 1u],
-                sizeof(state->ranges[0]) *
-                    (state->range_count - index - 1u));
-        state->ranges[index + 1u] = *range;
-        state->ranges[index].size = position - range->offset;
-        state->ranges[index + 1u].offset = position;
-        state->ranges[index + 1u].size = range_end - position;
-        ++state->range_count;
-        return 1;
-    }
-    return 1;
-}
-
-static int buffer_ownership_insert(RinVkBufferOwnershipState* state,
-                                   uint32_t index, uint64_t offset,
-                                   uint64_t size, uint32_t owner_family) {
-    if (state->range_count >= RIN_VK_MAX_BUFFER_OWNERSHIP_RANGES ||
-        index > state->range_count)
-        return 0;
-    memmove(&state->ranges[index + 1u], &state->ranges[index],
-            sizeof(state->ranges[0]) * (state->range_count - index));
-    memset(&state->ranges[index], 0, sizeof(state->ranges[index]));
-    state->ranges[index].offset = offset;
-    state->ranges[index].size = size;
-    state->ranges[index].owner_queue_family = owner_family;
-    ++state->range_count;
-    return 1;
-}
-
-static int buffer_ownership_ensure_coverage(
-        RinVkBufferOwnershipState* state, uint64_t start, uint64_t end,
-        uint32_t default_owner_family, int create_gaps) {
-    uint64_t position = start;
-    uint32_t index = 0u;
-    if (!state || start >= end ||
-        !buffer_ownership_split_at(state, start) ||
-        !buffer_ownership_split_at(state, end))
-        return 0;
-    while (position < end) {
-        while (index < state->range_count &&
-               state->ranges[index].offset + state->ranges[index].size <=
-                   position)
-            ++index;
-        if (index < state->range_count &&
-            state->ranges[index].offset <= position) {
-            const uint64_t range_end = state->ranges[index].offset +
-                                       state->ranges[index].size;
-            if (range_end <= position) return 0;
-            position = range_end < end ? range_end : end;
-            ++index;
-            continue;
-        }
-        if (!create_gaps) return 0;
-        {
-            const uint64_t gap_end =
-                index < state->range_count &&
-                        state->ranges[index].offset < end
-                    ? state->ranges[index].offset
-                    : end;
-            if (gap_end <= position ||
-                !buffer_ownership_insert(state, index, position,
-                                         gap_end - position,
-                                         default_owner_family))
-                return 0;
-            position = gap_end;
-            ++index;
-        }
-    }
-    return 1;
-}
-
 static int prepare_buffer_ownership_updates(
         struct RinVkDevice_T* device,
         const RinGpuVulkanTransferPacketV2* packet,
@@ -5821,6 +5719,7 @@ static int prepare_buffer_ownership_updates(
         uint32_t* update_count_out) {
     uint32_t update_count = 0u;
     uint32_t operation_index;
+    uint32_t merge_index;
     if (!device || !packet || !updates || !update_count_out ||
         (use_count != 0u && !resource_uses) ||
         use_count > RIN_VK_MAX_SUBMISSION_RESOURCE_USES ||
@@ -5874,7 +5773,7 @@ static int prepare_buffer_ownership_updates(
         range_end = range_start + operation->size_bytes;
         if (src_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED &&
             dst_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED) {
-            if (!buffer_ownership_ensure_coverage(
+            if (!rin_vk_buffer_ownership_ensure_coverage(
                     &update->state, range_start, range_end,
                     queue_family_index, 1))
                 return 0;
@@ -5898,7 +5797,7 @@ static int prepare_buffer_ownership_updates(
             return 0;
         if (src_queue_family == dst_queue_family) {
             if (queue_family_index != src_queue_family ||
-                !buffer_ownership_ensure_coverage(
+                !rin_vk_buffer_ownership_ensure_coverage(
                     &update->state, range_start, range_end,
                     src_queue_family, 1))
                 return 0;
@@ -5917,7 +5816,7 @@ static int prepare_buffer_ownership_updates(
         }
         if (queue_family_index == src_queue_family) {
             if (signal_count == 0u ||
-                !buffer_ownership_ensure_coverage(
+                !rin_vk_buffer_ownership_ensure_coverage(
                     &update->state, range_start, range_end,
                     src_queue_family, 1))
                 return 0;
@@ -5947,7 +5846,7 @@ static int prepare_buffer_ownership_updates(
                        sizeof(*signal_values) * signal_count);
             }
         } else if (queue_family_index == dst_queue_family) {
-            if (!buffer_ownership_ensure_coverage(
+            if (!rin_vk_buffer_ownership_ensure_coverage(
                     &update->state, range_start, range_end,
                     dst_queue_family, 0))
                 return 0;
@@ -6005,7 +5904,7 @@ static int prepare_buffer_ownership_updates(
                 ++update_count;
             }
             use_end = use->offset + use->size;
-            if (!buffer_ownership_ensure_coverage(
+            if (!rin_vk_buffer_ownership_ensure_coverage(
                     &updates[update_index].state, use->offset, use_end,
                     queue_family_index, 1))
                 return 0;
@@ -6023,6 +5922,9 @@ static int prepare_buffer_ownership_updates(
             }
         }
     }
+    for (merge_index = 0u; merge_index < update_count; ++merge_index)
+        if (!rin_vk_buffer_ownership_merge_adjacent(&updates[merge_index].state))
+            return 0;
     *update_count_out = update_count;
     return 1;
 }

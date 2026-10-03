@@ -3,6 +3,7 @@ project('RinVulkan', 'c', version: '1.0.0', default_options: ['warning_level=3']
 ringpu_dep = dependency('ringpu', required: true)
 rinvulkan_inc = include_directories('include')
 rinvulkan_sources = files(
+  'src/buffer_ownership.c',
   'src/command_runtime.c',
   'src/descriptor_runtime.c',
   'src/graphics.c',
@@ -37,3 +38,11 @@ rinvulkan_graphics_runtime_test = executable(
   dependencies: rinvulkan_dep,
 )
 test('rinvulkan-graphics-runtime', rinvulkan_graphics_runtime_test)
+
+rinvulkan_buffer_ownership_test = executable(
+  'rinvulkan-buffer-ownership-test',
+  'tests/rinvulkan_buffer_ownership_test.c',
+  'src/buffer_ownership.c',
+  include_directories: include_directories('include', 'src'),
+)
+test('rinvulkan-buffer-ownership', rinvulkan_buffer_ownership_test)
