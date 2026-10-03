@@ -35,3 +35,7 @@ cmake -S . -B build -DRINGPU_DIR=../RinGPU -DBUILD_TESTING=ON
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
+
+The Meson graph registers the same ABI and host graphics-runtime contracts.
+Both build graphs exercise the software product owner only; physical GPU,
+QEMU, and device acceptance remain separate evidence gates.

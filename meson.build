@@ -23,3 +23,17 @@ rinvulkan_dep = declare_dependency(
   include_directories: rinvulkan_inc,
   dependencies: ringpu_dep,
 )
+
+rinvulkan_abi_test = executable(
+  'rinvulkan-abi-test',
+  'tests/rinvulkan_abi_test.c',
+  dependencies: rinvulkan_dep,
+)
+test('rinvulkan-abi', rinvulkan_abi_test)
+
+rinvulkan_graphics_runtime_test = executable(
+  'rinvulkan-graphics-runtime-test',
+  'tests/rinvulkan_graphics_runtime_test.c',
+  dependencies: rinvulkan_dep,
+)
+test('rinvulkan-graphics-runtime', rinvulkan_graphics_runtime_test)
