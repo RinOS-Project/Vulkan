@@ -12,6 +12,7 @@ rinvulkan_sources = files(
   'src/profile.c',
   'src/runtime.c',
   'src/software_platform.c',
+  'src/sync2_scope.c',
   'src/wsi.c',
 )
 rinvulkan = library('rinvulkan', rinvulkan_sources,
@@ -46,3 +47,11 @@ rinvulkan_buffer_ownership_test = executable(
   include_directories: include_directories('include', 'src'),
 )
 test('rinvulkan-buffer-ownership', rinvulkan_buffer_ownership_test)
+
+rinvulkan_sync2_scope_test = executable(
+  'rinvulkan-sync2-scope-test',
+  'tests/rinvulkan_sync2_scope_test.c',
+  'src/sync2_scope.c',
+  include_directories: include_directories('include', 'src'),
+)
+test('rinvulkan-sync2-scope', rinvulkan_sync2_scope_test)

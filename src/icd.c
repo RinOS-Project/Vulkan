@@ -8,6 +8,7 @@
 
 #include "atomic_compat.h"
 #include "buffer_ownership.h"
+#include "sync2_scope.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -4287,90 +4288,6 @@ static void record_transfer_ops(RinGpuVulkanCommandBufferV1* core,
         rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime, core);
 }
 
-static int synchronization2_stage_mask(
-        uint64_t public_mask, uint64_t* runtime_mask_out) {
-    uint64_t known = RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT |
-                     RIN_VK_PIPELINE_STAGE_2_HOST_BIT |
-                     RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-    uint64_t runtime_mask = 0u;
-    if (!runtime_mask_out || (public_mask & ~known) != 0u)
-        return 0;
-    if ((public_mask & RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) != 0u)
-        runtime_mask = RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS;
-    else {
-        if ((public_mask & RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT) != 0u)
-            runtime_mask |= RIN_GPU_VULKAN_BARRIER_STAGE_TRANSFER;
-        if ((public_mask & RIN_VK_PIPELINE_STAGE_2_HOST_BIT) != 0u)
-            runtime_mask |= RIN_GPU_VULKAN_BARRIER_STAGE_HOST;
-    }
-    *runtime_mask_out = runtime_mask;
-    return 1;
-}
-
-static int synchronization2_access_mask(
-        uint64_t public_mask, uint64_t* runtime_mask_out) {
-    uint64_t known = RIN_VK_ACCESS_2_TRANSFER_READ_BIT |
-                     RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT |
-                     RIN_VK_ACCESS_2_HOST_READ_BIT |
-                     RIN_VK_ACCESS_2_HOST_WRITE_BIT;
-    uint64_t runtime_mask = 0u;
-    if (!runtime_mask_out || (public_mask & ~known) != 0u)
-        return 0;
-    if ((public_mask & RIN_VK_ACCESS_2_TRANSFER_READ_BIT) != 0u)
-        runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_READ;
-    if ((public_mask & RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT) != 0u)
-        runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_WRITE;
-    if ((public_mask & RIN_VK_ACCESS_2_HOST_READ_BIT) != 0u)
-        runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_READ;
-    if ((public_mask & RIN_VK_ACCESS_2_HOST_WRITE_BIT) != 0u)
-        runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_WRITE;
-    *runtime_mask_out = runtime_mask;
-    return 1;
-}
-
-static int synchronization2_access_stage_valid(uint64_t stage_mask,
-                                               uint64_t access_mask) {
-    const uint64_t transfer_access = RIN_VK_ACCESS_2_TRANSFER_READ_BIT |
-                                     RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT;
-    const uint64_t host_access = RIN_VK_ACCESS_2_HOST_READ_BIT |
-                                 RIN_VK_ACCESS_2_HOST_WRITE_BIT;
-    const uint64_t all_commands = RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-    if ((access_mask & transfer_access) != 0u &&
-        (stage_mask & (RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT |
-                       all_commands)) == 0u)
-        return 0;
-    if ((access_mask & host_access) != 0u &&
-        (stage_mask & (RIN_VK_PIPELINE_STAGE_2_HOST_BIT |
-                       all_commands)) == 0u)
-        return 0;
-    return 1;
-}
-
-static int synchronization2_barrier_scopes(
-        uint64_t src_stage_public, uint64_t src_access_public,
-        uint64_t dst_stage_public, uint64_t dst_access_public,
-        RinGpuVulkanTransferOpV2* operation) {
-    uint64_t src_stage;
-    uint64_t src_access;
-    uint64_t dst_stage;
-    uint64_t dst_access;
-    if (!operation ||
-        !synchronization2_stage_mask(src_stage_public, &src_stage) ||
-        !synchronization2_access_mask(src_access_public, &src_access) ||
-        !synchronization2_stage_mask(dst_stage_public, &dst_stage) ||
-        !synchronization2_access_mask(dst_access_public, &dst_access) ||
-        !synchronization2_access_stage_valid(src_stage_public,
-                                             src_access_public) ||
-        !synchronization2_access_stage_valid(dst_stage_public,
-                                             dst_access_public))
-        return 0;
-    operation->barrier.src_stage_mask = (uint32_t)src_stage;
-    operation->barrier.src_access_mask = (uint32_t)src_access;
-    operation->barrier.dst_stage_mask = (uint32_t)dst_stage;
-    operation->barrier.dst_access_mask = (uint32_t)dst_access;
-    return 1;
-}
-
 static int synchronization2_queue_families_valid(
         const RinGpuVulkanCommandBufferV1* core, uint32_t src_queue_family,
         uint32_t dst_queue_family) {
@@ -4455,7 +4372,7 @@ void RIN_VKAPI_CALL vkCmdPipelineBarrier2(
         }
         operation->type =
             RIN_GPU_VULKAN_TRANSFER_OP_MEMORY_BARRIER;
-        if (!synchronization2_barrier_scopes(
+        if (!rin_vk_sync2_barrier_scopes(
                 barrier->srcStageMask, barrier->srcAccessMask,
                 barrier->dstStageMask, barrier->dstAccessMask, operation)) {
             valid = 0;
@@ -4489,7 +4406,7 @@ void RIN_VKAPI_CALL vkCmdPipelineBarrier2(
             barrier_size > buffer->size - barrier->offset ||
             !checked_buffer_address(buffer, barrier->offset, barrier_size,
                                     &address) ||
-            !synchronization2_barrier_scopes(
+            !rin_vk_sync2_barrier_scopes(
                 barrier->srcStageMask, barrier->srcAccessMask,
                 barrier->dstStageMask, barrier->dstAccessMask, operation)) {
             valid = 0;
@@ -4522,7 +4439,7 @@ void RIN_VKAPI_CALL vkCmdPipelineBarrier2(
             !image_barrier_old_layout_valid(barrier->oldLayout) ||
             !image_layout_transfer_valid(barrier->newLayout) ||
             !checked_image_address(image, 0u, image->memory_size, &address) ||
-            !synchronization2_barrier_scopes(
+            !rin_vk_sync2_barrier_scopes(
                 barrier->srcStageMask, barrier->srcAccessMask,
                 barrier->dstStageMask, barrier->dstAccessMask, operation)) {
             valid = 0;
@@ -6364,7 +6281,7 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit2(
         if (wait_infos[index].sType != RIN_VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO ||
             wait_infos[index].pNext || wait_infos[index].semaphore == 0u ||
             wait_infos[index].deviceIndex != 0u || wait_infos[index].reserved != 0u ||
-            !synchronization2_stage_mask(wait_infos[index].stageMask,
+            !rin_vk_sync2_stage_mask(wait_infos[index].stageMask,
                                          &runtime_stage_mask))
             return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
         wait_semaphores[index] = wait_infos[index].semaphore;
@@ -6376,7 +6293,7 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit2(
         if (signal_infos[index].sType != RIN_VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO ||
             signal_infos[index].pNext || signal_infos[index].semaphore == 0u ||
             signal_infos[index].deviceIndex != 0u || signal_infos[index].reserved != 0u ||
-            !synchronization2_stage_mask(signal_infos[index].stageMask,
+            !rin_vk_sync2_stage_mask(signal_infos[index].stageMask,
                                          &runtime_stage_mask))
             return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
         signal_semaphores[index] = signal_infos[index].semaphore;

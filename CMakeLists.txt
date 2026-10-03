@@ -24,6 +24,7 @@ set(RINVULKAN_SOURCES
     src/profile.c
     src/runtime.c
     src/software_platform.c
+    src/sync2_scope.c
     src/wsi.c)
 add_library(RinVulkan STATIC ${RINVULKAN_SOURCES})
 add_library(RinVulkan::RinVulkan ALIAS RinVulkan)
@@ -76,4 +77,13 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME rinvulkan-buffer-ownership
         COMMAND rinvulkan-buffer-ownership-test)
+    add_executable(rinvulkan-sync2-scope-test
+        tests/rinvulkan_sync2_scope_test.c
+        src/sync2_scope.c)
+    target_compile_features(rinvulkan-sync2-scope-test PRIVATE c_std_11)
+    target_include_directories(rinvulkan-sync2-scope-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME rinvulkan-sync2-scope
+        COMMAND rinvulkan-sync2-scope-test)
 endif()
