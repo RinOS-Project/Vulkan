@@ -4,7 +4,9 @@
 #include <rinvulkan/command_runtime.h>
 #include <rinvulkan/descriptor_runtime.h>
 
+#include <sched.h>
 #include <string.h>
+#include <time.h>
 
 #define RIN_VK_ICD_BINDING_TRANSITION UINTPTR_MAX
 #define RIN_VK_ICD_CALL_RETRIES 4096u
@@ -1573,6 +1575,29 @@ static int fence_list_contains(const RinVkFence* list, uint32_t count,
     return 0;
 }
 
+static int monotonic_time_ns(uint64_t* value_out) {
+    struct timespec now;
+    uint64_t seconds;
+
+    if (!value_out || clock_gettime(CLOCK_MONOTONIC, &now) != 0 ||
+        now.tv_sec < 0 || now.tv_nsec < 0 || now.tv_nsec >= 1000000000L)
+        return 0;
+    seconds = (uint64_t)now.tv_sec;
+    if (seconds > (UINT64_MAX - (uint64_t)now.tv_nsec) /
+                      UINT64_C(1000000000))
+        return 0;
+    *value_out = seconds * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
+    return 1;
+}
+
+static int wait_timeout_elapsed(uint64_t start_ns, uint64_t timeout_ns) {
+    uint64_t now_ns;
+
+    if (timeout_ns == UINT64_MAX) return 0;
+    if (!monotonic_time_ns(&now_ns)) return -1;
+    return now_ns < start_ns || now_ns - start_ns >= timeout_ns;
+}
+
 static int queue_submission_slots_active(
         const struct RinVkDevice_T* device, uint32_t queue_id) {
     uint32_t index;
@@ -3099,32 +3124,44 @@ RinVkResult RIN_VKAPI_CALL vkWaitForFences(
         RinVkDevice device, uint32_t fence_count, const RinVkFence* fences,
         uint32_t wait_all, uint64_t timeout) {
     struct RinVkDevice_T* owner = device_slot(device);
+    uint64_t start_ns = 0u;
     uint32_t index;
-    uint32_t signaled_count = 0u;
     RinVkResult result;
-    (void)timeout;
 
     if (!owner || fence_count == 0u || !fences || wait_all > 1u)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    result = maintain_device_submissions(owner);
-    if (result != RIN_VK_SUCCESS) return result;
-    if (!sync_try_lock()) return RIN_VK_NOT_READY;
-    for (index = 0u; index < fence_count; ++index) {
-        RinVkFenceSlot* slot = fence_slot(owner, fences[index]);
-        if (!slot || fence_list_contains(fences, index, fences[index])) {
+    if (timeout != 0u && timeout != UINT64_MAX &&
+        !monotonic_time_ns(&start_ns))
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    for (;;) {
+        uint32_t signaled_count = 0u;
+        int timed_out;
+
+        result = maintain_device_submissions(owner);
+        if (result != RIN_VK_SUCCESS && result != RIN_VK_NOT_READY)
+            return result;
+        if (result == RIN_VK_SUCCESS && sync_try_lock()) {
+            for (index = 0u; index < fence_count; ++index) {
+                RinVkFenceSlot* slot = fence_slot(owner, fences[index]);
+                if (!slot || fence_list_contains(fences, index,
+                                                  fences[index])) {
+                    sync_unlock();
+                    return RIN_VK_ERROR_INITIALIZATION_FAILED;
+                }
+                if (__atomic_load_n(&slot->signaled, __ATOMIC_ACQUIRE) != 0u)
+                    ++signaled_count;
+            }
             sync_unlock();
-            return RIN_VK_ERROR_INITIALIZATION_FAILED;
         }
-        if (__atomic_load_n(&slot->signaled, __ATOMIC_ACQUIRE) != 0u)
-            ++signaled_count;
+        if ((wait_all != 0u && signaled_count == fence_count) ||
+            (wait_all == 0u && signaled_count != 0u))
+            return RIN_VK_SUCCESS;
+        if (timeout == 0u) return RIN_VK_NOT_READY;
+        timed_out = wait_timeout_elapsed(start_ns, timeout);
+        if (timed_out < 0) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+        if (timed_out != 0) return RIN_VK_TIMEOUT;
+        (void)sched_yield();
     }
-    if ((wait_all != 0u && signaled_count == fence_count) ||
-        (wait_all == 0u && signaled_count != 0u)) {
-        sync_unlock();
-        return RIN_VK_SUCCESS;
-    }
-    sync_unlock();
-    return timeout == 0u ? RIN_VK_NOT_READY : RIN_VK_TIMEOUT;
 }
 
 RinVkResult RIN_VKAPI_CALL vkCreateSemaphore(
@@ -3232,8 +3269,8 @@ RinVkResult RIN_VKAPI_CALL vkWaitSemaphores(
         RinVkDevice device, const RinVkSemaphoreWaitInfo* wait_info,
         uint64_t timeout) {
     struct RinVkDevice_T* owner = device_slot(device);
+    uint64_t start_ns = 0u;
     uint32_t index;
-    uint32_t satisfied = 0u;
     RinVkResult result;
     if (!owner || !wait_info ||
         wait_info->sType != RIN_VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO ||
@@ -3243,29 +3280,42 @@ RinVkResult RIN_VKAPI_CALL vkWaitSemaphores(
         wait_info->semaphoreCount > RIN_VK_MAX_SUBMIT_SEMAPHORES ||
         !wait_info->pSemaphores || !wait_info->pValues)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    result = maintain_device_submissions(owner);
-    if (result != RIN_VK_SUCCESS) return result;
-    if (!sync_try_lock()) return RIN_VK_NOT_READY;
-    for (index = 0u; index < wait_info->semaphoreCount; ++index) {
-        RinVkSemaphoreSlot* slot = semaphore_slot(
-            owner, wait_info->pSemaphores[index]);
-        uint64_t current;
-        if (!slot || slot->type != RIN_VK_SEMAPHORE_TYPE_TIMELINE ||
-            semaphore_list_contains(wait_info->pSemaphores, index,
-                                    wait_info->pSemaphores[index])) {
+    if (timeout != 0u && timeout != UINT64_MAX &&
+        !monotonic_time_ns(&start_ns))
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    for (;;) {
+        uint32_t satisfied = 0u;
+        int timed_out;
+
+        result = maintain_device_submissions(owner);
+        if (result != RIN_VK_SUCCESS && result != RIN_VK_NOT_READY)
+            return result;
+        if (result == RIN_VK_SUCCESS && sync_try_lock()) {
+            for (index = 0u; index < wait_info->semaphoreCount; ++index) {
+                RinVkSemaphoreSlot* slot = semaphore_slot(
+                    owner, wait_info->pSemaphores[index]);
+                uint64_t current;
+                if (!slot || slot->type != RIN_VK_SEMAPHORE_TYPE_TIMELINE ||
+                    semaphore_list_contains(wait_info->pSemaphores, index,
+                                             wait_info->pSemaphores[index])) {
+                    sync_unlock();
+                    return RIN_VK_ERROR_INITIALIZATION_FAILED;
+                }
+                current = __atomic_load_n(&slot->value, __ATOMIC_ACQUIRE);
+                if (current >= wait_info->pValues[index]) ++satisfied;
+            }
             sync_unlock();
-            return RIN_VK_ERROR_INITIALIZATION_FAILED;
         }
-        current = __atomic_load_n(&slot->value, __ATOMIC_ACQUIRE);
-        if (current >= wait_info->pValues[index]) ++satisfied;
+        if ((wait_info->flags == 0u &&
+             satisfied == wait_info->semaphoreCount) ||
+            (wait_info->flags != 0u && satisfied != 0u))
+            return RIN_VK_SUCCESS;
+        if (timeout == 0u) return RIN_VK_NOT_READY;
+        timed_out = wait_timeout_elapsed(start_ns, timeout);
+        if (timed_out < 0) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+        if (timed_out != 0) return RIN_VK_TIMEOUT;
+        (void)sched_yield();
     }
-    if ((wait_info->flags == 0u && satisfied == wait_info->semaphoreCount) ||
-        (wait_info->flags != 0u && satisfied != 0u)) {
-        sync_unlock();
-        return RIN_VK_SUCCESS;
-    }
-    sync_unlock();
-    return timeout == 0u ? RIN_VK_NOT_READY : RIN_VK_TIMEOUT;
 }
 
 RinVkResult RIN_VKAPI_CALL vkCreateCommandPool(
