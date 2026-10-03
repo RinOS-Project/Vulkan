@@ -9,6 +9,8 @@
 #include <rinvulkan/icd.h>
 
 int rin_vk_sync2_stage_mask(uint64_t public_mask, uint64_t* runtime_mask_out);
+int rin_vk_sync2_legacy_wait_stage_mask(uint64_t public_mask,
+                                       uint32_t* legacy_mask_out);
 int rin_vk_sync2_recorded_stage_mask_valid(uint64_t public_mask);
 int rin_vk_sync2_access_mask(uint64_t public_mask, uint64_t stage_mask,
                              uint64_t* runtime_mask_out);

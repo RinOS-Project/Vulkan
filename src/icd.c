@@ -6278,11 +6278,10 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit2(
         if (wait_infos[index].sType != RIN_VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO ||
             wait_infos[index].pNext || wait_infos[index].semaphore == 0u ||
             wait_infos[index].deviceIndex != 0u || wait_infos[index].reserved != 0u ||
-            !rin_vk_sync2_stage_mask(wait_infos[index].stageMask,
-                                         &runtime_stage_mask))
+            !rin_vk_sync2_legacy_wait_stage_mask(
+                wait_infos[index].stageMask, &wait_stage_masks[index]))
             return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
         wait_semaphores[index] = wait_infos[index].semaphore;
-        wait_stage_masks[index] = (uint32_t)wait_infos[index].stageMask;
         wait_values[index] = wait_infos[index].value;
     }
     for (index = 0u; index < request->signalSemaphoreInfoCount; ++index) {
@@ -6290,8 +6289,9 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit2(
         if (signal_infos[index].sType != RIN_VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO ||
             signal_infos[index].pNext || signal_infos[index].semaphore == 0u ||
             signal_infos[index].deviceIndex != 0u || signal_infos[index].reserved != 0u ||
+            signal_infos[index].stageMask == 0u ||
             !rin_vk_sync2_stage_mask(signal_infos[index].stageMask,
-                                         &runtime_stage_mask))
+                                     &runtime_stage_mask))
             return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
         signal_semaphores[index] = signal_infos[index].semaphore;
         signal_values[index] = signal_infos[index].value;

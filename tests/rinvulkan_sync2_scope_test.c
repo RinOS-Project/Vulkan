@@ -25,6 +25,34 @@ static void test_transfer_stage_aliases(void) {
     assert(!rin_vk_sync2_stage_mask(UINT64_C(0x8), &runtime_mask));
 }
 
+static void test_legacy_wait_stage_projection(void) {
+    uint32_t legacy_mask = 0u;
+    assert(rin_vk_sync2_legacy_wait_stage_mask(
+        RIN_VK_PIPELINE_STAGE_2_COPY_BIT, &legacy_mask));
+    assert(legacy_mask == UINT32_C(0x00001000));
+    assert(rin_vk_sync2_legacy_wait_stage_mask(
+        RIN_VK_PIPELINE_STAGE_2_RESOLVE_BIT |
+            RIN_VK_PIPELINE_STAGE_2_BLIT_BIT |
+            RIN_VK_PIPELINE_STAGE_2_CLEAR_BIT,
+        &legacy_mask));
+    assert(legacy_mask == UINT32_C(0x00001000));
+    assert(rin_vk_sync2_legacy_wait_stage_mask(
+        RIN_VK_PIPELINE_STAGE_2_HOST_BIT, &legacy_mask));
+    assert(legacy_mask == UINT32_C(0x00004000));
+    assert(rin_vk_sync2_legacy_wait_stage_mask(
+        RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, &legacy_mask));
+    assert(legacy_mask == UINT32_C(0x00010000));
+    assert(rin_vk_sync2_legacy_wait_stage_mask(
+        RIN_VK_PIPELINE_STAGE_2_COPY_BIT |
+            RIN_VK_PIPELINE_STAGE_2_HOST_BIT,
+        &legacy_mask));
+    assert(legacy_mask == UINT32_C(0x00005000));
+    assert(!rin_vk_sync2_legacy_wait_stage_mask(0u, &legacy_mask));
+    assert(!rin_vk_sync2_legacy_wait_stage_mask(UINT64_C(0x8), &legacy_mask));
+    assert(!rin_vk_sync2_legacy_wait_stage_mask(
+        RIN_VK_PIPELINE_STAGE_2_COPY_BIT, NULL));
+}
+
 static void test_generic_memory_access_follows_stage_scope(void) {
     uint64_t runtime_mask = 0u;
     assert(rin_vk_sync2_access_mask(
@@ -91,6 +119,7 @@ static void test_barrier_scope_packet_mapping(void) {
 
 int main(void) {
     test_transfer_stage_aliases();
+    test_legacy_wait_stage_projection();
     test_generic_memory_access_follows_stage_scope();
     test_access_requires_a_compatible_supported_stage();
     test_barrier_scope_packet_mapping();

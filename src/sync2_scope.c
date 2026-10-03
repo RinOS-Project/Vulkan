@@ -24,6 +24,29 @@ int rin_vk_sync2_stage_mask(uint64_t public_mask, uint64_t* runtime_mask_out) {
     return 1;
 }
 
+int rin_vk_sync2_legacy_wait_stage_mask(uint64_t public_mask,
+                                        uint32_t* legacy_mask_out) {
+    const uint32_t legacy_transfer = UINT32_C(0x00001000);
+    const uint32_t legacy_host = UINT32_C(0x00004000);
+    const uint32_t legacy_all_commands = UINT32_C(0x00010000);
+    uint64_t runtime_mask;
+    uint32_t legacy_mask = 0u;
+
+    if (!legacy_mask_out || public_mask == 0u ||
+        !rin_vk_sync2_stage_mask(public_mask, &runtime_mask))
+        return 0;
+    if ((public_mask & RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) != 0u) {
+        legacy_mask = legacy_all_commands;
+    } else {
+        if ((runtime_mask & RIN_GPU_VULKAN_BARRIER_STAGE_TRANSFER) != 0u)
+            legacy_mask |= legacy_transfer;
+        if ((runtime_mask & RIN_GPU_VULKAN_BARRIER_STAGE_HOST) != 0u)
+            legacy_mask |= legacy_host;
+    }
+    *legacy_mask_out = legacy_mask;
+    return 1;
+}
+
 int rin_vk_sync2_recorded_stage_mask_valid(uint64_t public_mask) {
     uint64_t runtime_mask;
     return public_mask != 0u &&
