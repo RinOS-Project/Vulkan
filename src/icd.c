@@ -6289,7 +6289,6 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit2(
         if (signal_infos[index].sType != RIN_VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO ||
             signal_infos[index].pNext || signal_infos[index].semaphore == 0u ||
             signal_infos[index].deviceIndex != 0u || signal_infos[index].reserved != 0u ||
-            signal_infos[index].stageMask == 0u ||
             !rin_vk_sync2_stage_mask(signal_infos[index].stageMask,
                                      &runtime_stage_mask))
             return RIN_VK_ERROR_FEATURE_NOT_PRESENT;

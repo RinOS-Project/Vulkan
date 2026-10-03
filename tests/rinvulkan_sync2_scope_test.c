@@ -47,7 +47,8 @@ static void test_legacy_wait_stage_projection(void) {
             RIN_VK_PIPELINE_STAGE_2_HOST_BIT,
         &legacy_mask));
     assert(legacy_mask == UINT32_C(0x00005000));
-    assert(!rin_vk_sync2_legacy_wait_stage_mask(0u, &legacy_mask));
+    assert(rin_vk_sync2_legacy_wait_stage_mask(0u, &legacy_mask));
+    assert(legacy_mask == 0u);
     assert(!rin_vk_sync2_legacy_wait_stage_mask(UINT64_C(0x8), &legacy_mask));
     assert(!rin_vk_sync2_legacy_wait_stage_mask(
         RIN_VK_PIPELINE_STAGE_2_COPY_BIT, NULL));

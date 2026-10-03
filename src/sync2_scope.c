@@ -32,7 +32,7 @@ int rin_vk_sync2_legacy_wait_stage_mask(uint64_t public_mask,
     uint64_t runtime_mask;
     uint32_t legacy_mask = 0u;
 
-    if (!legacy_mask_out || public_mask == 0u ||
+    if (!legacy_mask_out ||
         !rin_vk_sync2_stage_mask(public_mask, &runtime_mask))
         return 0;
     if ((public_mask & RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) != 0u) {
