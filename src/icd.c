@@ -5082,6 +5082,16 @@ void RIN_VKAPI_CALL vkDestroyBuffer(RinVkDevice device, RinVkBuffer handle,
     clear_buffer_slot(buffer);
 }
 
+static int buffer_memory_requirement_size(const RinVkBufferSlot* buffer,
+                                          uint64_t* size_out) {
+    if (!buffer || !size_out ||
+        buffer->size > UINT64_MAX - (RIN_VK_RESOURCE_ALIGNMENT - 1u))
+        return 0;
+    *size_out = (buffer->size + RIN_VK_RESOURCE_ALIGNMENT - 1u) &
+                ~(RIN_VK_RESOURCE_ALIGNMENT - 1u);
+    return *size_out != 0u;
+}
+
 void RIN_VKAPI_CALL vkGetBufferMemoryRequirements(
         RinVkDevice device, RinVkBuffer handle,
         RinVkMemoryRequirements* requirements) {
@@ -5090,11 +5100,7 @@ void RIN_VKAPI_CALL vkGetBufferMemoryRequirements(
     if (!requirements) return;
     memset(requirements, 0, sizeof(*requirements));
     buffer = buffer_slot(device, handle);
-    if (!buffer || buffer->size > UINT64_MAX -
-                                   (RIN_VK_RESOURCE_ALIGNMENT - 1u))
-        return;
-    size = (buffer->size + RIN_VK_RESOURCE_ALIGNMENT - 1u) &
-           ~(RIN_VK_RESOURCE_ALIGNMENT - 1u);
+    if (!buffer_memory_requirement_size(buffer, &size)) return;
     requirements->size = size;
     requirements->alignment = RIN_VK_RESOURCE_ALIGNMENT;
     requirements->memoryTypeBits = memory_type_bits(buffer->owner);
@@ -5105,10 +5111,12 @@ RinVkResult RIN_VKAPI_CALL vkBindBufferMemory(
         RinVkDeviceMemory memory_handle, uint64_t memory_offset) {
     RinVkBufferSlot* buffer = buffer_slot(device, buffer_handle);
     RinVkMemorySlot* memory = memory_slot(device, memory_handle);
+    uint64_t requirements_size;
     if (!buffer || !memory || buffer->memory ||
+        !buffer_memory_requirement_size(buffer, &requirements_size) ||
         (memory_offset & (RIN_VK_RESOURCE_ALIGNMENT - 1u)) != 0u ||
         memory_offset > memory->requested_size ||
-        buffer->size > memory->requested_size - memory_offset ||
+        requirements_size > memory->requested_size - memory_offset ||
         (memory_type_bits(buffer->owner) &
          (UINT32_C(1) << memory->memory_type_index)) == 0u)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
