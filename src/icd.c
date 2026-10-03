@@ -137,6 +137,17 @@ typedef struct RinVkMemorySlot {
     uint32_t bound_resource_count;
 } RinVkMemorySlot;
 
+typedef struct RinVkBufferOwnershipState {
+    uint32_t owner_queue_family;
+    uint32_t transfer_pending;
+    uint32_t transfer_source_family;
+    uint32_t transfer_destination_family;
+    uint32_t transfer_semaphore_count;
+    uint32_t reserved;
+    RinVkSemaphore transfer_semaphores[RIN_VK_MAX_SUBMIT_SEMAPHORES];
+    uint64_t transfer_semaphore_values[RIN_VK_MAX_SUBMIT_SEMAPHORES];
+} RinVkBufferOwnershipState;
+
 typedef struct RinVkBufferSlot {
     uint32_t state;
     uint32_t generation;
@@ -146,6 +157,7 @@ typedef struct RinVkBufferSlot {
     uint32_t usage;
     uint64_t size;
     uint64_t memory_offset;
+    RinVkBufferOwnershipState ownership;
 } RinVkBufferSlot;
 
 typedef struct RinVkImageSlot {
@@ -1249,6 +1261,7 @@ static void clear_buffer_slot(RinVkBufferSlot* slot) {
     slot->usage = 0u;
     slot->size = 0u;
     slot->memory_offset = 0u;
+    memset(&slot->ownership, 0, sizeof(slot->ownership));
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
 }
 
@@ -4128,11 +4141,18 @@ static int synchronization2_queue_families_valid(
         const RinGpuVulkanCommandBufferV1* core, uint32_t src_queue_family,
         uint32_t dst_queue_family) {
     uint32_t queue_family;
+    struct RinVkDevice_T* owner;
     if (!core || !core->pool) return 0;
     queue_family = core->pool->queue_family_index;
-    return (src_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED &&
-            dst_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED) ||
-           (src_queue_family == queue_family &&
+    if (src_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED ||
+        dst_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED)
+        return src_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED &&
+               dst_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED;
+    owner = (struct RinVkDevice_T*)(uintptr_t)core->pool->owner;
+    return owner &&
+           src_queue_family < owner->physical_profile.queue_family_count &&
+           dst_queue_family < owner->physical_profile.queue_family_count &&
+           (src_queue_family == queue_family ||
             dst_queue_family == queue_family);
 }
 
@@ -4275,6 +4295,12 @@ void RIN_VKAPI_CALL vkCmdPipelineBarrier2(
             goto done;
         }
         operation->type = RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER;
+        if ((barrier->srcQueueFamilyIndex != RIN_VK_QUEUE_FAMILY_IGNORED ||
+             barrier->dstQueueFamilyIndex != RIN_VK_QUEUE_FAMILY_IGNORED) &&
+            barrier->srcQueueFamilyIndex != barrier->dstQueueFamilyIndex) {
+            valid = 0;
+            goto done;
+        }
         operation->source_allocation = barrier->image;
         operation->destination_allocation = image->memory->product_allocation;
         operation->destination_gpu_address = address;
@@ -5145,6 +5171,178 @@ static void commit_image_layout_updates(
                          __ATOMIC_RELEASE);
 }
 
+typedef struct RinVkBufferOwnershipUpdate {
+    RinVkBufferSlot* buffer;
+    RinVkBufferOwnershipState state;
+} RinVkBufferOwnershipUpdate;
+
+static int buffer_ownership_wait_matches(
+        struct RinVkDevice_T* device,
+        const RinVkBufferOwnershipState* ownership, uint32_t wait_count,
+        const RinVkSemaphore wait_semaphores[],
+        const uint64_t wait_values[]) {
+    uint32_t wait_index;
+    uint32_t signal_index;
+    if (!device || !ownership || wait_count == 0u ||
+        !wait_semaphores || !wait_values)
+        return 0;
+    for (wait_index = 0u; wait_index < wait_count; ++wait_index) {
+        RinVkSemaphoreSlot* wait_slot =
+            semaphore_slot((RinVkDevice)device, wait_semaphores[wait_index]);
+        if (!wait_slot) continue;
+        for (signal_index = 0u;
+             signal_index < ownership->transfer_semaphore_count;
+             ++signal_index) {
+            RinVkSemaphoreSlot* signal_slot = semaphore_slot(
+                (RinVkDevice)device,
+                ownership->transfer_semaphores[signal_index]);
+            if (wait_semaphores[wait_index] !=
+                    ownership->transfer_semaphores[signal_index] ||
+                !signal_slot || signal_slot->type != wait_slot->type)
+                continue;
+            if (wait_slot->type == RIN_VK_SEMAPHORE_TYPE_TIMELINE) {
+                if (wait_values[wait_index] >=
+                    ownership->transfer_semaphore_values[signal_index])
+                    return 1;
+            } else if (ownership->transfer_semaphore_values[signal_index] ==
+                       0u) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int prepare_buffer_ownership_updates(
+        struct RinVkDevice_T* device,
+        const RinGpuVulkanTransferPacketV2* packet,
+        uint32_t queue_family_index, uint32_t wait_count,
+        const RinVkSemaphore wait_semaphores[], const uint64_t wait_values[],
+        uint32_t signal_count, const RinVkSemaphore signal_semaphores[],
+        const uint64_t signal_values[], RinVkBufferOwnershipUpdate updates[],
+        uint32_t* update_count_out) {
+    uint32_t update_count = 0u;
+    uint32_t operation_index;
+    if (!device || !packet || !updates || !update_count_out ||
+        packet->op_count > RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS)
+        return 0;
+    for (operation_index = 0u; operation_index < packet->op_count;
+         ++operation_index) {
+        const RinGpuVulkanTransferOpV2* operation =
+            &packet->operations[operation_index];
+        RinVkBufferSlot* buffer;
+        RinVkBufferOwnershipUpdate* update = NULL;
+        uint32_t update_index;
+        uint32_t src_queue_family;
+        uint32_t dst_queue_family;
+        uint64_t buffer_start;
+        if (operation->type != RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_BARRIER)
+            continue;
+        buffer = buffer_slot((RinVkDevice)device,
+                             (RinVkBuffer)operation->source_allocation);
+        if (!buffer || !buffer->memory ||
+            buffer->memory->gpu_virtual_address >
+                UINT64_MAX - buffer->memory_offset)
+            return 0;
+        for (update_index = 0u; update_index < update_count; ++update_index)
+            if (updates[update_index].buffer == buffer) {
+                update = &updates[update_index];
+                break;
+            }
+        if (!update) {
+            if (update_count >= RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS)
+                return 0;
+            update = &updates[update_count++];
+            update->buffer = buffer;
+            update->state = buffer->ownership;
+        }
+        src_queue_family = operation->source_width;
+        dst_queue_family = operation->source_height;
+        if (src_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED &&
+            dst_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED) {
+            if (update->state.transfer_pending != 0u ||
+                (update->state.owner_queue_family !=
+                     RIN_VK_QUEUE_FAMILY_IGNORED &&
+                 update->state.owner_queue_family != queue_family_index))
+                return 0;
+            if (update->state.owner_queue_family ==
+                RIN_VK_QUEUE_FAMILY_IGNORED)
+                update->state.owner_queue_family = queue_family_index;
+            continue;
+        }
+        if (src_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED ||
+            dst_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED ||
+            src_queue_family >= device->physical_profile.queue_family_count ||
+            dst_queue_family >= device->physical_profile.queue_family_count)
+            return 0;
+        if (src_queue_family == dst_queue_family) {
+            if (queue_family_index != src_queue_family ||
+                update->state.transfer_pending != 0u ||
+                (update->state.owner_queue_family !=
+                     RIN_VK_QUEUE_FAMILY_IGNORED &&
+                 update->state.owner_queue_family != queue_family_index))
+                return 0;
+            if (update->state.owner_queue_family ==
+                RIN_VK_QUEUE_FAMILY_IGNORED)
+                update->state.owner_queue_family = queue_family_index;
+            continue;
+        }
+        buffer_start = buffer->memory->gpu_virtual_address +
+                       buffer->memory_offset;
+        if (operation->destination_gpu_address != buffer_start ||
+            operation->size_bytes != buffer->size)
+            return 0;
+        if (queue_family_index == src_queue_family) {
+            if (update->state.transfer_pending != 0u || signal_count == 0u ||
+                (update->state.owner_queue_family !=
+                     RIN_VK_QUEUE_FAMILY_IGNORED &&
+                 update->state.owner_queue_family != src_queue_family))
+                return 0;
+            update->state.owner_queue_family = src_queue_family;
+            update->state.transfer_pending = 1u;
+            update->state.transfer_source_family = src_queue_family;
+            update->state.transfer_destination_family = dst_queue_family;
+            update->state.transfer_semaphore_count = signal_count;
+            memset(update->state.transfer_semaphores, 0,
+                   sizeof(update->state.transfer_semaphores));
+            memset(update->state.transfer_semaphore_values, 0,
+                   sizeof(update->state.transfer_semaphore_values));
+            memcpy(update->state.transfer_semaphores, signal_semaphores,
+                   sizeof(*signal_semaphores) * signal_count);
+            memcpy(update->state.transfer_semaphore_values, signal_values,
+                   sizeof(*signal_values) * signal_count);
+        } else if (queue_family_index == dst_queue_family) {
+            if (update->state.transfer_pending == 0u ||
+                update->state.transfer_source_family != src_queue_family ||
+                update->state.transfer_destination_family != dst_queue_family ||
+                !buffer_ownership_wait_matches(
+                    device, &update->state, wait_count, wait_semaphores,
+                    wait_values))
+                return 0;
+            update->state.owner_queue_family = dst_queue_family;
+            update->state.transfer_pending = 0u;
+            update->state.transfer_source_family = 0u;
+            update->state.transfer_destination_family = 0u;
+            update->state.transfer_semaphore_count = 0u;
+            memset(update->state.transfer_semaphores, 0,
+                   sizeof(update->state.transfer_semaphores));
+            memset(update->state.transfer_semaphore_values, 0,
+                   sizeof(update->state.transfer_semaphore_values));
+        } else {
+            return 0;
+        }
+    }
+    *update_count_out = update_count;
+    return 1;
+}
+
+static void commit_buffer_ownership_updates(
+        const RinVkBufferOwnershipUpdate updates[], uint32_t update_count) {
+    uint32_t index;
+    for (index = 0u; index < update_count; ++index)
+        updates[index].buffer->ownership = updates[index].state;
+}
+
 RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     RinVkQueue queue, uint32_t submit_count, const RinVkSubmitInfo* submits,
     uint64_t fence) {
@@ -5171,6 +5369,9 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         pending_layout_images[RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS];
     uint32_t pending_layouts[RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS];
     uint32_t pending_layout_count = 0u;
+    RinVkBufferOwnershipUpdate
+        pending_buffer_ownership[RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS];
+    uint32_t pending_buffer_ownership_count = 0u;
 
     if (!queue_slot_value) return RIN_VK_ERROR_INITIALIZATION_FAILED;
     if (__atomic_exchange_n(&queue_slot_value->submit_lock, 1u,
@@ -5345,6 +5546,16 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         result = RIN_VK_ERROR_INITIALIZATION_FAILED;
         goto done;
     }
+    if (!prepare_buffer_ownership_updates(
+            device, &validation_packet_v2,
+            queue_slot_value->queue_family_index,
+            request.waitSemaphoreCount, wait_semaphores, wait_values,
+            request.signalSemaphoreCount, signal_semaphores, signal_values,
+            pending_buffer_ownership,
+            &pending_buffer_ownership_count)) {
+        result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        goto done;
+    }
     slot = reserve_submission_slot();
     if (!slot) {
         result = RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
@@ -5422,6 +5633,8 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         }
         commit_image_layout_updates(pending_layout_images, pending_layouts,
                                     pending_layout_count);
+        commit_buffer_ownership_updates(pending_buffer_ownership,
+                                        pending_buffer_ownership_count);
         mark_submission_query_events(slot, 1u);
         __atomic_store_n(&slot->state, RIN_VK_SUBMISSION_WAITING,
                          __ATOMIC_RELEASE);
@@ -5438,6 +5651,8 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     }
     commit_image_layout_updates(pending_layout_images, pending_layouts,
                                 pending_layout_count);
+    commit_buffer_ownership_updates(pending_buffer_ownership,
+                                    pending_buffer_ownership_count);
     if (fence != 0u) {
         RinVkFenceSlot* fence_value = fence_slot(device, (RinVkFence)fence);
         __atomic_store_n(&fence_value->pending, 1u, __ATOMIC_RELEASE);
@@ -5717,6 +5932,8 @@ RinVkResult RIN_VKAPI_CALL vkCreateBuffer(
     buffer->memory = NULL;
     buffer->memory_generation = 0u;
     buffer->memory_offset = 0u;
+    memset(&buffer->ownership, 0, sizeof(buffer->ownership));
+    buffer->ownership.owner_queue_family = RIN_VK_QUEUE_FAMILY_IGNORED;
     __atomic_store_n(&buffer->state, 1u, __ATOMIC_RELEASE);
     *buffer_out = resource_handle(RIN_VK_BUFFER_TAG, index,
                                   buffer->generation);

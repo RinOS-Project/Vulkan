@@ -540,7 +540,8 @@ int rin_gpu_vulkan_command_buffer_record_transfer_ops(
                  ~RIN_GPU_VULKAN_BARRIER_ACCESS_ALL) != 0u ||
                 !((src_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED &&
                    dst_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED) ||
-                  src_queue_family == dst_queue_family))
+                  (src_queue_family != RIN_VK_QUEUE_FAMILY_IGNORED &&
+                   dst_queue_family != RIN_VK_QUEUE_FAMILY_IGNORED)))
                 return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
             if (operation->type ==
                 RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_BARRIER) {

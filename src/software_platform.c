@@ -380,7 +380,8 @@ static int software_submit(void* context,
                 }
                 if (!((src_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED &&
                        dst_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED) ||
-                      src_queue_family == dst_queue_family))
+                      (src_queue_family != RIN_VK_QUEUE_FAMILY_IGNORED &&
+                       dst_queue_family != RIN_VK_QUEUE_FAMILY_IGNORED)))
                     return RIN_VULKAN_PRODUCT_PROTOCOL;
 #if defined(_MSC_VER)
                 _mm_mfence();
