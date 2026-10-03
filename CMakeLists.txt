@@ -38,6 +38,9 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    if(NOT WIN32)
+        find_package(Threads REQUIRED)
+    endif()
     add_executable(rinvulkan-abi-test tests/rinvulkan_abi_test.c)
     target_link_libraries(rinvulkan-abi-test PRIVATE RinVulkan::RinVulkan)
     add_test(NAME rinvulkan-abi COMMAND rinvulkan-abi-test)
@@ -52,4 +55,15 @@ if(BUILD_TESTING)
     target_compile_features(rinvulkan-atomic-compat-test PRIVATE c_std_11)
     add_test(NAME rinvulkan-atomic-compat
         COMMAND rinvulkan-atomic-compat-test)
+    add_executable(rinvulkan-resource-thread-test
+        tests/rinvulkan_resource_thread_test.c)
+    target_compile_features(rinvulkan-resource-thread-test PRIVATE c_std_11)
+    target_link_libraries(rinvulkan-resource-thread-test PRIVATE
+        RinVulkan::RinVulkan)
+    if(NOT WIN32)
+        target_link_libraries(rinvulkan-resource-thread-test PRIVATE
+            Threads::Threads)
+    endif()
+    add_test(NAME rinvulkan-resource-thread
+        COMMAND rinvulkan-resource-thread-test)
 endif()
