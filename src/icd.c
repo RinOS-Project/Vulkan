@@ -143,6 +143,7 @@ typedef struct RinVkImageSlot {
     uint32_t width;
     uint32_t height;
     uint32_t samples;
+    uint32_t current_layout;
 } RinVkImageSlot;
 
 typedef struct RinVkImageViewSlot {
@@ -1392,6 +1393,7 @@ static void clear_image_slot(RinVkImageSlot* slot) {
     slot->memory_offset = 0u;
     slot->width = 0u;
     slot->height = 0u;
+    slot->current_layout = RIN_VK_IMAGE_LAYOUT_UNDEFINED;
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
 }
 
@@ -4755,6 +4757,59 @@ static int snapshot_submission_packet_v2(
     return 1;
 }
 
+static int prepare_image_layout_updates(
+        struct RinVkDevice_T* device,
+        const RinGpuVulkanTransferPacketV2* packet,
+        RinVkImageSlot* images[RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS],
+        uint32_t layouts[RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS],
+        uint32_t* count_out) {
+    uint32_t update_count = 0u;
+    uint32_t operation_index;
+    if (!device || !packet || !images || !layouts || !count_out ||
+        packet->op_count > RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS)
+        return 0;
+    for (operation_index = 0u; operation_index < packet->op_count;
+         ++operation_index) {
+        const RinGpuVulkanTransferOpV2* operation =
+            &packet->operations[operation_index];
+        RinVkImageSlot* image;
+        uint32_t update_index;
+        uint32_t current_layout;
+        if (operation->type != RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER)
+            continue;
+        image = image_slot((RinVkDevice)device,
+                           (RinVkImage)operation->source_allocation);
+        if (!image || !image->memory)
+            return 0;
+        for (update_index = 0u; update_index < update_count; ++update_index)
+            if (images[update_index] == image) break;
+        current_layout = update_index < update_count
+                             ? layouts[update_index]
+                             : __atomic_load_n(&image->current_layout,
+                                               __ATOMIC_ACQUIRE);
+        if (current_layout != operation->source_width)
+            return 0;
+        if (update_index == update_count) {
+            if (update_count >= RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS)
+                return 0;
+            images[update_count] = image;
+            ++update_count;
+        }
+        layouts[update_index] = operation->source_height;
+    }
+    *count_out = update_count;
+    return 1;
+}
+
+static void commit_image_layout_updates(
+        RinVkImageSlot* const images[], const uint32_t layouts[],
+        uint32_t update_count) {
+    uint32_t index;
+    for (index = 0u; index < update_count; ++index)
+        __atomic_store_n(&images[index]->current_layout, layouts[index],
+                         __ATOMIC_RELEASE);
+}
+
 RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     RinVkQueue queue, uint32_t submit_count, const RinVkSubmitInfo* submits,
     uint64_t fence) {
@@ -4781,6 +4836,10 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     int product_result;
     int sync_locked = 0;
     int extended_packet = 0;
+    RinVkImageSlot*
+        pending_layout_images[RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS];
+    uint32_t pending_layouts[RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS];
+    uint32_t pending_layout_count = 0u;
 
     if (!queue_slot_value) return RIN_VK_ERROR_INITIALIZATION_FAILED;
     if (__atomic_exchange_n(&queue_slot_value->submit_lock, 1u,
@@ -4947,6 +5006,13 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         result = RIN_VK_ERROR_INITIALIZATION_FAILED;
         goto done;
     }
+    if (extended_packet &&
+        !prepare_image_layout_updates(device, &validation_packet_v2,
+                                      pending_layout_images, pending_layouts,
+                                      &pending_layout_count)) {
+        result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        goto done;
+    }
     slot = reserve_submission_slot();
     if (!slot) {
         result = RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
@@ -5007,6 +5073,8 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         result = map_product_result(product_result);
         goto done;
     }
+    commit_image_layout_updates(pending_layout_images, pending_layouts,
+                                pending_layout_count);
     slot->sequence = submission.sequence;
     slot->completion_value = submission.completion_value;
     slot->fence = (RinVkFence)fence;
@@ -5408,6 +5476,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateImage(
     image->width = request.extent.width;
     image->height = request.extent.height;
     image->samples = request.samples;
+    image->current_layout = RIN_VK_IMAGE_LAYOUT_UNDEFINED;
     __atomic_store_n(&image->state, 1u, __ATOMIC_RELEASE);
     *image_out = resource_handle(RIN_VK_IMAGE_TAG, index,
                                   image->generation);
