@@ -10,6 +10,7 @@
 #define RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_COPIES 16u
 #define RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION 1u
 #define RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_2 2u
+#define RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_3 3u
 #define RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS 16u
 #define RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS 8u
 #define RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS 4u
@@ -159,6 +160,23 @@ typedef struct RinGpuVulkanTransferPacketV2 {
         operations[RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS];
 } RinGpuVulkanTransferPacketV2;
 
+/* Submission packet V3 carries the selected Vulkan queue route alongside the
+ * same ordered operation stream. queue_id is the product-runtime ordinal;
+ * queue_family_index/queue_index preserve Vulkan's requested family/local
+ * queue identity for platform lowering. */
+typedef struct RinGpuVulkanTransferPacketV3 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint32_t op_count;
+    uint32_t reserved;
+    uint32_t queue_family_index;
+    uint32_t queue_index;
+    uint32_t product_queue_id;
+    uint32_t reserved_route;
+    RinGpuVulkanTransferOpV2
+        operations[RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS];
+} RinGpuVulkanTransferPacketV3;
+
 typedef struct RinGpuVulkanQueryCommandV1 {
     uint64_t query_pool;
     uint32_t query;
@@ -297,9 +315,13 @@ uint32_t rin_gpu_vulkan_command_owner_cleanup(
 #if defined(__cplusplus)
 static_assert(sizeof(RinGpuVulkanTransferOpV2) == 88u,
               "RinVulkan transfer operation ABI drift");
+static_assert(sizeof(RinGpuVulkanTransferPacketV3) == 1440u,
+              "RinVulkan routed transfer packet ABI drift");
 #else
 _Static_assert(sizeof(RinGpuVulkanTransferOpV2) == 88u,
                "RinVulkan transfer operation ABI drift");
+_Static_assert(sizeof(RinGpuVulkanTransferPacketV3) == 1440u,
+               "RinVulkan routed transfer packet ABI drift");
 #endif
 
 #endif

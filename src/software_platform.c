@@ -186,6 +186,8 @@ static int software_submit(void* context,
     RinGpuVulkanSoftwarePlatformV1* platform = software_context(context);
     const RinGpuVulkanTransferPacketV1* packet;
     const RinGpuVulkanTransferPacketV2* packet_v2;
+    const RinGpuVulkanTransferPacketV3* packet_v3;
+    RinGpuVulkanTransferPacketV2 routed_operations;
     RinVulkanProductReportV1* report;
     uint32_t copy_index;
     uint32_t operation_index;
@@ -244,9 +246,33 @@ static int software_submit(void* context,
             memmove(destination->bytes + destination_offset,
                     source->bytes + source_offset, (size_t)copy->size_bytes);
         }
-    } else if (packet->version == RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_2) {
-        packet_v2 = (const RinGpuVulkanTransferPacketV2*)(uintptr_t)
-            submission->command_cookie;
+    } else if (packet->version == RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_2 ||
+               packet->version == RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_3) {
+        if (packet->version == RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_3) {
+            packet_v3 = (const RinGpuVulkanTransferPacketV3*)(uintptr_t)
+                submission->command_cookie;
+            if (packet_v3->struct_size != sizeof(*packet_v3) ||
+                packet_v3->op_count >
+                    RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS ||
+                packet_v3->queue_family_index >=
+                    RIN_GPU_VULKAN_MAX_QUEUE_FAMILIES ||
+                packet_v3->queue_index >= RIN_VULKAN_PRODUCT_MAX_QUEUES ||
+                packet_v3->product_queue_id != submission->queue_id ||
+                packet_v3->reserved_route != 0u)
+                return RIN_VULKAN_PRODUCT_PROTOCOL;
+            memset(&routed_operations, 0, sizeof(routed_operations));
+            routed_operations.struct_size = sizeof(routed_operations);
+            routed_operations.version =
+                RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_2;
+            routed_operations.op_count = packet_v3->op_count;
+            memcpy(routed_operations.operations, packet_v3->operations,
+                   sizeof(routed_operations.operations[0]) *
+                       packet_v3->op_count);
+            packet_v2 = &routed_operations;
+        } else {
+            packet_v2 = (const RinGpuVulkanTransferPacketV2*)(uintptr_t)
+                submission->command_cookie;
+        }
         if (packet_v2->struct_size != sizeof(*packet_v2) ||
             packet_v2->op_count > RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS)
             return RIN_VULKAN_PRODUCT_PROTOCOL;

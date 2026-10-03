@@ -87,6 +87,7 @@ struct RinVkQueue_T {
     struct RinVkDevice_T* device;
     uint32_t queue_family_index;
     uint32_t queue_index;
+    uint32_t family_queue_index;
     volatile uint32_t submit_lock;
     uint32_t reserved;
 };
@@ -247,9 +248,8 @@ typedef struct RinVkSubmissionSlot {
     uint64_t signal_semaphore_values[RIN_VK_MAX_SUBMIT_SEMAPHORES];
     RinGpuVulkanCommandBufferV1*
         command_buffers[RIN_VK_MAX_SUBMIT_COMMAND_BUFFERS];
-    RinGpuVulkanTransferPacketV1 packet;
     RinGpuVulkanTransferPacketV2 extended_packet;
-    uint32_t packet_version;
+    RinGpuVulkanTransferPacketV3 routed_packet;
 } RinVkSubmissionSlot;
 
 static uintptr_t g_runtime_binding;
@@ -1238,7 +1238,7 @@ static int product_matches_device(RinVulkanProductPlatformV1* product,
            status.flags == RIN_VULKAN_PRODUCT_STATUS_READY &&
            status.iommu_domain_cookie == device->plan.iommu_domain_cookie &&
            status.device_epoch == device->plan.device_epoch &&
-           status.queue_count != 0u;
+           status.queue_count >= device->queue_count;
 }
 
 static uint32_t memory_type_bits(const struct RinVkDevice_T* device) {
@@ -2724,7 +2724,9 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
     RinVkPhysicalDeviceFeatures features;
     RinVkFeatureChain feature_chain;
     uint64_t chain_features = 0u;
-    const RinVkDeviceQueueCreateInfo* queue;
+    uint32_t requested_queues[RIN_GPU_VULKAN_MAX_QUEUE_FAMILIES] = {0u};
+    uint32_t total_requested_queues = 0u;
+    uint32_t primary_requested = 0u;
     uint32_t expected;
     uint32_t index;
     int result;
@@ -2757,21 +2759,34 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
         return RIN_VK_ERROR_LAYER_NOT_PRESENT;
     if (!device_extensions_valid(create_info))
         return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
-    if (create_info->queueCreateInfoCount != 1u ||
+    if (create_info->queueCreateInfoCount == 0u ||
+        create_info->queueCreateInfoCount >
+            RIN_GPU_VULKAN_MAX_QUEUE_FAMILIES ||
         !create_info->pQueueCreateInfos)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    queue = &create_info->pQueueCreateInfos[0];
-    if (queue->sType != RIN_VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO ||
-        queue->pNext || queue->flags != 0u || queue->queueCount == 0u ||
-        queue->queueCount > RIN_VULKAN_PRODUCT_MAX_QUEUES ||
-        !queue->pQueuePriorities)
-        return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    for (index = 0u; index < queue->queueCount; ++index) {
-        if (queue->pQueuePriorities[index] !=
-                queue->pQueuePriorities[index] ||
-            queue->pQueuePriorities[index] < 0.0f ||
-            queue->pQueuePriorities[index] > 1.0f)
+    for (index = 0u; index < create_info->queueCreateInfoCount; ++index) {
+        const RinVkDeviceQueueCreateInfo* queue =
+            &create_info->pQueueCreateInfos[index];
+        uint32_t priority_index;
+        if (queue->sType != RIN_VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO ||
+            queue->pNext || queue->flags != 0u || queue->queueCount == 0u ||
+            queue->queueFamilyIndex >= RIN_GPU_VULKAN_MAX_QUEUE_FAMILIES ||
+            queue->queueCount > RIN_VULKAN_PRODUCT_MAX_QUEUES ||
+            total_requested_queues >
+                RIN_VULKAN_PRODUCT_MAX_QUEUES - queue->queueCount ||
+            !queue->pQueuePriorities ||
+            requested_queues[queue->queueFamilyIndex] != 0u)
             return RIN_VK_ERROR_INITIALIZATION_FAILED;
+        requested_queues[queue->queueFamilyIndex] = queue->queueCount;
+        total_requested_queues += queue->queueCount;
+        for (priority_index = 0u; priority_index < queue->queueCount;
+             ++priority_index) {
+            if (queue->pQueuePriorities[priority_index] !=
+                    queue->pQueuePriorities[priority_index] ||
+                queue->pQueuePriorities[priority_index] < 0.0f ||
+                queue->pQueuePriorities[priority_index] > 1.0f)
+                return RIN_VK_ERROR_INITIALIZATION_FAILED;
+        }
     }
     memset(&features, 0, sizeof(features));
     if (create_info->pEnabledFeatures) {
@@ -2791,25 +2806,10 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
         release_runtime();
         return map_result(result);
     }
-    if (queue->queueFamilyIndex >= profile.queue_family_count ||
-        (profile.queue_families[queue->queueFamilyIndex].flags &
-         (RIN_GPU_VK_QUEUE_GRAPHICS | RIN_GPU_VK_QUEUE_COMPUTE |
-          RIN_GPU_VK_QUEUE_TRANSFER)) !=
-         (RIN_GPU_VK_QUEUE_GRAPHICS | RIN_GPU_VK_QUEUE_COMPUTE |
-          RIN_GPU_VK_QUEUE_TRANSFER)) {
-        release_runtime();
-        return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    }
-    if (queue->queueCount > profile.queue_families[queue->queueFamilyIndex].queue_count) {
-        release_runtime();
-        return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    }
-    for (index = 0u; index < queue->queueFamilyIndex; ++index) {
-        if ((profile.queue_families[index].flags &
-             (RIN_GPU_VK_QUEUE_GRAPHICS | RIN_GPU_VK_QUEUE_COMPUTE |
-              RIN_GPU_VK_QUEUE_TRANSFER)) ==
-            (RIN_GPU_VK_QUEUE_GRAPHICS | RIN_GPU_VK_QUEUE_COMPUTE |
-             RIN_GPU_VK_QUEUE_TRANSFER)) {
+    for (index = 0u; index < RIN_GPU_VULKAN_MAX_QUEUE_FAMILIES; ++index) {
+        if (requested_queues[index] == 0u) continue;
+        if (index >= profile.queue_family_count ||
+            requested_queues[index] > profile.queue_families[index].queue_count) {
             release_runtime();
             return RIN_VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -2866,7 +2866,18 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
                    ? RIN_VK_ERROR_FEATURE_NOT_PRESENT
                    : map_result(result);
     }
-    if (slot->plan.primary_queue_family != queue->queueFamilyIndex) {
+    primary_requested =
+        slot->plan.primary_queue_family < RIN_GPU_VULKAN_MAX_QUEUE_FAMILIES &&
+        requested_queues[slot->plan.primary_queue_family] != 0u;
+    for (index = 0u; index < RIN_GPU_VULKAN_MAX_QUEUE_FAMILIES; ++index) {
+        if (requested_queues[index] != 0u &&
+            index != slot->plan.primary_queue_family &&
+            index != slot->plan.transfer_queue_family) {
+            primary_requested = 0u;
+            break;
+        }
+    }
+    if (!primary_requested) {
         result = call_destroy_device(runtime, slot->owner_instance,
                                      slot->runtime_handle);
         release_runtime();
@@ -2912,14 +2923,30 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
     }
     __atomic_store_n(&slot->descriptor_validation_error, 0u,
                      __ATOMIC_RELEASE);
-    slot->queue_count = queue->queueCount;
+    slot->queue_count = total_requested_queues;
     slot->reserved_queue = 0u;
     memset(slot->queues, 0, sizeof(slot->queues));
-    for (index = 0u; index < slot->queue_count; ++index) {
-        slot->queues[index].loader_magic = RIN_VK_ICD_LOADER_MAGIC;
-        slot->queues[index].device = slot;
-        slot->queues[index].queue_family_index = queue->queueFamilyIndex;
-        slot->queues[index].queue_index = index;
+    {
+        uint32_t create_index;
+        uint32_t flat_queue_index = 0u;
+        for (create_index = 0u;
+             create_index < create_info->queueCreateInfoCount;
+             ++create_index) {
+            const RinVkDeviceQueueCreateInfo* queue =
+                &create_info->pQueueCreateInfos[create_index];
+            uint32_t family_queue_index;
+            for (family_queue_index = 0u;
+                 family_queue_index < queue->queueCount;
+                 ++family_queue_index, ++flat_queue_index) {
+                struct RinVkQueue_T* queue_slot =
+                    &slot->queues[flat_queue_index];
+                queue_slot->loader_magic = RIN_VK_ICD_LOADER_MAGIC;
+                queue_slot->device = slot;
+                queue_slot->queue_family_index = queue->queueFamilyIndex;
+                queue_slot->queue_index = flat_queue_index;
+                queue_slot->family_queue_index = family_queue_index;
+            }
+        }
     }
     __atomic_store_n(&slot->state, 1u, __ATOMIC_RELEASE);
     *device_out = slot;
@@ -2990,13 +3017,29 @@ void RIN_VKAPI_CALL vkGetDeviceQueue(RinVkDevice device,
                                      uint32_t queue_index,
                                      RinVkQueue* queue_out) {
     struct RinVkDevice_T* slot;
+    uint32_t index;
     if (!queue_out) return;
     *queue_out = NULL;
     slot = device_slot(device);
-    if (!slot || queue_family_index != slot->plan.primary_queue_family ||
-        queue_index >= slot->queue_count)
-        return;
-    *queue_out = &slot->queues[queue_index];
+    if (!slot) return;
+    for (index = 0u; index < slot->queue_count; ++index) {
+        struct RinVkQueue_T* candidate = &slot->queues[index];
+        if (candidate->queue_family_index == queue_family_index &&
+            candidate->family_queue_index == queue_index) {
+            *queue_out = candidate;
+            return;
+        }
+    }
+}
+
+static int device_has_queue_family(const struct RinVkDevice_T* device,
+                                   uint32_t queue_family_index) {
+    uint32_t index;
+    if (!device) return 0;
+    for (index = 0u; index < device->queue_count; ++index)
+        if (device->queues[index].queue_family_index == queue_family_index)
+            return 1;
+    return 0;
 }
 
 RinVkResult RIN_VKAPI_CALL vkDeviceWaitIdle(RinVkDevice device) {
@@ -3353,7 +3396,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateCommandPool(
     if ((snapshot.flags &
          ~(RIN_VK_COMMAND_POOL_CREATE_TRANSIENT_BIT |
            RIN_VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT)) != 0u ||
-        snapshot.queueFamilyIndex != slot->plan.primary_queue_family)
+        !device_has_queue_family(slot, snapshot.queueFamilyIndex))
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
     result = rin_gpu_vulkan_command_pool_create(
         &g_command_runtime, (uintptr_t)slot,
@@ -4673,60 +4716,6 @@ done:
     else rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime, core);
 }
 
-static int snapshot_submission_packet(
-    const struct RinVkDevice_T* device, uint32_t queue_family_index,
-    RinGpuVulkanCommandBufferV1* const* command_buffers,
-    uint32_t command_buffer_count, RinGpuVulkanTransferPacketV1* packet,
-    RinVulkanProductResourceV1* resources, uint32_t* resource_count_out) {
-    uint32_t buffer_index;
-    uint32_t resource_count = 0u;
-
-    if (!device || !command_buffers || command_buffer_count == 0u ||
-        command_buffer_count > RIN_VK_MAX_SUBMIT_COMMAND_BUFFERS || !packet ||
-        !resources || !resource_count_out) {
-        return 0;
-    }
-    memset(packet, 0, sizeof(*packet));
-    memset(resources, 0, sizeof(RinVulkanProductResourceV1) *
-                             RIN_VULKAN_PRODUCT_MAX_RESOURCES_PER_SUBMISSION);
-    packet->struct_size = sizeof(*packet);
-    packet->version = RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION;
-    for (buffer_index = 0u; buffer_index < command_buffer_count;
-         ++buffer_index) {
-        const RinGpuVulkanCommandBufferV1* buffer = command_buffers[buffer_index];
-        uint32_t copy_index;
-
-        if (!buffer || buffer->owner != (uintptr_t)device || !buffer->pool ||
-            buffer->pool->queue_family_index != queue_family_index ||
-            buffer->copy_count >
-                           RIN_GPU_VULKAN_COMMAND_MAX_COPIES ||
-            buffer->copy_count > RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_COPIES -
-                                     packet->copy_count) {
-            return 0;
-        }
-        for (copy_index = 0u; copy_index < buffer->copy_count; ++copy_index) {
-            const RinGpuVulkanBufferCopyCommandV1* copy =
-                &buffer->copies[copy_index];
-
-            if (copy->source_allocation == 0u ||
-                copy->destination_allocation == 0u ||
-                copy->source_gpu_address == 0u ||
-                copy->destination_gpu_address == 0u || copy->size_bytes == 0u ||
-                !append_submission_resource(resources, &resource_count,
-                                            copy->source_allocation,
-                                            RIN_VULKAN_PRODUCT_MEMORY_GPU_READ) ||
-                !append_submission_resource(resources, &resource_count,
-                                            copy->destination_allocation,
-                                            RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE)) {
-                return 0;
-            }
-            packet->copies[packet->copy_count++] = *copy;
-        }
-    }
-    *resource_count_out = resource_count;
-    return 1;
-}
-
 static int snapshot_submission_packet_v2(
     const struct RinVkDevice_T* device, uint32_t queue_family_index,
     RinGpuVulkanCommandBufferV1* const* command_buffers,
@@ -4811,7 +4800,6 @@ static int snapshot_submission_packet_v2(
             *operation = *source;
         }
     }
-    if (packet->op_count == 0u) return 0;
     *resource_count_out = resource_count;
     return 1;
 }
@@ -4879,7 +4867,6 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         command_buffers[RIN_VK_MAX_SUBMIT_COMMAND_BUFFERS];
     RinVulkanProductResourceV1
         resources[RIN_VULKAN_PRODUCT_MAX_RESOURCES_PER_SUBMISSION];
-    RinGpuVulkanTransferPacketV1 validation_packet;
     RinGpuVulkanTransferPacketV2 validation_packet_v2;
     RinVulkanProductSubmissionV1 submission;
     RinVulkanProductPlatformV1* product = NULL;
@@ -4894,7 +4881,6 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     uint32_t index;
     int product_result;
     int sync_locked = 0;
-    int extended_packet = 0;
     RinVkImageSlot*
         pending_layout_images[RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS];
     uint32_t pending_layouts[RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS];
@@ -5041,32 +5027,22 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
             goto done;
         }
     }
-    for (index = 0u; index < request.commandBufferCount; ++index) {
+    for (index = 0u; index < request.commandBufferCount; ++index)
         command_buffers[index] =
             (RinGpuVulkanCommandBufferV1*)(void*)request.pCommandBuffers[index];
-        if (command_buffers[index] &&
-            command_buffers[index]->transfer_op_count != 0u)
-            extended_packet = 1;
-    }
-        if (rin_gpu_vulkan_command_buffers_validate_submit(
+    if (rin_gpu_vulkan_command_buffers_validate_submit(
             &g_command_runtime, request.commandBufferCount,
             command_buffers) != RIN_GPU_VULKAN_COMMAND_OK ||
         !validate_submission_query_events(device, request.commandBufferCount,
                                            command_buffers) ||
-        (extended_packet
-             ? !snapshot_submission_packet_v2(
-                   device, queue_slot_value->queue_family_index, command_buffers,
-                   request.commandBufferCount, &validation_packet_v2, resources,
-                   &resource_count)
-             : !snapshot_submission_packet(
-                   device, queue_slot_value->queue_family_index, command_buffers,
-                   request.commandBufferCount, &validation_packet, resources,
-                   &resource_count))) {
+        !snapshot_submission_packet_v2(
+            device, queue_slot_value->queue_family_index, command_buffers,
+            request.commandBufferCount, &validation_packet_v2, resources,
+            &resource_count)) {
         result = RIN_VK_ERROR_INITIALIZATION_FAILED;
         goto done;
     }
-    if (extended_packet &&
-        !prepare_image_layout_updates(device, &validation_packet_v2,
+    if (!prepare_image_layout_updates(device, &validation_packet_v2,
                                       pending_layout_images, pending_layouts,
                                       &pending_layout_count)) {
         result = RIN_VK_ERROR_INITIALIZATION_FAILED;
@@ -5082,15 +5058,10 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     slot->command_buffer_count = request.commandBufferCount;
     memcpy(slot->command_buffers, command_buffers,
            sizeof(*command_buffers) * request.commandBufferCount);
-        if ((extended_packet
-             ? !snapshot_submission_packet_v2(
-                   device, queue_slot_value->queue_family_index, command_buffers,
-                   request.commandBufferCount, &slot->extended_packet, resources,
-                   &resource_count)
-             : !snapshot_submission_packet(
-                   device, queue_slot_value->queue_family_index, command_buffers,
-                   request.commandBufferCount, &slot->packet, resources,
-                   &resource_count)) ||
+        if (!snapshot_submission_packet_v2(
+                device, queue_slot_value->queue_family_index, command_buffers,
+                request.commandBufferCount, &slot->extended_packet, resources,
+                &resource_count) ||
         rin_gpu_vulkan_command_buffers_mark_submitted(
             &g_command_runtime, request.commandBufferCount,
             command_buffers) != RIN_GPU_VULKAN_COMMAND_OK) {
@@ -5098,6 +5069,17 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         result = RIN_VK_ERROR_INITIALIZATION_FAILED;
         goto done;
     }
+    memset(&slot->routed_packet, 0, sizeof(slot->routed_packet));
+    slot->routed_packet.struct_size = sizeof(slot->routed_packet);
+    slot->routed_packet.version = RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_3;
+    slot->routed_packet.op_count = slot->extended_packet.op_count;
+    slot->routed_packet.queue_family_index =
+        queue_slot_value->queue_family_index;
+    slot->routed_packet.queue_index = queue_slot_value->family_queue_index;
+    slot->routed_packet.product_queue_id = queue_slot_value->queue_index;
+    memcpy(slot->routed_packet.operations, slot->extended_packet.operations,
+           sizeof(slot->routed_packet.operations[0]) *
+               slot->extended_packet.op_count);
     product = acquire_product();
     if (!product || !product_matches_device(product, device)) {
         if (product) release_product();
@@ -5109,14 +5091,9 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         goto done;
     }
     memset(&submission, 0, sizeof(submission));
-    slot->packet_version = extended_packet
-                               ? RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_2
-                               : RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION;
     product_result = product->prepare_submission(
         product->context, slot->queue_id,
-        (uint64_t)(uintptr_t)(extended_packet
-                                  ? (const void*)&slot->extended_packet
-                                  : (const void*)&slot->packet),
+        (uint64_t)(uintptr_t)&slot->routed_packet,
         &submission);
     if (product_result == RIN_VULKAN_PRODUCT_OK) {
         product_result = product->submit(
