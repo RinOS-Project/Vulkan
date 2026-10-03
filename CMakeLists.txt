@@ -7,10 +7,12 @@ if(NOT EXISTS "${RINGPU_DIR}/CMakeLists.txt")
     message(FATAL_ERROR "RinGPU is required; set RINGPU_DIR to its checkout")
 endif()
 
-set(RINGPU_BUILD_TESTS OFF CACHE BOOL "Disable RinGPU tests in RinVulkan" FORCE)
-set(RINGPU_BUILD_DIFFERENTIAL_TESTS OFF CACHE BOOL
-    "Disable RinGPU differential tests in RinVulkan" FORCE)
-add_subdirectory("${RINGPU_DIR}" "ringpu-build" EXCLUDE_FROM_ALL)
+if(NOT TARGET RinGPU::RinGPU)
+    set(RINGPU_BUILD_TESTS OFF CACHE BOOL "Disable RinGPU tests in RinVulkan" FORCE)
+    set(RINGPU_BUILD_DIFFERENTIAL_TESTS OFF CACHE BOOL
+        "Disable RinGPU differential tests in RinVulkan" FORCE)
+    add_subdirectory("${RINGPU_DIR}" "ringpu-build" EXCLUDE_FROM_ALL)
+endif()
 
 set(RINVULKAN_SOURCES
     src/command_runtime.c
