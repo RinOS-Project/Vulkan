@@ -6070,6 +6070,16 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     uint32_t pending_buffer_ownership_count = 0u;
 
     if (!queue_slot_value) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    if (submit_count > 1u) {
+        if (!submits) return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        for (index = 0u; index < submit_count; ++index) {
+            result = vkQueueSubmit(
+                queue, 1u, &submits[index],
+                index + 1u == submit_count ? fence : 0u);
+            if (result != RIN_VK_SUCCESS) return result;
+        }
+        return RIN_VK_SUCCESS;
+    }
     if (__atomic_exchange_n(&queue_slot_value->submit_lock, 1u,
                             __ATOMIC_ACQUIRE) != 0u) {
         return RIN_VK_NOT_READY;
@@ -6082,8 +6092,7 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         result = RIN_VK_ERROR_INITIALIZATION_FAILED;
         goto done;
     }
-    if (submit_count > 1u ||
-        (submit_count != 0u && !submits)) {
+    if (submit_count != 0u && !submits) {
         result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
         goto done;
     }
@@ -6408,7 +6417,17 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit2(
     device = queue_value->device;
     if (!device || !device->synchronization2_enabled)
         return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
-    if (submit_count > 1u || (submit_count != 0u && !submits))
+    if (submit_count > 1u) {
+        if (!submits) return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        for (index = 0u; index < submit_count; ++index) {
+            const RinVkResult batch_result = vkQueueSubmit2(
+                queue, 1u, &submits[index],
+                index + 1u == submit_count ? fence : 0u);
+            if (batch_result != RIN_VK_SUCCESS) return batch_result;
+        }
+        return RIN_VK_SUCCESS;
+    }
+    if (submit_count != 0u && !submits)
         return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
     if (submit_count == 0u)
         return fence == 0u ? RIN_VK_SUCCESS : RIN_VK_ERROR_INITIALIZATION_FAILED;
