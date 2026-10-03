@@ -24,6 +24,12 @@ int rin_vk_sync2_stage_mask(uint64_t public_mask, uint64_t* runtime_mask_out) {
     return 1;
 }
 
+int rin_vk_sync2_recorded_stage_mask_valid(uint64_t public_mask) {
+    uint64_t runtime_mask;
+    return public_mask != 0u &&
+           rin_vk_sync2_stage_mask(public_mask, &runtime_mask);
+}
+
 int rin_vk_sync2_access_mask(uint64_t public_mask, uint64_t stage_mask,
                              uint64_t* runtime_mask_out) {
     const uint64_t memory_read = RIN_VK_ACCESS_2_MEMORY_READ_BIT;

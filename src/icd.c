@@ -4582,10 +4582,7 @@ static void record_query_failure(RinGpuVulkanCommandBufferV1* core) {
 }
 
 static int event_stage_mask_valid(uint64_t stage) {
-    const uint64_t known = RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT |
-                           RIN_VK_PIPELINE_STAGE_2_HOST_BIT |
-                           RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-    return stage != 0u && (stage & ~known) == 0u;
+    return rin_vk_sync2_recorded_stage_mask_valid(stage);
 }
 
 void RIN_VKAPI_CALL vkCmdResetQueryPool(

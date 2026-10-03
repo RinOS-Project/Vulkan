@@ -19,6 +19,9 @@ static void test_transfer_stage_aliases(void) {
     assert(rin_vk_sync2_stage_mask(
         RIN_VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, &runtime_mask));
     assert(runtime_mask == RIN_GPU_VULKAN_BARRIER_STAGE_TRANSFER);
+    assert(rin_vk_sync2_recorded_stage_mask_valid(
+        RIN_VK_PIPELINE_STAGE_2_COPY_BIT));
+    assert(!rin_vk_sync2_recorded_stage_mask_valid(0u));
     assert(!rin_vk_sync2_stage_mask(UINT64_C(0x8), &runtime_mask));
 }
 
