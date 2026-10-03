@@ -3576,6 +3576,42 @@ static int image_layout_transfer_valid(uint32_t layout) {
            layout == RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 }
 
+static int image_layout_transfer_source_valid(uint32_t layout) {
+    return layout == RIN_VK_IMAGE_LAYOUT_GENERAL ||
+           layout == RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+}
+
+static int image_layout_transfer_destination_valid(uint32_t layout) {
+    return layout == RIN_VK_IMAGE_LAYOUT_GENERAL ||
+           layout == RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+}
+
+static int command_image_layout_matches(
+        const RinGpuVulkanCommandBufferV1* command_buffer,
+        RinVkImage image_handle, const RinVkImageSlot* image,
+        uint32_t requested_layout, int source_access) {
+    uint32_t current_layout;
+    uint32_t operation_index;
+    if (!command_buffer || !image || image_handle == 0u ||
+        (source_access
+             ? !image_layout_transfer_source_valid(requested_layout)
+             : !image_layout_transfer_destination_valid(requested_layout)) ||
+        command_buffer->transfer_op_count >
+            RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS)
+        return 0;
+    current_layout = __atomic_load_n(&image->current_layout, __ATOMIC_ACQUIRE);
+    for (operation_index = 0u;
+         operation_index < command_buffer->transfer_op_count;
+         ++operation_index) {
+        const RinGpuVulkanTransferOpV2* operation =
+            &command_buffer->transfer_ops[operation_index];
+        if (operation->type == RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER &&
+            operation->source_allocation == image_handle)
+            current_layout = operation->source_height;
+    }
+    return current_layout == requested_layout;
+}
+
 static int image_subresource_valid(const RinVkImageSlot* image,
                                    const RinVkImageSubresourceLayers* subresource,
                                    uint32_t width, uint32_t height) {
@@ -4263,14 +4299,19 @@ void RIN_VKAPI_CALL vkCmdCopyImage(
     if (region_count == 0u ||
         region_count > RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS || !regions ||
         !command_owner_device(core, &owner) ||
-        !image_layout_transfer_valid(src_image_layout) ||
-        !image_layout_transfer_valid(dst_image_layout)) {
+        !image_layout_transfer_source_valid(src_image_layout) ||
+        !image_layout_transfer_destination_valid(dst_image_layout)) {
         valid = 0;
         goto done;
     }
     source = image_slot(owner, src_image);
     destination = image_slot(owner, dst_image);
-    if (!source || !destination || source->format != destination->format ||
+    if (!source || !destination ||
+        !command_image_layout_matches(core, src_image, source,
+                                      src_image_layout, 1) ||
+        !command_image_layout_matches(core, dst_image, destination,
+                                      dst_image_layout, 0) ||
+        source->format != destination->format ||
         (source->usage & RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0u ||
         (destination->usage & RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u)
         valid = 0;
@@ -4321,13 +4362,15 @@ void RIN_VKAPI_CALL vkCmdCopyBufferToImage(
     if (region_count == 0u ||
         region_count > RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS || !regions ||
         !command_owner_device(core, &owner) ||
-        !image_layout_transfer_valid(dst_image_layout)) {
+        !image_layout_transfer_destination_valid(dst_image_layout)) {
         valid = 0;
         goto done;
     }
     source = buffer_slot(owner, src_buffer);
     destination = image_slot(owner, dst_image);
     if (!source || !destination ||
+        !command_image_layout_matches(core, dst_image, destination,
+                                      dst_image_layout, 0) ||
         (source->usage & RIN_VK_BUFFER_USAGE_TRANSFER_SRC_BIT) == 0u ||
         (destination->usage & RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u)
         valid = 0;
@@ -4377,13 +4420,15 @@ void RIN_VKAPI_CALL vkCmdCopyImageToBuffer(
     if (region_count == 0u ||
         region_count > RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS || !regions ||
         !command_owner_device(core, &owner) ||
-        !image_layout_transfer_valid(src_image_layout)) {
+        !image_layout_transfer_source_valid(src_image_layout)) {
         valid = 0;
         goto done;
     }
     source = image_slot(owner, src_image);
     destination = buffer_slot(owner, dst_buffer);
     if (!source || !destination ||
+        !command_image_layout_matches(core, src_image, source,
+                                      src_image_layout, 1) ||
         (source->usage & RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0u ||
         (destination->usage & RIN_VK_BUFFER_USAGE_TRANSFER_DST_BIT) == 0u)
         valid = 0;
@@ -4437,6 +4482,8 @@ void RIN_VKAPI_CALL vkCmdClearColorImage(
     }
     image = image_slot(owner, image_handle);
     if (!image || image->format != RIN_VK_FORMAT_R8G8B8A8_UNORM ||
+        !command_image_layout_matches(core, image_handle, image, image_layout,
+                                      0) ||
         (image->usage & RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u ||
         !image_subresource_range_valid(image, &ranges[0]) ||
         color->uint32[1] != 0u || color->uint32[2] != 0u ||
@@ -4479,6 +4526,8 @@ void RIN_VKAPI_CALL vkCmdClearDepthStencilImage(
     }
     image = image_slot(owner, image_handle);
     if (!image || image->format != RIN_VK_FORMAT_D32_SFLOAT ||
+        !command_image_layout_matches(core, image_handle, image, image_layout,
+                                      0) ||
         (image->usage & RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u ||
         !image_subresource_range_valid(image, &ranges[0]) ||
         !checked_image_address(image, 0u, image->memory_size,
@@ -4514,14 +4563,19 @@ void RIN_VKAPI_CALL vkCmdBlitImage(
     memset(&operation, 0, sizeof(operation));
     if (!command_owner_device(core, &owner) || region_count != 1u || !regions ||
         filter > RIN_VK_FILTER_LINEAR ||
-        !image_layout_transfer_valid(src_image_layout) ||
-        !image_layout_transfer_valid(dst_image_layout)) {
+        !image_layout_transfer_source_valid(src_image_layout) ||
+        !image_layout_transfer_destination_valid(dst_image_layout)) {
         valid = 0;
         goto done;
     }
     source = image_slot(owner, src_image);
     destination = image_slot(owner, dst_image);
-    if (!source || !destination || source == destination ||
+    if (!source || !destination ||
+        !command_image_layout_matches(core, src_image, source,
+                                      src_image_layout, 1) ||
+        !command_image_layout_matches(core, dst_image, destination,
+                                      dst_image_layout, 0) ||
+        source == destination ||
         source->memory == destination->memory ||
         (source->usage & RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0u ||
         (destination->usage & RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u ||
@@ -4569,14 +4623,19 @@ void RIN_VKAPI_CALL vkCmdResolveImage(
 
     memset(&operation, 0, sizeof(operation));
     if (!command_owner_device(core, &owner) || region_count != 1u || !regions ||
-        !image_layout_transfer_valid(src_image_layout) ||
-        !image_layout_transfer_valid(dst_image_layout)) {
+        !image_layout_transfer_source_valid(src_image_layout) ||
+        !image_layout_transfer_destination_valid(dst_image_layout)) {
         valid = 0;
         goto done;
     }
     source = image_slot(owner, src_image);
     destination = image_slot(owner, dst_image);
-    if (!source || !destination || source == destination ||
+    if (!source || !destination ||
+        !command_image_layout_matches(core, src_image, source,
+                                      src_image_layout, 1) ||
+        !command_image_layout_matches(core, dst_image, destination,
+                                      dst_image_layout, 0) ||
+        source == destination ||
         source->memory == destination->memory ||
         (source->samples != RIN_VK_SAMPLE_COUNT_2_BIT &&
          source->samples != RIN_VK_SAMPLE_COUNT_4_BIT) ||
