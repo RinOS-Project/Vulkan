@@ -2999,26 +2999,33 @@ void RIN_VKAPI_CALL vkGetDeviceQueue(RinVkDevice device,
 
 RinVkResult RIN_VKAPI_CALL vkDeviceWaitIdle(RinVkDevice device) {
     struct RinVkDevice_T* slot = device_slot(device);
-    RinVkResult result;
 
     if (!slot) return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    result = maintain_device_submissions(slot);
-    if (result != RIN_VK_SUCCESS) return result;
-    return device_submission_slots_active(slot) ? RIN_VK_NOT_READY
-                                                 : RIN_VK_SUCCESS;
+    for (;;) {
+        RinVkResult result = maintain_device_submissions(slot);
+        if (result != RIN_VK_SUCCESS && result != RIN_VK_NOT_READY)
+            return result;
+        if (result == RIN_VK_SUCCESS &&
+            !device_submission_slots_active(slot))
+            return RIN_VK_SUCCESS;
+        (void)sched_yield();
+    }
 }
 
 RinVkResult RIN_VKAPI_CALL vkQueueWaitIdle(RinVkQueue queue) {
     struct RinVkQueue_T* queue_value = queue_slot(queue);
-    RinVkResult result;
 
     if (!queue_value) return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    result = maintain_device_submissions(queue_value->device);
-    if (result != RIN_VK_SUCCESS) return result;
-    return queue_submission_slots_active(queue_value->device,
-                                         queue_value->queue_index)
-               ? RIN_VK_NOT_READY
-               : RIN_VK_SUCCESS;
+    for (;;) {
+        RinVkResult result = maintain_device_submissions(queue_value->device);
+        if (result != RIN_VK_SUCCESS && result != RIN_VK_NOT_READY)
+            return result;
+        if (result == RIN_VK_SUCCESS &&
+            !queue_submission_slots_active(queue_value->device,
+                                          queue_value->queue_index))
+            return RIN_VK_SUCCESS;
+        (void)sched_yield();
+    }
 }
 
 RinVkResult RIN_VKAPI_CALL vkCreateFence(
