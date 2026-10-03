@@ -921,6 +921,11 @@ typedef union RinVkClearColorValue {
     uint32_t uint32[4];
 } RinVkClearColorValue;
 
+typedef struct RinVkClearDepthStencilValue {
+    float depth;
+    uint32_t stencil;
+} RinVkClearDepthStencilValue;
+
 typedef struct RinVkImageSubresourceRange {
     uint32_t aspectMask;
     uint32_t baseMipLevel;
@@ -1040,6 +1045,7 @@ typedef struct RinVkSamplerCreateInfo {
     (RIN_VK_BUFFER_USAGE_TRANSFER_SRC_BIT | RIN_VK_BUFFER_USAGE_TRANSFER_DST_BIT)
 #define RIN_VK_IMAGE_TYPE_2D 1u
 #define RIN_VK_FORMAT_R8G8B8A8_UNORM 37
+#define RIN_VK_FORMAT_D32_SFLOAT 126
 #define RIN_VK_IMAGE_TILING_OPTIMAL 0u
 #define RIN_VK_SAMPLE_COUNT_1_BIT 1u
 #define RIN_VK_SAMPLE_COUNT_2_BIT 2u
@@ -1049,6 +1055,7 @@ typedef struct RinVkSamplerCreateInfo {
 #define RIN_VK_IMAGE_USAGE_KNOWN \
     (RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT | RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT)
 #define RIN_VK_IMAGE_ASPECT_COLOR_BIT UINT32_C(0x00000001)
+#define RIN_VK_IMAGE_ASPECT_DEPTH_BIT UINT32_C(0x00000002)
 #define RIN_VK_IMAGE_VIEW_TYPE_2D 1u
 #define RIN_VK_IMAGE_VIEW_TYPE_2D_ARRAY 5u
 #define RIN_VK_IMAGE_LAYOUT_GENERAL UINT32_C(1)
@@ -1275,6 +1282,8 @@ static_assert(sizeof(RinVkImageResolve) == 68u,
               "Vulkan image-resolve ABI drift");
 static_assert(sizeof(RinVkClearColorValue) == 16u,
               "Vulkan clear-color ABI drift");
+static_assert(sizeof(RinVkClearDepthStencilValue) == 8u,
+              "Vulkan clear-depth ABI drift");
 static_assert(sizeof(RinVkImageSubresourceRange) == 20u,
               "Vulkan image-subresource-range ABI drift");
 static_assert(sizeof(RinVkCommandPool) == 8u,
@@ -1410,6 +1419,8 @@ _Static_assert(sizeof(RinVkImageResolve) == 68u,
                "Vulkan image-resolve ABI drift");
 _Static_assert(sizeof(RinVkClearColorValue) == 16u,
                "Vulkan clear-color ABI drift");
+_Static_assert(sizeof(RinVkClearDepthStencilValue) == 8u,
+               "Vulkan clear-depth ABI drift");
 _Static_assert(sizeof(RinVkImageSubresourceRange) == 20u,
                "Vulkan image-subresource-range ABI drift");
 _Static_assert(sizeof(RinVkCommandPool) == 8u,
@@ -1586,6 +1597,11 @@ vkCmdClearColorImage(RinVkCommandBuffer command_buffer, RinVkImage image,
                      const RinVkClearColorValue* color,
                      uint32_t range_count,
                      const RinVkImageSubresourceRange* ranges);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdClearDepthStencilImage(
+    RinVkCommandBuffer command_buffer, RinVkImage image,
+    uint32_t image_layout, const RinVkClearDepthStencilValue* value,
+    uint32_t range_count, const RinVkImageSubresourceRange* ranges);
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkCmdPipelineBarrier2(RinVkCommandBuffer command_buffer,
                       const RinVkDependencyInfo* dependency_info);

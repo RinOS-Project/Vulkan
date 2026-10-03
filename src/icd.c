@@ -1244,12 +1244,29 @@ static uint32_t memory_type_bits(const struct RinVkDevice_T* device) {
     return (UINT32_C(1) << count) - 1u;
 }
 
+static uint32_t image_format_bytes(int32_t format) {
+    return format == RIN_VK_FORMAT_R8G8B8A8_UNORM ||
+                   format == RIN_VK_FORMAT_D32_SFLOAT
+               ? 4u
+               : 0u;
+}
+
+static uint32_t image_format_aspects(int32_t format) {
+    if (format == RIN_VK_FORMAT_R8G8B8A8_UNORM)
+        return RIN_VK_IMAGE_ASPECT_COLOR_BIT;
+    if (format == RIN_VK_FORMAT_D32_SFLOAT)
+        return RIN_VK_IMAGE_ASPECT_DEPTH_BIT;
+    return 0u;
+}
+
 static int image_memory_size(const struct RinVkDevice_T* device,
                              const RinVkImageCreateInfo* request,
                              uint64_t* size_out) {
     uint64_t pixels;
+    uint32_t bytes_per_pixel;
 
     if (!device || !request || !size_out ||
+        (bytes_per_pixel = image_format_bytes(request->format)) == 0u ||
         request->extent.width == 0u || request->extent.height == 0u ||
         request->extent.depth != 1u || request->arrayLayers != 1u ||
         request->mipLevels != 1u ||
@@ -1261,10 +1278,10 @@ static int image_memory_size(const struct RinVkDevice_T* device,
         request->extent.width > UINT64_MAX / request->extent.height)
         return 0;
     pixels = (uint64_t)request->extent.width * request->extent.height;
-    if (pixels > UINT64_MAX / 4u ||
-        pixels * 4u > UINT64_MAX / request->samples)
+    if (pixels > UINT64_MAX / bytes_per_pixel ||
+        pixels * bytes_per_pixel > UINT64_MAX / request->samples)
         return 0;
-    *size_out = pixels * 4u * request->samples;
+    *size_out = pixels * bytes_per_pixel * request->samples;
     return *size_out != 0u;
 }
 
@@ -3499,7 +3516,8 @@ static int image_subresource_valid(const RinVkImageSlot* image,
                                    const RinVkImageSubresourceLayers* subresource,
                                    uint32_t width, uint32_t height) {
     return image && subresource &&
-           subresource->aspectMask == RIN_VK_IMAGE_ASPECT_COLOR_BIT &&
+           image_format_aspects(image->format) != 0u &&
+           subresource->aspectMask == image_format_aspects(image->format) &&
            subresource->mipLevel == 0u && subresource->baseArrayLayer == 0u &&
            image->samples == RIN_VK_SAMPLE_COUNT_1_BIT &&
            subresource->layerCount == 1u && width == image->width &&
@@ -3520,7 +3538,8 @@ static int image_subresource_range_valid(
         const RinVkImageSlot* image,
         const RinVkImageSubresourceRange* range) {
     return image && range &&
-           range->aspectMask == RIN_VK_IMAGE_ASPECT_COLOR_BIT &&
+           image_format_aspects(image->format) != 0u &&
+           range->aspectMask == image_format_aspects(image->format) &&
            range->baseMipLevel == 0u && range->levelCount == 1u &&
            range->baseArrayLayer == 0u && range->layerCount == 1u;
 }
@@ -4027,7 +4046,7 @@ void RIN_VKAPI_CALL vkCmdCopyImage(
     }
     source = image_slot(owner, src_image);
     destination = image_slot(owner, dst_image);
-    if (!source || !destination ||
+    if (!source || !destination || source->format != destination->format ||
         (source->usage & RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0u ||
         (destination->usage & RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u)
         valid = 0;
@@ -4193,7 +4212,8 @@ void RIN_VKAPI_CALL vkCmdClearColorImage(
         goto done;
     }
     image = image_slot(owner, image_handle);
-    if (!image || (image->usage & RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u ||
+    if (!image || image->format != RIN_VK_FORMAT_R8G8B8A8_UNORM ||
+        (image->usage & RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u ||
         !image_subresource_range_valid(image, &ranges[0]) ||
         color->uint32[1] != 0u || color->uint32[2] != 0u ||
         color->uint32[3] != 0u ||
@@ -4207,6 +4227,46 @@ void RIN_VKAPI_CALL vkCmdClearColorImage(
     operation.destination_gpu_address = destination_address;
     operation.size_bytes = image->memory_size;
     operation.clear_value[0] = color->uint32[0];
+done:
+    if (valid) record_transfer_ops(core, &operation, 1u);
+    else rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime, core);
+}
+
+void RIN_VKAPI_CALL vkCmdClearDepthStencilImage(
+        RinVkCommandBuffer command_buffer, RinVkImage image_handle,
+        uint32_t image_layout, const RinVkClearDepthStencilValue* value,
+        uint32_t range_count, const RinVkImageSubresourceRange* ranges) {
+    RinGpuVulkanCommandBufferV1* core =
+        (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
+    RinGpuVulkanTransferOpV2 operation;
+    RinVkImageSlot* image;
+    struct RinVkDevice_T* owner;
+    uint64_t destination_address;
+    int valid = 1;
+
+    memset(&operation, 0, sizeof(operation));
+    if (!command_owner_device(core, &owner) || !value ||
+        value->depth != value->depth || value->depth < 0.0f ||
+        value->depth > 1.0f || range_count != 1u || !ranges ||
+        (image_layout != RIN_VK_IMAGE_LAYOUT_GENERAL &&
+         image_layout != RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)) {
+        valid = 0;
+        goto done;
+    }
+    image = image_slot(owner, image_handle);
+    if (!image || image->format != RIN_VK_FORMAT_D32_SFLOAT ||
+        (image->usage & RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u ||
+        !image_subresource_range_valid(image, &ranges[0]) ||
+        !checked_image_address(image, 0u, image->memory_size,
+                               &destination_address)) {
+        valid = 0;
+        goto done;
+    }
+    operation.type = RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_CLEAR;
+    operation.destination_allocation = image->memory->product_allocation;
+    operation.destination_gpu_address = destination_address;
+    operation.size_bytes = image->memory_size;
+    memcpy(&operation.clear_value[0], &value->depth, sizeof(value->depth));
 done:
     if (valid) record_transfer_ops(core, &operation, 1u);
     else rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime, core);
@@ -5076,7 +5136,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateImage(
     if (request.sType != RIN_VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO ||
         request.pNext || request.flags != 0u ||
         request.imageType != RIN_VK_IMAGE_TYPE_2D ||
-        request.format != RIN_VK_FORMAT_R8G8B8A8_UNORM ||
+        image_format_aspects(request.format) == 0u ||
          request.mipLevels != 1u || request.arrayLayers != 1u ||
          (request.samples != RIN_VK_SAMPLE_COUNT_1_BIT &&
           request.samples != RIN_VK_SAMPLE_COUNT_2_BIT &&
@@ -5166,9 +5226,9 @@ RinVkResult RIN_VKAPI_CALL vkCreateImageView(
         create_info->pNext || create_info->flags != 0u ||
         (create_info->viewType != RIN_VK_IMAGE_VIEW_TYPE_2D &&
          create_info->viewType != RIN_VK_IMAGE_VIEW_TYPE_2D_ARRAY) ||
-        create_info->format != RIN_VK_FORMAT_R8G8B8A8_UNORM ||
+        image_format_aspects(create_info->format) == 0u ||
         create_info->subresourceRange.aspectMask !=
-            RIN_VK_IMAGE_ASPECT_COLOR_BIT ||
+            image_format_aspects(create_info->format) ||
         create_info->subresourceRange.baseMipLevel != 0u ||
         create_info->subresourceRange.levelCount != 1u ||
         create_info->subresourceRange.baseArrayLayer != 0u ||
@@ -5903,6 +5963,8 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
         return (RinVkVoidFunction)vkCmdResolveImage;
     if (name_equal(name, "vkCmdClearColorImage"))
         return (RinVkVoidFunction)vkCmdClearColorImage;
+    if (name_equal(name, "vkCmdClearDepthStencilImage"))
+        return (RinVkVoidFunction)vkCmdClearDepthStencilImage;
     if (name_equal(name, "vkCreateQueryPool"))
         return (RinVkVoidFunction)vkCreateQueryPool;
     if (name_equal(name, "vkDestroyQueryPool"))
