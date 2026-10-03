@@ -60,6 +60,8 @@
 #define RIN_VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO 1000207001
 #define RIN_VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO 1000207002
 #define RIN_VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 1000314000
+#define RIN_VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 1000314001
+#define RIN_VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 1000314002
 #define RIN_VK_STRUCTURE_TYPE_DEPENDENCY_INFO 1000314003
 #define RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO_2 1000314004
 #define RIN_VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO 1000314005
@@ -748,6 +750,43 @@ typedef struct RinVkMemoryBarrier2 {
     uint64_t dstAccessMask;
 } RinVkMemoryBarrier2;
 
+typedef struct RinVkImageSubresourceRange {
+    uint32_t aspectMask;
+    uint32_t baseMipLevel;
+    uint32_t levelCount;
+    uint32_t baseArrayLayer;
+    uint32_t layerCount;
+} RinVkImageSubresourceRange;
+
+typedef struct RinVkBufferMemoryBarrier2 {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint64_t srcStageMask;
+    uint64_t srcAccessMask;
+    uint64_t dstStageMask;
+    uint64_t dstAccessMask;
+    uint32_t srcQueueFamilyIndex;
+    uint32_t dstQueueFamilyIndex;
+    RinVkBuffer buffer;
+    uint64_t offset;
+    uint64_t size;
+} RinVkBufferMemoryBarrier2;
+
+typedef struct RinVkImageMemoryBarrier2 {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint64_t srcStageMask;
+    uint64_t srcAccessMask;
+    uint64_t dstStageMask;
+    uint64_t dstAccessMask;
+    uint32_t srcQueueFamilyIndex;
+    uint32_t dstQueueFamilyIndex;
+    uint32_t oldLayout;
+    uint32_t newLayout;
+    RinVkImage image;
+    RinVkImageSubresourceRange subresourceRange;
+} RinVkImageMemoryBarrier2;
+
 typedef struct RinVkDependencyInfo {
     RinVkStructureType sType;
     const void* pNext;
@@ -755,9 +794,9 @@ typedef struct RinVkDependencyInfo {
     uint32_t memoryBarrierCount;
     const RinVkMemoryBarrier2* pMemoryBarriers;
     uint32_t bufferMemoryBarrierCount;
-    const void* pBufferMemoryBarriers;
+    const RinVkBufferMemoryBarrier2* pBufferMemoryBarriers;
     uint32_t imageMemoryBarrierCount;
-    const void* pImageMemoryBarriers;
+    const RinVkImageMemoryBarrier2* pImageMemoryBarriers;
 } RinVkDependencyInfo;
 
 typedef struct RinVkTimelineSemaphoreSubmitInfo {
@@ -926,14 +965,6 @@ typedef struct RinVkClearDepthStencilValue {
     uint32_t stencil;
 } RinVkClearDepthStencilValue;
 
-typedef struct RinVkImageSubresourceRange {
-    uint32_t aspectMask;
-    uint32_t baseMipLevel;
-    uint32_t levelCount;
-    uint32_t baseArrayLayer;
-    uint32_t layerCount;
-} RinVkImageSubresourceRange;
-
 typedef struct RinVkDescriptorSetLayoutBinding {
     uint32_t binding;
     uint32_t descriptorType;
@@ -1059,8 +1090,13 @@ typedef struct RinVkSamplerCreateInfo {
 #define RIN_VK_IMAGE_VIEW_TYPE_2D 1u
 #define RIN_VK_IMAGE_VIEW_TYPE_2D_ARRAY 5u
 #define RIN_VK_IMAGE_LAYOUT_GENERAL UINT32_C(1)
+#define RIN_VK_IMAGE_LAYOUT_UNDEFINED UINT32_C(0)
 #define RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL UINT32_C(6)
 #define RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL UINT32_C(7)
+#define RIN_VK_QUEUE_FAMILY_IGNORED UINT32_MAX
+#define RIN_VK_REMAINING_MIP_LEVELS UINT32_MAX
+#define RIN_VK_REMAINING_ARRAY_LAYERS UINT32_MAX
+#define RIN_VK_WHOLE_SIZE UINT64_MAX
 #define RIN_VK_FILTER_NEAREST 0u
 #define RIN_VK_FILTER_LINEAR 1u
 #define RIN_VK_SHARING_MODE_EXCLUSIVE 0u
@@ -1284,6 +1320,10 @@ static_assert(sizeof(RinVkClearColorValue) == 16u,
               "Vulkan clear-color ABI drift");
 static_assert(sizeof(RinVkClearDepthStencilValue) == 8u,
               "Vulkan clear-depth ABI drift");
+static_assert(sizeof(RinVkBufferMemoryBarrier2) == 80u,
+              "Vulkan buffer-memory-barrier2 ABI drift");
+static_assert(sizeof(RinVkImageMemoryBarrier2) == 96u,
+              "Vulkan image-memory-barrier2 ABI drift");
 static_assert(sizeof(RinVkImageSubresourceRange) == 20u,
               "Vulkan image-subresource-range ABI drift");
 static_assert(sizeof(RinVkCommandPool) == 8u,
@@ -1421,6 +1461,10 @@ _Static_assert(sizeof(RinVkClearColorValue) == 16u,
                "Vulkan clear-color ABI drift");
 _Static_assert(sizeof(RinVkClearDepthStencilValue) == 8u,
                "Vulkan clear-depth ABI drift");
+_Static_assert(sizeof(RinVkBufferMemoryBarrier2) == 80u,
+               "Vulkan buffer-memory-barrier2 ABI drift");
+_Static_assert(sizeof(RinVkImageMemoryBarrier2) == 96u,
+               "Vulkan image-memory-barrier2 ABI drift");
 _Static_assert(sizeof(RinVkImageSubresourceRange) == 20u,
                "Vulkan image-subresource-range ABI drift");
 _Static_assert(sizeof(RinVkCommandPool) == 8u,

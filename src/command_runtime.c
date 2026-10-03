@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 
 #include <rinvulkan/command_runtime.h>
+#include <rinvulkan/icd.h>
 
 #include <stddef.h>
 #include <string.h>
@@ -492,7 +493,7 @@ int rin_gpu_vulkan_command_buffer_record_transfer_ops(
     for (index = 0u; index < operation_count; ++index) {
         const RinGpuVulkanTransferOpV2* operation = &operations[index];
         if (operation->type < RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_COPY ||
-            operation->type > RIN_GPU_VULKAN_TRANSFER_OP_MEMORY_BARRIER ||
+            operation->type > RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER ||
             operation->reserved != 0u)
             return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
         if (operation->type == RIN_GPU_VULKAN_TRANSFER_OP_MEMORY_BARRIER) {
@@ -510,6 +511,62 @@ int rin_gpu_vulkan_command_buffer_record_transfer_ops(
                 (operation->barrier.dst_access_mask &
                  ~RIN_GPU_VULKAN_BARRIER_ACCESS_ALL) != 0u)
                 return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
+            continue;
+        }
+        if (operation->type == RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_BARRIER ||
+            operation->type == RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER) {
+            const uint32_t src_queue_family =
+                operation->type == RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_BARRIER
+                    ? operation->source_width
+                    : operation->destination_height;
+            const uint32_t dst_queue_family =
+                operation->type == RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_BARRIER
+                    ? operation->source_height
+                    : operation->filter;
+            if (operation->source_allocation == 0u ||
+                operation->source_gpu_address != 0u ||
+                operation->destination_allocation == 0u ||
+                operation->destination_gpu_address == 0u ||
+                operation->size_bytes == 0u ||
+                (operation->barrier.src_stage_mask &
+                 ~RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS) != 0u ||
+                (operation->barrier.src_access_mask &
+                 ~RIN_GPU_VULKAN_BARRIER_ACCESS_ALL) != 0u ||
+                (operation->barrier.dst_stage_mask &
+                 ~RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS) != 0u ||
+                (operation->barrier.dst_access_mask &
+                 ~RIN_GPU_VULKAN_BARRIER_ACCESS_ALL) != 0u ||
+                !((src_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED &&
+                   dst_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED) ||
+                  src_queue_family == dst_queue_family))
+                return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
+            if (operation->type ==
+                RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_BARRIER) {
+                if (operation->destination_width != 0u ||
+                    operation->destination_height != 0u ||
+                    operation->filter != 0u ||
+                    operation->sample_count != 0u)
+                    return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
+            } else if ((operation->source_width !=
+                            RIN_VK_IMAGE_LAYOUT_UNDEFINED &&
+                        operation->source_width != RIN_VK_IMAGE_LAYOUT_GENERAL &&
+                        operation->source_width !=
+                            RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL &&
+                        operation->source_width !=
+                            RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) ||
+                       (operation->source_height !=
+                            RIN_VK_IMAGE_LAYOUT_GENERAL &&
+                        operation->source_height !=
+                            RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL &&
+                        operation->source_height !=
+                            RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) ||
+                       (operation->destination_width !=
+                            RIN_VK_IMAGE_ASPECT_COLOR_BIT &&
+                        operation->destination_width !=
+                            RIN_VK_IMAGE_ASPECT_DEPTH_BIT) ||
+                       operation->sample_count != 0u) {
+                return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
+            }
             continue;
         }
         if (operation->destination_allocation == 0u ||

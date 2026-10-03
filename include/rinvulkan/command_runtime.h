@@ -113,9 +113,18 @@ enum {
     RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_CLEAR = 5u,
     RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BLIT = 6u,
     RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_RESOLVE = 7u,
-    RIN_GPU_VULKAN_TRANSFER_OP_MEMORY_BARRIER = 8u
+    RIN_GPU_VULKAN_TRANSFER_OP_MEMORY_BARRIER = 8u,
+    RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_BARRIER = 9u,
+    RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER = 10u
 };
 
+/* Resource barrier packet encoding: source_allocation carries the opaque
+ * Vulkan resource handle; destination_allocation/address/size carry its
+ * backing allocation lease and affected byte range. The barrier union carries
+ * stage/access scopes. Buffer queue-family indices use source_width/height;
+ * image old/new layout, aspect, and queue-family indices use source_width,
+ * source_height, destination_width, destination_height, and filter; sample_count
+ * remains zero for both barrier operation types. */
 typedef struct RinGpuVulkanTransferOpV2 {
     uint32_t type;
     uint32_t reserved;
