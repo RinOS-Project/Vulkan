@@ -251,6 +251,7 @@ int main(void) {
     RinVkSemaphoreCreateInfo semaphore_create;
     RinVkSemaphoreTypeCreateInfo timeline_type;
     RinVkTimelineSemaphoreSubmitInfo timeline_values;
+    RinVkSemaphoreWaitInfo timeline_wait_info;
     RinVkSubmitInfo empty_submit;
     RinVkSubmitInfo deferred_wait;
     RinVkSubmitInfo deferred_signal;
@@ -442,6 +443,18 @@ int main(void) {
     CHECK(vkGetSemaphoreCounterValue(device, timeline_output,
                                      &timeline_counter) == RIN_VK_SUCCESS);
     CHECK(timeline_counter == 0u);
+    memset(&timeline_wait_info, 0, sizeof(timeline_wait_info));
+    timeline_wait_info.sType = RIN_VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+    timeline_wait_info.semaphoreCount = 1u;
+    timeline_wait_info.pSemaphores = timeline_signal_semaphore;
+    timeline_wait_info.pValues = timeline_signal_value;
+    timeline_wait_value[0] = 3u;
+    CHECK(vkWaitSemaphores(device, &timeline_wait_info, 0u) ==
+          RIN_VK_NOT_READY);
+    CHECK(vkWaitSemaphores(device, &timeline_wait_info, UINT64_C(1000000)) ==
+          RIN_VK_TIMEOUT);
+    CHECK(vkSignalSemaphore(device, timeline_output, 2u) ==
+          RIN_VK_ERROR_INITIALIZATION_FAILED);
     CHECK(vkSignalSemaphore(device, timeline_output, 1u) == RIN_VK_SUCCESS);
     CHECK(vkGetSemaphoreCounterValue(device, timeline_output,
                                      &timeline_counter) == RIN_VK_SUCCESS);
