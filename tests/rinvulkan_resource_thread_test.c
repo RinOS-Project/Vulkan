@@ -442,6 +442,10 @@ int main(void) {
     CHECK(vkGetSemaphoreCounterValue(device, timeline_output,
                                      &timeline_counter) == RIN_VK_SUCCESS);
     CHECK(timeline_counter == 0u);
+    CHECK(vkSignalSemaphore(device, timeline_output, 1u) == RIN_VK_SUCCESS);
+    CHECK(vkGetSemaphoreCounterValue(device, timeline_output,
+                                     &timeline_counter) == RIN_VK_SUCCESS);
+    CHECK(timeline_counter == 1u);
 
     timeline_wait_semaphore[0] = timeline_output;
     timeline_wait_value[0] = 3u;
