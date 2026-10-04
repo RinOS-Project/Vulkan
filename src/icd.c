@@ -2005,6 +2005,16 @@ static void yield_thread(void) {
 #endif
 }
 
+static void sync_lock(void) {
+    for (;;) {
+        if (__atomic_exchange_n(&g_sync_lock, 1u, __ATOMIC_ACQUIRE) == 0u)
+            return;
+        do {
+            yield_thread();
+        } while (__atomic_load_n(&g_sync_lock, __ATOMIC_RELAXED) != 0u);
+    }
+}
+
 static int wait_timeout_elapsed(uint64_t start_ns, uint64_t timeout_ns) {
     uint64_t now_ns;
 
@@ -2504,6 +2514,16 @@ static RinVkResult maintain_device_submissions(struct RinVkDevice_T* device) {
     }
     sync_unlock();
     return RIN_VK_SUCCESS;
+}
+
+static RinVkResult maintain_device_submissions_until_available(
+        struct RinVkDevice_T* device) {
+    RinVkResult result;
+    do {
+        result = maintain_device_submissions(device);
+        if (result == RIN_VK_NOT_READY) yield_thread();
+    } while (result == RIN_VK_NOT_READY);
+    return result;
 }
 
 /* Device destruction is allowed to invalidate child buffers, but it never
@@ -3602,7 +3622,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateFence(
         create_info->pNext ||
         (create_info->flags & ~RIN_VK_FENCE_CREATE_KNOWN) != 0u)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    if (!sync_try_lock()) return RIN_VK_NOT_READY;
+    sync_lock();
     fence = reserve_fence_slot(owner, &index);
     if (!fence) {
         sync_unlock();
@@ -3624,7 +3644,8 @@ void RIN_VKAPI_CALL vkDestroyFence(RinVkDevice device, RinVkFence fence,
                                    const void* allocator) {
     RinVkFenceSlot* slot;
     (void)allocator;
-    if (fence == 0u || !sync_try_lock()) return;
+    if (fence == 0u) return;
+    sync_lock();
     slot = fence_slot(device, fence);
     if (slot) clear_fence_slot(slot);
     sync_unlock();
@@ -3638,7 +3659,7 @@ RinVkResult RIN_VKAPI_CALL vkResetFences(
 
     if (!owner || fence_count == 0u || !fences)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    if (!sync_try_lock()) return RIN_VK_NOT_READY;
+    sync_lock();
     for (index = 0u; index < fence_count; ++index) {
         RinVkFenceSlot* slot = fence_slot(owner, fences[index]);
         if (!slot) {
@@ -3758,7 +3779,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateSemaphore(
         semaphore_type = type_info->semaphoreType;
         initial_value = type_info->initialValue;
     }
-    if (!sync_try_lock()) return RIN_VK_NOT_READY;
+    sync_lock();
     semaphore = reserve_semaphore_slot(owner, &index);
     if (!semaphore) {
         sync_unlock();
@@ -3782,7 +3803,8 @@ void RIN_VKAPI_CALL vkDestroySemaphore(
     uint32_t submission_index;
     int referenced = 0;
     (void)allocator;
-    if (semaphore == 0u || !sync_try_lock()) return;
+    if (semaphore == 0u) return;
+    sync_lock();
     slot = semaphore_slot(device, semaphore);
     if (slot) {
         for (submission_index = 0u;
@@ -3820,9 +3842,9 @@ RinVkResult RIN_VKAPI_CALL vkGetSemaphoreCounterValue(
     RinVkSemaphoreSlot* slot;
     RinVkResult result;
     if (!owner || !value_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    result = maintain_device_submissions(owner);
+    result = maintain_device_submissions_until_available(owner);
     if (result != RIN_VK_SUCCESS) return result;
-    if (!sync_try_lock()) return RIN_VK_NOT_READY;
+    sync_lock();
     slot = semaphore_slot(owner, semaphore);
     if (!slot || slot->type != RIN_VK_SEMAPHORE_TYPE_TIMELINE) {
         sync_unlock();
@@ -3842,9 +3864,9 @@ RinVkResult RIN_VKAPI_CALL vkSignalSemaphore(
     uint64_t pending_maximum = 0u;
     uint64_t current;
     if (!owner) return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    result = maintain_device_submissions(owner);
+    result = maintain_device_submissions_until_available(owner);
     if (result != RIN_VK_SUCCESS) return result;
-    if (!sync_try_lock()) return RIN_VK_NOT_READY;
+    sync_lock();
     slot = semaphore_slot(owner, semaphore);
     if (!slot || slot->type != RIN_VK_SEMAPHORE_TYPE_TIMELINE) {
         sync_unlock();
@@ -6008,7 +6030,7 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         return RIN_VK_NOT_READY;
     }
     device = queue_slot_value->device;
-    result = maintain_device_submissions(device);
+    result = maintain_device_submissions_until_available(device);
     if (result != RIN_VK_SUCCESS) goto done;
     if (__atomic_load_n(&device->descriptor_validation_error,
                         __ATOMIC_ACQUIRE) != 0u) {
@@ -6054,10 +6076,7 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         }
         timeline_submit = candidate;
     }
-    if (!sync_try_lock()) {
-        result = RIN_VK_NOT_READY;
-        goto done;
-    }
+    sync_lock();
     sync_locked = 1;
     memset(wait_semaphores, 0, sizeof(wait_semaphores));
     memset(signal_semaphores, 0, sizeof(signal_semaphores));
@@ -7378,7 +7397,7 @@ RinVkResult RIN_VKAPI_CALL vkCreatePipelineCache(
          !pipeline_cache_blob_valid(owner, info->pInitialData,
                                     info->initialDataSize, &header)))
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    if (!sync_try_lock()) return RIN_VK_NOT_READY;
+    sync_lock();
     cache = reserve_pipeline_cache_slot(owner, &index);
     if (!cache) {
         sync_unlock();
@@ -7401,7 +7420,8 @@ void RIN_VKAPI_CALL vkDestroyPipelineCache(
         RinVkDevice device, RinVkPipelineCache cache, const void* allocator) {
     RinVkPipelineCacheSlot* slot;
     (void)allocator;
-    if (cache == 0u || !sync_try_lock()) return;
+    if (cache == 0u) return;
+    sync_lock();
     slot = pipeline_cache_slot(device, cache);
     if (slot) clear_pipeline_cache_slot(slot);
     sync_unlock();
@@ -7415,7 +7435,7 @@ RinVkResult RIN_VKAPI_CALL vkGetPipelineCacheData(
     size_t required;
     size_t capacity;
     if (!data_size) return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    if (!sync_try_lock()) return RIN_VK_NOT_READY;
+    sync_lock();
     slot = pipeline_cache_slot(device, cache);
     if (!slot) {
         sync_unlock();
@@ -7449,7 +7469,7 @@ RinVkResult RIN_VKAPI_CALL vkMergePipelineCaches(
     if (src_cache_count > RIN_VK_MAX_PIPELINE_CACHES ||
         (src_cache_count != 0u && !src_caches))
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    if (!sync_try_lock()) return RIN_VK_NOT_READY;
+    sync_lock();
     destination = pipeline_cache_slot(device, dst_cache);
     if (!destination) {
         sync_unlock();
