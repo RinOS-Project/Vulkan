@@ -2032,6 +2032,65 @@ static int queue_submission_slots_active(
     return 0;
 }
 
+static int timeline_pending_signal_range(
+        const struct RinVkDevice_T* device, RinVkSemaphore semaphore_handle,
+        const RinVkSubmissionSlot* excluded, uint64_t* minimum_out,
+        uint64_t* maximum_out) {
+    uint32_t index;
+    int found = 0;
+    uint64_t minimum = UINT64_MAX;
+    uint64_t maximum = 0u;
+
+    if (!device || semaphore_handle == 0u || !minimum_out || !maximum_out)
+        return 0;
+    for (index = 0u; index < RIN_VK_MAX_SUBMISSIONS; ++index) {
+        const RinVkSubmissionSlot* submission = &g_submissions[index];
+        const uint32_t state = __atomic_load_n(&submission->state,
+                                                __ATOMIC_ACQUIRE);
+        uint32_t signal_index;
+        if ((state != RIN_VK_SUBMISSION_ACTIVE &&
+             state != RIN_VK_SUBMISSION_RESERVED &&
+             state != RIN_VK_SUBMISSION_WAITING) ||
+            submission == excluded || submission->owner != device)
+            continue;
+        for (signal_index = 0u;
+             signal_index < submission->signal_semaphore_count;
+             ++signal_index) {
+            uint64_t value;
+            if (submission->signal_semaphores[signal_index] !=
+                semaphore_handle)
+                continue;
+            value = submission->signal_semaphore_values[signal_index];
+            if (!found || value < minimum) minimum = value;
+            if (!found || value > maximum) maximum = value;
+            found = 1;
+        }
+    }
+    if (found) {
+        *minimum_out = minimum;
+        *maximum_out = maximum;
+    }
+    return found;
+}
+
+static void refresh_timeline_semaphore_pending(
+        RinVkSemaphoreSlot* semaphore, struct RinVkDevice_T* device,
+        RinVkSemaphore semaphore_handle,
+        const RinVkSubmissionSlot* excluded) {
+    uint64_t minimum;
+    uint64_t maximum;
+    if (!semaphore || semaphore->type != RIN_VK_SEMAPHORE_TYPE_TIMELINE)
+        return;
+    if (timeline_pending_signal_range(device, semaphore_handle, excluded,
+                                      &minimum, &maximum)) {
+        semaphore->pending_value = maximum;
+        __atomic_store_n(&semaphore->pending, 1u, __ATOMIC_RELEASE);
+    } else {
+        semaphore->pending_value = 0u;
+        __atomic_store_n(&semaphore->pending, 0u, __ATOMIC_RELEASE);
+    }
+}
+
 static void complete_submission_sync(const RinVkSubmissionSlot* submission) {
     RinVkFenceSlot* fence;
     uint32_t index;
@@ -2043,18 +2102,26 @@ static void complete_submission_sync(const RinVkSubmissionSlot* submission) {
         __atomic_store_n(&fence->signaled, 1u, __ATOMIC_RELEASE);
     }
     for (index = 0u; index < submission->signal_semaphore_count; ++index) {
+        const RinVkSemaphore semaphore_handle =
+            submission->signal_semaphores[index];
         RinVkSemaphoreSlot* semaphore = semaphore_slot(
             (RinVkDevice)submission->owner,
-            submission->signal_semaphores[index]);
+            semaphore_handle);
         if (semaphore &&
             __atomic_load_n(&semaphore->pending, __ATOMIC_ACQUIRE) != 0u) {
-            __atomic_store_n(&semaphore->pending, 0u, __ATOMIC_RELEASE);
             if (semaphore->type == RIN_VK_SEMAPHORE_TYPE_TIMELINE) {
-                __atomic_store_n(
-                    &semaphore->value,
-                    submission->signal_semaphore_values[index],
-                    __ATOMIC_RELEASE);
+                const uint64_t current = __atomic_load_n(
+                    &semaphore->value, __ATOMIC_ACQUIRE);
+                const uint64_t signal_value =
+                    submission->signal_semaphore_values[index];
+                if (signal_value > current)
+                    __atomic_store_n(&semaphore->value, signal_value,
+                                     __ATOMIC_RELEASE);
+                refresh_timeline_semaphore_pending(
+                    semaphore, submission->owner, semaphore_handle,
+                    submission);
             } else {
+                __atomic_store_n(&semaphore->pending, 0u, __ATOMIC_RELEASE);
                 __atomic_store_n(&semaphore->signaled, 1u,
                                  __ATOMIC_RELEASE);
             }
@@ -2256,10 +2323,16 @@ static void cancel_submission_sync(RinVkSubmissionSlot* submission) {
     fence = fence_slot((RinVkDevice)submission->owner, submission->fence);
     if (fence) __atomic_store_n(&fence->pending, 0u, __ATOMIC_RELEASE);
     for (index = 0u; index < submission->signal_semaphore_count; ++index) {
+        const RinVkSemaphore semaphore_handle =
+            submission->signal_semaphores[index];
         RinVkSemaphoreSlot* semaphore = semaphore_slot(
             (RinVkDevice)submission->owner,
-            submission->signal_semaphores[index]);
-        if (semaphore)
+            semaphore_handle);
+        if (!semaphore) continue;
+        if (semaphore->type == RIN_VK_SEMAPHORE_TYPE_TIMELINE)
+            refresh_timeline_semaphore_pending(
+                semaphore, submission->owner, semaphore_handle, submission);
+        else
             __atomic_store_n(&semaphore->pending, 0u, __ATOMIC_RELEASE);
     }
 }
@@ -3764,20 +3837,25 @@ RinVkResult RIN_VKAPI_CALL vkSignalSemaphore(
         RinVkDevice device, RinVkSemaphore semaphore, uint64_t value) {
     struct RinVkDevice_T* owner = device_slot(device);
     RinVkSemaphoreSlot* slot;
+    RinVkResult result;
+    uint64_t pending_minimum = 0u;
+    uint64_t pending_maximum = 0u;
     uint64_t current;
     if (!owner) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    result = maintain_device_submissions(owner);
+    if (result != RIN_VK_SUCCESS) return result;
     if (!sync_try_lock()) return RIN_VK_NOT_READY;
     slot = semaphore_slot(owner, semaphore);
     if (!slot || slot->type != RIN_VK_SEMAPHORE_TYPE_TIMELINE) {
         sync_unlock();
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
     }
-    if (__atomic_load_n(&slot->pending, __ATOMIC_ACQUIRE) != 0u) {
-        sync_unlock();
-        return RIN_VK_NOT_READY;
-    }
     current = __atomic_load_n(&slot->value, __ATOMIC_ACQUIRE);
-    if (value < current) {
+    if (value <= current ||
+        (timeline_pending_signal_range(owner, semaphore, NULL,
+                                       &pending_minimum,
+                                       &pending_maximum) &&
+         value >= pending_minimum)) {
         sync_unlock();
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
     }
@@ -6058,20 +6136,29 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     for (index = 0u; index < request.signalSemaphoreCount; ++index) {
         RinVkSemaphoreSlot* semaphore =
             semaphore_slot(device, signal_semaphores[index]);
-        if (__atomic_load_n(&semaphore->pending, __ATOMIC_ACQUIRE) != 0u) {
-            result = RIN_VK_NOT_READY;
-            goto done;
-        }
-        if ((semaphore->type == RIN_VK_SEMAPHORE_TYPE_BINARY &&
-             (timeline_submit ? signal_values[index] != 0u : 0) != 0u) ||
-            (semaphore->type == RIN_VK_SEMAPHORE_TYPE_BINARY &&
-             __atomic_load_n(&semaphore->signaled, __ATOMIC_ACQUIRE) != 0u) ||
-            (semaphore->type == RIN_VK_SEMAPHORE_TYPE_TIMELINE &&
-             (!timeline_submit ||
-              signal_values[index] <=
-                  __atomic_load_n(&semaphore->value, __ATOMIC_ACQUIRE)))) {
-            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
-            goto done;
+        if (semaphore->type == RIN_VK_SEMAPHORE_TYPE_BINARY) {
+            if (__atomic_load_n(&semaphore->pending, __ATOMIC_ACQUIRE) != 0u) {
+                result = RIN_VK_NOT_READY;
+                goto done;
+            }
+            if ((timeline_submit && signal_values[index] != 0u) ||
+                __atomic_load_n(&semaphore->signaled, __ATOMIC_ACQUIRE) != 0u) {
+                result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+                goto done;
+            }
+        } else {
+            uint64_t pending_minimum = 0u;
+            uint64_t pending_maximum = 0u;
+            const uint64_t current = __atomic_load_n(
+                &semaphore->value, __ATOMIC_ACQUIRE);
+            const int has_pending = timeline_pending_signal_range(
+                device, signal_semaphores[index], NULL, &pending_minimum,
+                &pending_maximum);
+            if (!timeline_submit || signal_values[index] <= current ||
+                (has_pending && signal_values[index] <= pending_maximum)) {
+                result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+                goto done;
+            }
         }
     }
     if (request.commandBufferCount == 0u) {

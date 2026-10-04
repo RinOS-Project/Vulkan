@@ -233,6 +233,7 @@ int main(void) {
     RinVkInstanceCreateInfo instance_create;
     RinVkDeviceQueueCreateInfo queue_create;
     RinVkDeviceCreateInfo device_create;
+    RinVkPhysicalDeviceVulkan12Features vulkan12_features;
     RinVkPhysicalDeviceSynchronization2Features synchronization2_features;
     RinVkBufferCreateInfo buffer_create;
     RinVkInstance instance = NULL;
@@ -244,15 +245,29 @@ int main(void) {
     RinVkFence second_fence = 0u;
     RinVkSemaphore semaphore = 0u;
     RinVkSemaphore deferred_semaphore = 0u;
+    RinVkSemaphore timeline_gate = 0u;
+    RinVkSemaphore timeline_output = 0u;
     RinVkFenceCreateInfo fence_create;
     RinVkSemaphoreCreateInfo semaphore_create;
+    RinVkSemaphoreTypeCreateInfo timeline_type;
+    RinVkTimelineSemaphoreSubmitInfo timeline_values;
     RinVkSubmitInfo empty_submit;
     RinVkSubmitInfo deferred_wait;
     RinVkSubmitInfo deferred_signal;
+    RinVkSubmitInfo timeline_submit;
+    RinVkSubmitInfo timeline_wait_submit;
+    RinVkSubmitInfo timeline_signal_submit;
     RinVkSubmitInfo2 empty_submit2;
     RinVkSemaphoreSubmitInfo semaphore_submit_info;
     const char* synchronization2_extension =
         RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION;
+    const char* timeline_extension = RIN_VK_KHR_TIMELINE_SEMAPHORE_EXTENSION;
+    const char* enabled_extensions[2];
+    RinVkSemaphore timeline_wait_semaphore[1];
+    RinVkSemaphore timeline_signal_semaphore[1];
+    uint64_t timeline_wait_value[1];
+    uint64_t timeline_signal_value[1];
+    uint64_t timeline_counter = 0u;
     uint32_t wait_stage = UINT32_C(0x00001000);
     float priorities[2] = {1.0f, 1.0f};
     uint32_t physical_count = 1u;
@@ -294,15 +309,22 @@ int main(void) {
     queue_create.pQueuePriorities = priorities;
     memset(&device_create, 0, sizeof(device_create));
     device_create.sType = RIN_VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    memset(&vulkan12_features, 0, sizeof(vulkan12_features));
+    vulkan12_features.sType =
+        RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    vulkan12_features.timelineSemaphore = 1u;
     memset(&synchronization2_features, 0, sizeof(synchronization2_features));
     synchronization2_features.sType =
         RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
     synchronization2_features.synchronization2 = 1u;
-    device_create.pNext = &synchronization2_features;
+    vulkan12_features.pNext = &synchronization2_features;
+    device_create.pNext = &vulkan12_features;
     device_create.queueCreateInfoCount = 1u;
     device_create.pQueueCreateInfos = &queue_create;
-    device_create.enabledExtensionCount = 1u;
-    device_create.ppEnabledExtensionNames = &synchronization2_extension;
+    enabled_extensions[0] = synchronization2_extension;
+    enabled_extensions[1] = timeline_extension;
+    device_create.enabledExtensionCount = 2u;
+    device_create.ppEnabledExtensionNames = enabled_extensions;
     CHECK(vkCreateDevice(physical, &device_create, NULL, &device) ==
           RIN_VK_SUCCESS);
     vkGetDeviceQueue(device, 0u, 0u, &queue);
@@ -382,6 +404,79 @@ int main(void) {
     CHECK(vkQueueSubmit2(queue, 1u, &empty_submit2, fence) == RIN_VK_SUCCESS);
     CHECK(vkGetFenceStatus(device, fence) == RIN_VK_SUCCESS);
 
+    memset(&timeline_type, 0, sizeof(timeline_type));
+    timeline_type.sType = RIN_VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+    timeline_type.semaphoreType = RIN_VK_SEMAPHORE_TYPE_TIMELINE;
+    memset(&semaphore_create, 0, sizeof(semaphore_create));
+    semaphore_create.sType = RIN_VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    semaphore_create.pNext = &timeline_type;
+    CHECK(vkCreateSemaphore(device, &semaphore_create, NULL, &timeline_gate) ==
+          RIN_VK_SUCCESS);
+    CHECK(vkCreateSemaphore(device, &semaphore_create, NULL,
+                            &timeline_output) == RIN_VK_SUCCESS);
+    semaphore_create.pNext = NULL;
+    CHECK(vkSignalSemaphore(device, timeline_gate, 0u) ==
+          RIN_VK_ERROR_INITIALIZATION_FAILED);
+    memset(&timeline_values, 0, sizeof(timeline_values));
+    timeline_values.sType =
+        RIN_VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    timeline_values.waitSemaphoreValueCount = 1u;
+    timeline_values.pWaitSemaphoreValues = timeline_wait_value;
+    timeline_values.signalSemaphoreValueCount = 1u;
+    timeline_values.pSignalSemaphoreValues = timeline_signal_value;
+    timeline_wait_semaphore[0] = timeline_gate;
+    timeline_signal_semaphore[0] = timeline_output;
+    timeline_wait_value[0] = 1u;
+    timeline_signal_value[0] = 2u;
+    memset(&timeline_submit, 0, sizeof(timeline_submit));
+    timeline_submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    timeline_submit.pNext = &timeline_values;
+    timeline_submit.waitSemaphoreCount = 1u;
+    timeline_submit.pWaitSemaphores = timeline_wait_semaphore;
+    timeline_submit.pWaitDstStageMask = &wait_stage;
+    timeline_submit.signalSemaphoreCount = 1u;
+    timeline_submit.pSignalSemaphores = timeline_signal_semaphore;
+    CHECK(vkQueueSubmit(queue, 1u, &timeline_submit, 0u) == RIN_VK_SUCCESS);
+    timeline_signal_value[0] = 3u;
+    CHECK(vkQueueSubmit(queue, 1u, &timeline_submit, 0u) == RIN_VK_SUCCESS);
+    CHECK(vkGetSemaphoreCounterValue(device, timeline_output,
+                                     &timeline_counter) == RIN_VK_SUCCESS);
+    CHECK(timeline_counter == 0u);
+
+    timeline_wait_semaphore[0] = timeline_output;
+    timeline_wait_value[0] = 3u;
+    timeline_values.signalSemaphoreValueCount = 0u;
+    timeline_values.pSignalSemaphoreValues = NULL;
+    memset(&timeline_wait_submit, 0, sizeof(timeline_wait_submit));
+    timeline_wait_submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    timeline_wait_submit.pNext = &timeline_values;
+    timeline_wait_submit.waitSemaphoreCount = 1u;
+    timeline_wait_submit.pWaitSemaphores = timeline_wait_semaphore;
+    timeline_wait_submit.pWaitDstStageMask = &wait_stage;
+    CHECK(vkQueueSubmit(second_queue, 1u, &timeline_wait_submit, 0u) ==
+          RIN_VK_SUCCESS);
+
+    timeline_values.waitSemaphoreValueCount = 0u;
+    timeline_values.pWaitSemaphoreValues = NULL;
+    timeline_values.signalSemaphoreValueCount = 1u;
+    timeline_values.pSignalSemaphoreValues = timeline_signal_value;
+    timeline_signal_value[0] = 4u;
+    memset(&timeline_signal_submit, 0, sizeof(timeline_signal_submit));
+    timeline_signal_submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    timeline_signal_submit.pNext = &timeline_values;
+    timeline_signal_submit.signalSemaphoreCount = 1u;
+    timeline_signal_submit.pSignalSemaphores = timeline_signal_semaphore;
+    CHECK(vkQueueSubmit(second_queue, 1u, &timeline_signal_submit, 0u) ==
+          RIN_VK_SUCCESS);
+
+    CHECK(vkSignalSemaphore(device, timeline_gate, 1u) == RIN_VK_SUCCESS);
+    CHECK(vkGetSemaphoreCounterValue(device, timeline_output,
+                                     &timeline_counter) == RIN_VK_SUCCESS);
+    CHECK(timeline_counter == 4u);
+    CHECK(vkSignalSemaphore(device, timeline_output, 4u) ==
+          RIN_VK_ERROR_INITIALIZATION_FAILED);
+    CHECK(vkSignalSemaphore(device, timeline_output, 5u) == RIN_VK_SUCCESS);
+
     memset(&buffer_create, 0, sizeof(buffer_create));
     buffer_create.sType = RIN_VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     buffer_create.size = 4096u;
@@ -394,6 +489,8 @@ int main(void) {
 cleanup:
     if (deferred_semaphore)
         vkDestroySemaphore(device, deferred_semaphore, NULL);
+    if (timeline_gate) vkDestroySemaphore(device, timeline_gate, NULL);
+    if (timeline_output) vkDestroySemaphore(device, timeline_output, NULL);
     if (second_fence) vkDestroyFence(device, second_fence, NULL);
     if (semaphore) vkDestroySemaphore(device, semaphore, NULL);
     if (fence) vkDestroyFence(device, fence, NULL);
