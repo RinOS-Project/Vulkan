@@ -6331,7 +6331,40 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     memcpy(slot->signal_semaphore_values, signal_values,
            sizeof(uint64_t) * request.signalSemaphoreCount);
     if (queue_has_earlier_waiting_submission(slot)) waits_ready = 0;
-    if (!waits_ready) {
+    if (waits_ready) {
+        result = submit_slot_to_product(slot);
+        if (result == RIN_VK_SUCCESS) {
+            commit_image_layout_updates(pending_layout_images, pending_layouts,
+                                        pending_image_ownership,
+                                        pending_layout_count);
+            commit_buffer_ownership_updates(pending_buffer_ownership,
+                                            pending_buffer_ownership_count);
+            if (fence != 0u) {
+                RinVkFenceSlot* fence_value =
+                    fence_slot(device, (RinVkFence)fence);
+                __atomic_store_n(&fence_value->pending, 1u, __ATOMIC_RELEASE);
+            }
+            for (index = 0u; index < request.signalSemaphoreCount; ++index) {
+                RinVkSemaphoreSlot* semaphore =
+                    semaphore_slot(device, signal_semaphores[index]);
+                __atomic_store_n(&semaphore->pending, 1u, __ATOMIC_RELEASE);
+                if (semaphore->type == RIN_VK_SEMAPHORE_TYPE_TIMELINE)
+                    semaphore->pending_value = signal_values[index];
+            }
+            mark_submission_query_events(slot, 1u);
+            result = RIN_VK_SUCCESS;
+            goto done;
+        }
+        if (result != RIN_VK_NOT_READY) {
+            rin_gpu_vulkan_command_buffers_abort(
+                &g_command_runtime, request.commandBufferCount,
+                command_buffers);
+            mark_submission_query_events(slot, 0u);
+            clear_submission_slot(slot);
+            goto done;
+        }
+    }
+    {
         slot->waits_reserved = 1u;
         for (index = 0u; index < request.waitSemaphoreCount; ++index) {
             RinVkSemaphoreSlot* semaphore =
@@ -6366,32 +6399,6 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         result = RIN_VK_SUCCESS;
         goto done;
     }
-    result = submit_slot_to_product(slot);
-    if (result != RIN_VK_SUCCESS) {
-        rin_gpu_vulkan_command_buffers_abort(
-            &g_command_runtime, request.commandBufferCount, command_buffers);
-        mark_submission_query_events(slot, 0u);
-        clear_submission_slot(slot);
-        goto done;
-    }
-    commit_image_layout_updates(pending_layout_images, pending_layouts,
-                                pending_image_ownership,
-                                pending_layout_count);
-    commit_buffer_ownership_updates(pending_buffer_ownership,
-                                    pending_buffer_ownership_count);
-    if (fence != 0u) {
-        RinVkFenceSlot* fence_value = fence_slot(device, (RinVkFence)fence);
-        __atomic_store_n(&fence_value->pending, 1u, __ATOMIC_RELEASE);
-    }
-    for (index = 0u; index < request.signalSemaphoreCount; ++index) {
-        RinVkSemaphoreSlot* semaphore =
-            semaphore_slot(device, signal_semaphores[index]);
-        __atomic_store_n(&semaphore->pending, 1u, __ATOMIC_RELEASE);
-        if (semaphore->type == RIN_VK_SEMAPHORE_TYPE_TIMELINE)
-            semaphore->pending_value = signal_values[index];
-    }
-    mark_submission_query_events(slot, 1u);
-    result = RIN_VK_SUCCESS;
 
 done:
     if (sync_locked) sync_unlock();
