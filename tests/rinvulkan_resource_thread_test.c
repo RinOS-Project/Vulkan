@@ -198,7 +198,7 @@ static void make_profile(RinGpuVulkanPhysicalDeviceV2* profile) {
     profile->queue_families[0].flags = RIN_GPU_VK_QUEUE_GRAPHICS |
                                        RIN_GPU_VK_QUEUE_COMPUTE |
                                        RIN_GPU_VK_QUEUE_TRANSFER;
-    profile->queue_families[0].queue_count = 1u;
+    profile->queue_families[0].queue_count = 2u;
     profile->queue_families[0].timestamp_valid_bits = 64u;
     profile->memory_heap_count = 2u;
     profile->memory_heaps[0].size_bytes = UINT64_C(512) * 1024u * 1024u;
@@ -233,11 +233,28 @@ int main(void) {
     RinVkInstanceCreateInfo instance_create;
     RinVkDeviceQueueCreateInfo queue_create;
     RinVkDeviceCreateInfo device_create;
+    RinVkPhysicalDeviceSynchronization2Features synchronization2_features;
     RinVkBufferCreateInfo buffer_create;
     RinVkInstance instance = NULL;
     RinVkPhysicalDevice physical = NULL;
     RinVkDevice device = NULL;
-    float priority = 1.0f;
+    RinVkQueue queue = NULL;
+    RinVkQueue second_queue = NULL;
+    RinVkFence fence = 0u;
+    RinVkFence second_fence = 0u;
+    RinVkSemaphore semaphore = 0u;
+    RinVkSemaphore deferred_semaphore = 0u;
+    RinVkFenceCreateInfo fence_create;
+    RinVkSemaphoreCreateInfo semaphore_create;
+    RinVkSubmitInfo empty_submit;
+    RinVkSubmitInfo deferred_wait;
+    RinVkSubmitInfo deferred_signal;
+    RinVkSubmitInfo2 empty_submit2;
+    RinVkSemaphoreSubmitInfo semaphore_submit_info;
+    const char* synchronization2_extension =
+        RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION;
+    uint32_t wait_stage = UINT32_C(0x00001000);
+    float priorities[2] = {1.0f, 1.0f};
     uint32_t physical_count = 1u;
     int runtime_initialized = 0;
     int runtime_bound = 0;
@@ -273,14 +290,97 @@ int main(void) {
 
     memset(&queue_create, 0, sizeof(queue_create));
     queue_create.sType = RIN_VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-    queue_create.queueCount = 1u;
-    queue_create.pQueuePriorities = &priority;
+    queue_create.queueCount = 2u;
+    queue_create.pQueuePriorities = priorities;
     memset(&device_create, 0, sizeof(device_create));
     device_create.sType = RIN_VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    memset(&synchronization2_features, 0, sizeof(synchronization2_features));
+    synchronization2_features.sType =
+        RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
+    synchronization2_features.synchronization2 = 1u;
+    device_create.pNext = &synchronization2_features;
     device_create.queueCreateInfoCount = 1u;
     device_create.pQueueCreateInfos = &queue_create;
+    device_create.enabledExtensionCount = 1u;
+    device_create.ppEnabledExtensionNames = &synchronization2_extension;
     CHECK(vkCreateDevice(physical, &device_create, NULL, &device) ==
           RIN_VK_SUCCESS);
+    vkGetDeviceQueue(device, 0u, 0u, &queue);
+    vkGetDeviceQueue(device, 0u, 1u, &second_queue);
+    CHECK(queue != NULL && second_queue != NULL);
+
+    memset(&fence_create, 0, sizeof(fence_create));
+    fence_create.sType = RIN_VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    memset(&semaphore_create, 0, sizeof(semaphore_create));
+    semaphore_create.sType = RIN_VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    CHECK(vkCreateFence(device, &fence_create, NULL, &fence) ==
+          RIN_VK_SUCCESS);
+    CHECK(vkQueueSubmit(queue, 0u, NULL, fence) == RIN_VK_SUCCESS);
+    CHECK(vkGetFenceStatus(device, fence) == RIN_VK_SUCCESS);
+    CHECK(vkResetFences(device, 1u, &fence) == RIN_VK_SUCCESS);
+    CHECK(vkQueueSubmit2(queue, 0u, NULL, fence) == RIN_VK_SUCCESS);
+    CHECK(vkGetFenceStatus(device, fence) == RIN_VK_SUCCESS);
+    CHECK(vkResetFences(device, 1u, &fence) == RIN_VK_SUCCESS);
+
+    CHECK(vkCreateFence(device, &fence_create, NULL, &second_fence) ==
+          RIN_VK_SUCCESS);
+    CHECK(vkCreateSemaphore(device, &semaphore_create, NULL,
+                            &deferred_semaphore) == RIN_VK_SUCCESS);
+    memset(&deferred_wait, 0, sizeof(deferred_wait));
+    deferred_wait.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    deferred_wait.waitSemaphoreCount = 1u;
+    deferred_wait.pWaitSemaphores = &deferred_semaphore;
+    deferred_wait.pWaitDstStageMask = &wait_stage;
+    CHECK(vkQueueSubmit(queue, 1u, &deferred_wait, fence) == RIN_VK_SUCCESS);
+    CHECK(vkGetFenceStatus(device, fence) == RIN_VK_NOT_READY);
+    memset(&deferred_signal, 0, sizeof(deferred_signal));
+    deferred_signal.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    deferred_signal.signalSemaphoreCount = 1u;
+    deferred_signal.pSignalSemaphores = &deferred_semaphore;
+    CHECK(vkQueueSubmit(second_queue, 1u, &deferred_signal, second_fence) ==
+          RIN_VK_SUCCESS);
+    CHECK(vkGetFenceStatus(device, second_fence) == RIN_VK_SUCCESS);
+    CHECK(vkGetFenceStatus(device, fence) == RIN_VK_SUCCESS);
+    CHECK(vkResetFences(device, 1u, &fence) == RIN_VK_SUCCESS);
+
+    CHECK(vkCreateSemaphore(device, &semaphore_create, NULL, &semaphore) ==
+          RIN_VK_SUCCESS);
+    memset(&empty_submit, 0, sizeof(empty_submit));
+    empty_submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    empty_submit.signalSemaphoreCount = 1u;
+    empty_submit.pSignalSemaphores = &semaphore;
+    CHECK(vkQueueSubmit(queue, 1u, &empty_submit, fence) == RIN_VK_SUCCESS);
+    CHECK(vkGetFenceStatus(device, fence) == RIN_VK_SUCCESS);
+    CHECK(vkResetFences(device, 1u, &fence) == RIN_VK_SUCCESS);
+
+    memset(&empty_submit, 0, sizeof(empty_submit));
+    empty_submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    empty_submit.waitSemaphoreCount = 1u;
+    empty_submit.pWaitSemaphores = &semaphore;
+    empty_submit.pWaitDstStageMask = &wait_stage;
+    CHECK(vkQueueSubmit(queue, 1u, &empty_submit, fence) == RIN_VK_SUCCESS);
+    CHECK(vkGetFenceStatus(device, fence) == RIN_VK_SUCCESS);
+    CHECK(vkResetFences(device, 1u, &fence) == RIN_VK_SUCCESS);
+
+    memset(&semaphore_submit_info, 0, sizeof(semaphore_submit_info));
+    semaphore_submit_info.sType =
+        RIN_VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    semaphore_submit_info.semaphore = semaphore;
+    semaphore_submit_info.stageMask = 0u;
+    memset(&empty_submit2, 0, sizeof(empty_submit2));
+    empty_submit2.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    empty_submit2.signalSemaphoreInfoCount = 1u;
+    empty_submit2.pSignalSemaphoreInfos = &semaphore_submit_info;
+    CHECK(vkQueueSubmit2(queue, 1u, &empty_submit2, fence) == RIN_VK_SUCCESS);
+    CHECK(vkGetFenceStatus(device, fence) == RIN_VK_SUCCESS);
+    CHECK(vkResetFences(device, 1u, &fence) == RIN_VK_SUCCESS);
+
+    empty_submit2.signalSemaphoreInfoCount = 0u;
+    empty_submit2.pSignalSemaphoreInfos = NULL;
+    empty_submit2.waitSemaphoreInfoCount = 1u;
+    empty_submit2.pWaitSemaphoreInfos = &semaphore_submit_info;
+    CHECK(vkQueueSubmit2(queue, 1u, &empty_submit2, fence) == RIN_VK_SUCCESS);
+    CHECK(vkGetFenceStatus(device, fence) == RIN_VK_SUCCESS);
 
     memset(&buffer_create, 0, sizeof(buffer_create));
     buffer_create.sType = RIN_VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -292,6 +392,11 @@ int main(void) {
     result = 0;
 
 cleanup:
+    if (deferred_semaphore)
+        vkDestroySemaphore(device, deferred_semaphore, NULL);
+    if (second_fence) vkDestroyFence(device, second_fence, NULL);
+    if (semaphore) vkDestroySemaphore(device, semaphore, NULL);
+    if (fence) vkDestroyFence(device, fence, NULL);
     if (device) vkDestroyDevice(device, NULL);
     if (instance) vkDestroyInstance(instance, NULL);
     if (runtime_bound)

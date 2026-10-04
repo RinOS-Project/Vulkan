@@ -1613,6 +1613,25 @@ static int queue_has_earlier_waiting_submission(
     return 0;
 }
 
+static int queue_has_earlier_uncompleted_submission(
+        const RinVkSubmissionSlot* candidate) {
+    uint32_t index;
+    if (!candidate || !candidate->owner) return 0;
+    for (index = 0u; index < RIN_VK_MAX_SUBMISSIONS; ++index) {
+        const RinVkSubmissionSlot* earlier = &g_submissions[index];
+        const uint32_t state = __atomic_load_n(&earlier->state,
+                                                __ATOMIC_ACQUIRE);
+        if ((state == RIN_VK_SUBMISSION_ACTIVE ||
+             state == RIN_VK_SUBMISSION_RESERVED ||
+             state == RIN_VK_SUBMISSION_WAITING) &&
+            earlier != candidate && earlier->owner == candidate->owner &&
+            earlier->queue_id == candidate->queue_id &&
+            earlier->order < candidate->order)
+            return 1;
+    }
+    return 0;
+}
+
 static void release_submission_wait_reservations(
         RinVkSubmissionSlot* slot) {
     uint32_t index;
@@ -1684,6 +1703,7 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
 }
 
 static void abort_device_submissions(struct RinVkDevice_T* device);
+static void complete_submission_sync(const RinVkSubmissionSlot* submission);
 
 static RinVkResult dispatch_ready_waiting_submissions(
         struct RinVkDevice_T* device) {
@@ -1694,14 +1714,23 @@ static RinVkResult dispatch_ready_waiting_submissions(
             RinVkSubmissionSlot* slot = &g_submissions[index];
             if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) !=
                     RIN_VK_SUBMISSION_WAITING ||
-                slot->owner != device ||
-                queue_has_earlier_waiting_submission(slot) ||
-                !submission_waits_satisfied(slot))
+                slot->owner != device || !submission_waits_satisfied(slot))
                 continue;
+            if (slot->command_buffer_count == 0u) {
+                if (queue_has_earlier_uncompleted_submission(slot)) continue;
+            } else if (queue_has_earlier_waiting_submission(slot)) {
+                continue;
+            }
             if (!candidate || slot->order < candidate->order)
                 candidate = slot;
         }
         if (!candidate) return RIN_VK_SUCCESS;
+        if (candidate->command_buffer_count == 0u) {
+            consume_submission_waits(candidate);
+            complete_submission_sync(candidate);
+            clear_submission_slot(candidate);
+            continue;
+        }
         {
             RinVkResult result = submit_slot_to_product(candidate);
             if (result == RIN_VK_NOT_READY)
@@ -5913,11 +5942,11 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         goto done;
     }
     if (submit_count == 0u) {
-        result = fence == 0u ? RIN_VK_SUCCESS
-                             : RIN_VK_ERROR_INITIALIZATION_FAILED;
-        goto done;
+        memset(&request, 0, sizeof(request));
+        request.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    } else {
+        request = submits[0];
     }
-    request = submits[0];
     if (request.sType != RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO ||
         request.waitSemaphoreCount > RIN_VK_MAX_SUBMIT_SEMAPHORES ||
         request.signalSemaphoreCount > RIN_VK_MAX_SUBMIT_SEMAPHORES ||
@@ -5927,9 +5956,8 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
          (request.pWaitSemaphores || request.pWaitDstStageMask)) ||
         (request.signalSemaphoreCount != 0u && !request.pSignalSemaphores) ||
         (request.signalSemaphoreCount == 0u && request.pSignalSemaphores) ||
-        request.commandBufferCount == 0u ||
         request.commandBufferCount > RIN_VK_MAX_SUBMIT_COMMAND_BUFFERS ||
-        !request.pCommandBuffers) {
+        (request.commandBufferCount != 0u && !request.pCommandBuffers)) {
         result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
         goto done;
     }
@@ -6045,6 +6073,65 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
             result = RIN_VK_ERROR_INITIALIZATION_FAILED;
             goto done;
         }
+    }
+    if (request.commandBufferCount == 0u) {
+        if (request.waitSemaphoreCount == 0u &&
+            request.signalSemaphoreCount == 0u && fence == 0u) {
+            result = RIN_VK_SUCCESS;
+            goto done;
+        }
+        slot = reserve_submission_slot();
+        if (!slot) {
+            result = RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+            goto done;
+        }
+        slot->owner = device;
+        slot->queue_id = queue_slot_value->queue_index;
+        if (device->next_submission_order == 0u ||
+            device->next_submission_order == UINT64_MAX) {
+            clear_submission_slot(slot);
+            result = RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+            goto done;
+        }
+        slot->order = device->next_submission_order++;
+        slot->fence = (RinVkFence)fence;
+        slot->wait_semaphore_count = request.waitSemaphoreCount;
+        slot->signal_semaphore_count = request.signalSemaphoreCount;
+        memcpy(slot->wait_semaphores, wait_semaphores,
+               sizeof(RinVkSemaphore) * request.waitSemaphoreCount);
+        memcpy(slot->wait_semaphore_values, wait_values,
+               sizeof(uint64_t) * request.waitSemaphoreCount);
+        memcpy(slot->signal_semaphores, signal_semaphores,
+               sizeof(RinVkSemaphore) * request.signalSemaphoreCount);
+        memcpy(slot->signal_semaphore_values, signal_values,
+               sizeof(uint64_t) * request.signalSemaphoreCount);
+        for (index = 0u; index < request.waitSemaphoreCount; ++index) {
+            RinVkSemaphoreSlot* semaphore =
+                semaphore_slot(device, wait_semaphores[index]);
+            if (semaphore->type == RIN_VK_SEMAPHORE_TYPE_BINARY) {
+                const uint32_t waiter_count = __atomic_load_n(
+                    &semaphore->waiter_count, __ATOMIC_ACQUIRE);
+                __atomic_store_n(&semaphore->waiter_count, waiter_count + 1u,
+                                 __ATOMIC_RELEASE);
+                slot->waits_reserved = 1u;
+            }
+        }
+        if (fence != 0u) {
+            RinVkFenceSlot* fence_value =
+                fence_slot(device, (RinVkFence)fence);
+            __atomic_store_n(&fence_value->pending, 1u, __ATOMIC_RELEASE);
+        }
+        for (index = 0u; index < request.signalSemaphoreCount; ++index) {
+            RinVkSemaphoreSlot* semaphore =
+                semaphore_slot(device, signal_semaphores[index]);
+            __atomic_store_n(&semaphore->pending, 1u, __ATOMIC_RELEASE);
+            if (semaphore->type == RIN_VK_SEMAPHORE_TYPE_TIMELINE)
+                semaphore->pending_value = signal_values[index];
+        }
+        __atomic_store_n(&slot->state, RIN_VK_SUBMISSION_WAITING,
+                         __ATOMIC_RELEASE);
+        result = dispatch_ready_waiting_submissions(device);
+        goto done;
     }
     for (index = 0u; index < request.commandBufferCount; ++index)
         command_buffers[index] =
@@ -6246,13 +6333,12 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit2(
     if (submit_count != 0u && !submits)
         return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
     if (submit_count == 0u)
-        return fence == 0u ? RIN_VK_SUCCESS : RIN_VK_ERROR_INITIALIZATION_FAILED;
+        return vkQueueSubmit(queue, 0u, NULL, fence);
     request = &submits[0];
     if (request->sType != RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO_2 ||
         request->pNext || request->flags != 0u ||
         request->waitSemaphoreInfoCount > RIN_VK_MAX_SUBMIT_SEMAPHORES ||
         request->signalSemaphoreInfoCount > RIN_VK_MAX_SUBMIT_SEMAPHORES ||
-        request->commandBufferInfoCount == 0u ||
         request->commandBufferInfoCount > RIN_VK_MAX_SUBMIT_COMMAND_BUFFERS ||
         (request->waitSemaphoreInfoCount != 0u &&
          !request->pWaitSemaphoreInfos) ||
@@ -6262,7 +6348,8 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit2(
          !request->pSignalSemaphoreInfos) ||
         (request->signalSemaphoreInfoCount == 0u &&
          request->pSignalSemaphoreInfos) ||
-        !request->pCommandBufferInfos)
+        (request->commandBufferInfoCount != 0u &&
+         !request->pCommandBufferInfos))
         return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
 
     memset(wait_infos, 0, sizeof(wait_infos));
