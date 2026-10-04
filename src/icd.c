@@ -6030,10 +6030,7 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         request.signalSemaphoreCount > RIN_VK_MAX_SUBMIT_SEMAPHORES ||
         (request.waitSemaphoreCount != 0u &&
          (!request.pWaitSemaphores || !request.pWaitDstStageMask)) ||
-        (request.waitSemaphoreCount == 0u &&
-         (request.pWaitSemaphores || request.pWaitDstStageMask)) ||
         (request.signalSemaphoreCount != 0u && !request.pSignalSemaphores) ||
-        (request.signalSemaphoreCount == 0u && request.pSignalSemaphores) ||
         request.commandBufferCount > RIN_VK_MAX_SUBMIT_COMMAND_BUFFERS ||
         (request.commandBufferCount != 0u && !request.pCommandBuffers)) {
         result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
@@ -6429,12 +6426,8 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit2(
         request->commandBufferInfoCount > RIN_VK_MAX_SUBMIT_COMMAND_BUFFERS ||
         (request->waitSemaphoreInfoCount != 0u &&
          !request->pWaitSemaphoreInfos) ||
-        (request->waitSemaphoreInfoCount == 0u &&
-         request->pWaitSemaphoreInfos) ||
         (request->signalSemaphoreInfoCount != 0u &&
          !request->pSignalSemaphoreInfos) ||
-        (request->signalSemaphoreInfoCount == 0u &&
-         request->pSignalSemaphoreInfos) ||
         (request->commandBufferInfoCount != 0u &&
          !request->pCommandBufferInfos))
         return RIN_VK_ERROR_FEATURE_NOT_PRESENT;

@@ -260,6 +260,8 @@ int main(void) {
     RinVkSubmitInfo timeline_signal_submit;
     RinVkSubmitInfo2 empty_submit2;
     RinVkSemaphoreSubmitInfo semaphore_submit_info;
+    RinVkCommandBufferSubmitInfo ignored_command_info;
+    RinVkCommandBuffer ignored_command_buffer = NULL;
     const char* synchronization2_extension =
         RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION;
     const char* timeline_extension = RIN_VK_KHR_TIMELINE_SEMAPHORE_EXTENSION;
@@ -402,6 +404,28 @@ int main(void) {
     empty_submit2.pSignalSemaphoreInfos = NULL;
     empty_submit2.waitSemaphoreInfoCount = 1u;
     empty_submit2.pWaitSemaphoreInfos = &semaphore_submit_info;
+    CHECK(vkQueueSubmit2(queue, 1u, &empty_submit2, fence) == RIN_VK_SUCCESS);
+    CHECK(vkGetFenceStatus(device, fence) == RIN_VK_SUCCESS);
+
+    CHECK(vkResetFences(device, 1u, &fence) == RIN_VK_SUCCESS);
+    memset(&ignored_command_info, 0, sizeof(ignored_command_info));
+    ignored_command_info.sType =
+        RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+    memset(&empty_submit, 0, sizeof(empty_submit));
+    empty_submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    empty_submit.pWaitSemaphores = &semaphore;
+    empty_submit.pWaitDstStageMask = &wait_stage;
+    empty_submit.pCommandBuffers = &ignored_command_buffer;
+    empty_submit.pSignalSemaphores = &semaphore;
+    CHECK(vkQueueSubmit(queue, 1u, &empty_submit, fence) == RIN_VK_SUCCESS);
+    CHECK(vkGetFenceStatus(device, fence) == RIN_VK_SUCCESS);
+    CHECK(vkResetFences(device, 1u, &fence) == RIN_VK_SUCCESS);
+
+    memset(&empty_submit2, 0, sizeof(empty_submit2));
+    empty_submit2.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    empty_submit2.pWaitSemaphoreInfos = &semaphore_submit_info;
+    empty_submit2.pCommandBufferInfos = &ignored_command_info;
+    empty_submit2.pSignalSemaphoreInfos = &semaphore_submit_info;
     CHECK(vkQueueSubmit2(queue, 1u, &empty_submit2, fence) == RIN_VK_SUCCESS);
     CHECK(vkGetFenceStatus(device, fence) == RIN_VK_SUCCESS);
 
