@@ -3,6 +3,7 @@
 #include "../src/atomic_compat.h"
 
 #include <rinvulkan/icd.h>
+#include <rinvulkan/software_platform.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -22,6 +23,22 @@
 
 #define RESOURCE_THREAD_COUNT 4u
 #define RESOURCE_THREAD_ITERATIONS 2000u
+
+static RinVulkanProductSubmitFn g_software_submit;
+static uint32_t g_busy_submit_responses;
+static uint32_t g_submit_call_count;
+
+static int submit_busy_once(void* context,
+                            const RinVulkanProductSubmissionV1* submission,
+                            const RinVulkanProductResourceV1* resources,
+                            uint32_t resource_count) {
+    ++g_submit_call_count;
+    if (g_busy_submit_responses != 0u) {
+        --g_busy_submit_responses;
+        return RIN_VULKAN_PRODUCT_BUSY;
+    }
+    return g_software_submit(context, submission, resources, resource_count);
+}
 
 typedef struct ResourceThreadState {
     RinVkDevice device;
@@ -266,6 +283,7 @@ static void make_profile(RinGpuVulkanPhysicalDeviceV2* profile) {
 int main(void) {
     RinGpuVulkanPhysicalDeviceV2 profile;
     RinGpuVulkanRuntimeV1 runtime;
+    RinGpuVulkanSoftwarePlatformV1 software_platform;
     RinVkApplicationInfo application;
     RinVkInstanceCreateInfo instance_create;
     RinVkDeviceQueueCreateInfo queue_create;
@@ -297,9 +315,15 @@ int main(void) {
     RinVkSubmitInfo timeline_wait_submit;
     RinVkSubmitInfo timeline_signal_submit;
     RinVkSubmitInfo2 empty_submit2;
+    RinVkSubmitInfo busy_product_submit;
     RinVkSemaphoreSubmitInfo semaphore_submit_info;
     RinVkCommandBufferSubmitInfo ignored_command_info;
     RinVkCommandBuffer ignored_command_buffer = NULL;
+    RinVkCommandPool command_pool = 0u;
+    RinVkCommandPoolCreateInfo command_pool_create;
+    RinVkCommandBufferAllocateInfo command_buffer_allocate;
+    RinVkCommandBuffer command_buffer = NULL;
+    RinVkCommandBufferBeginInfo command_buffer_begin;
     const char* synchronization2_extension =
         RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION;
     const char* timeline_extension = RIN_VK_KHR_TIMELINE_SEMAPHORE_EXTENSION;
@@ -314,6 +338,8 @@ int main(void) {
     uint32_t physical_count = 1u;
     int runtime_initialized = 0;
     int runtime_bound = 0;
+    int software_platform_initialized = 0;
+    int product_platform_bound = 0;
     int result = 1;
 
 #define CHECK(condition) do { \
@@ -331,6 +357,17 @@ int main(void) {
     runtime_initialized = 1;
     CHECK(rin_gpu_vulkan_icd_bind_runtime(&runtime) == RIN_GPU_VULKAN_OK);
     runtime_bound = 1;
+    memset(&software_platform, 0, sizeof(software_platform));
+    CHECK(rin_gpu_vulkan_software_platform_init(
+              &software_platform, profile.iommu_domain_cookie,
+              profile.device_epoch, profile.queue_families[0].queue_count,
+              UINT64_C(1024) * 1024u) == RIN_VULKAN_PRODUCT_OK);
+    software_platform_initialized = 1;
+    g_software_submit = software_platform.platform.submit;
+    software_platform.platform.submit = submit_busy_once;
+    CHECK(rin_gpu_vulkan_icd_bind_product_platform(
+              &software_platform.platform) == RIN_GPU_VULKAN_OK);
+    product_platform_bound = 1;
 
     memset(&application, 0, sizeof(application));
     application.sType = RIN_VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -378,6 +415,44 @@ int main(void) {
     semaphore_create.sType = RIN_VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     CHECK(vkCreateFence(device, &fence_create, NULL, &fence) ==
           RIN_VK_SUCCESS);
+    memset(&command_pool_create, 0, sizeof(command_pool_create));
+    command_pool_create.sType =
+        RIN_VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    command_pool_create.queueFamilyIndex = 0u;
+    CHECK(vkCreateCommandPool(device, &command_pool_create, NULL,
+                              &command_pool) == RIN_VK_SUCCESS);
+    memset(&command_buffer_allocate, 0, sizeof(command_buffer_allocate));
+    command_buffer_allocate.sType =
+        RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    command_buffer_allocate.commandPool = command_pool;
+    command_buffer_allocate.level = RIN_VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    command_buffer_allocate.commandBufferCount = 1u;
+    CHECK(vkAllocateCommandBuffers(device, &command_buffer_allocate,
+                                   &command_buffer) == RIN_VK_SUCCESS);
+    memset(&command_buffer_begin, 0, sizeof(command_buffer_begin));
+    command_buffer_begin.sType =
+        RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    CHECK(vkBeginCommandBuffer(command_buffer, &command_buffer_begin) ==
+          RIN_VK_SUCCESS);
+    CHECK(vkEndCommandBuffer(command_buffer) == RIN_VK_SUCCESS);
+    memset(&busy_product_submit, 0, sizeof(busy_product_submit));
+    busy_product_submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    busy_product_submit.commandBufferCount = 1u;
+    busy_product_submit.pCommandBuffers = &command_buffer;
+    g_busy_submit_responses = 1u;
+    g_submit_call_count = 0u;
+    CHECK(vkQueueSubmit(queue, 1u, &busy_product_submit, fence) ==
+          RIN_VK_SUCCESS);
+    CHECK(g_busy_submit_responses == 0u && g_submit_call_count == 1u);
+    CHECK(vkGetFenceStatus(device, fence) == RIN_VK_SUCCESS);
+    CHECK(g_submit_call_count == 2u);
+    CHECK(software_platform.completed_values[0] != 0u);
+    vkDestroyCommandPool(device, command_pool, NULL);
+    command_pool = 0u;
+    command_buffer = NULL;
+    software_platform.platform.submit = g_software_submit;
+    g_software_submit = NULL;
+    CHECK(vkResetFences(device, 1u, &fence) == RIN_VK_SUCCESS);
     CHECK(vkQueueSubmit(queue, 0u, NULL, fence) == RIN_VK_SUCCESS);
     CHECK(vkGetFenceStatus(device, fence) == RIN_VK_SUCCESS);
     CHECK(vkResetFences(device, 1u, &fence) == RIN_VK_SUCCESS);
@@ -569,6 +644,12 @@ int main(void) {
                           RIN_VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     buffer_create.sharingMode = RIN_VK_SHARING_MODE_EXCLUSIVE;
     CHECK(run_resource_stress(device, &buffer_create));
+    CHECK(rin_gpu_vulkan_icd_unbind_product_platform(
+              &software_platform.platform) == RIN_GPU_VULKAN_OK);
+    product_platform_bound = 0;
+    CHECK(rin_gpu_vulkan_software_platform_shutdown(&software_platform) ==
+          RIN_VULKAN_PRODUCT_OK);
+    software_platform_initialized = 0;
     result = 0;
 
 cleanup:
@@ -582,6 +663,11 @@ cleanup:
     if (fence) vkDestroyFence(device, fence, NULL);
     if (device) vkDestroyDevice(device, NULL);
     if (instance) vkDestroyInstance(instance, NULL);
+    if (product_platform_bound)
+        (void)rin_gpu_vulkan_icd_unbind_product_platform(
+            &software_platform.platform);
+    if (software_platform_initialized)
+        (void)rin_gpu_vulkan_software_platform_shutdown(&software_platform);
     if (runtime_bound)
         (void)rin_gpu_vulkan_icd_unbind_runtime(&runtime);
     if (runtime_initialized)
