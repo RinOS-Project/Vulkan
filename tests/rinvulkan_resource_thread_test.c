@@ -439,13 +439,15 @@ int main(void) {
     busy_product_submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
     busy_product_submit.commandBufferCount = 1u;
     busy_product_submit.pCommandBuffers = &command_buffer;
-    g_busy_submit_responses = 1u;
+    g_busy_submit_responses = 2u;
     g_submit_call_count = 0u;
     CHECK(vkQueueSubmit(queue, 1u, &busy_product_submit, fence) ==
           RIN_VK_SUCCESS);
-    CHECK(g_busy_submit_responses == 0u && g_submit_call_count == 1u);
+    CHECK(g_busy_submit_responses == 1u && g_submit_call_count == 1u);
+    CHECK(vkGetFenceStatus(device, fence) == RIN_VK_NOT_READY);
+    CHECK(g_busy_submit_responses == 0u && g_submit_call_count == 2u);
     CHECK(vkGetFenceStatus(device, fence) == RIN_VK_SUCCESS);
-    CHECK(g_submit_call_count == 2u);
+    CHECK(g_submit_call_count == 3u);
     CHECK(software_platform.completed_values[0] != 0u);
     vkDestroyCommandPool(device, command_pool, NULL);
     command_pool = 0u;
