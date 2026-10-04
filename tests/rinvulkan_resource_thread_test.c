@@ -49,6 +49,42 @@ static void yield_thread(void) {
 #endif
 }
 
+static int sync_objects_round_trip(RinVkDevice device) {
+    RinVkFenceCreateInfo fence_create;
+    RinVkSemaphoreCreateInfo semaphore_create;
+    RinVkSemaphoreTypeCreateInfo timeline_type;
+    RinVkFence fence = 0u;
+    RinVkSemaphore semaphore = 0u;
+    uint64_t counter = 0u;
+    int success = 0;
+
+    memset(&fence_create, 0, sizeof(fence_create));
+    fence_create.sType = RIN_VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    memset(&timeline_type, 0, sizeof(timeline_type));
+    timeline_type.sType = RIN_VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+    timeline_type.semaphoreType = RIN_VK_SEMAPHORE_TYPE_TIMELINE;
+    memset(&semaphore_create, 0, sizeof(semaphore_create));
+    semaphore_create.sType = RIN_VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    semaphore_create.pNext = &timeline_type;
+
+    if (vkCreateFence(device, &fence_create, NULL, &fence) != RIN_VK_SUCCESS ||
+        fence == 0u || vkResetFences(device, 1u, &fence) != RIN_VK_SUCCESS ||
+        vkCreateSemaphore(device, &semaphore_create, NULL, &semaphore) !=
+            RIN_VK_SUCCESS ||
+        semaphore == 0u || vkSignalSemaphore(device, semaphore, 1u) !=
+            RIN_VK_SUCCESS ||
+        vkGetSemaphoreCounterValue(device, semaphore, &counter) !=
+            RIN_VK_SUCCESS ||
+        counter != 1u)
+        goto cleanup;
+    success = 1;
+
+cleanup:
+    if (semaphore != 0u) vkDestroySemaphore(device, semaphore, NULL);
+    if (fence != 0u) vkDestroyFence(device, fence, NULL);
+    return success;
+}
+
 static void resource_worker(void* opaque) {
     ResourceThreadState* state = (ResourceThreadState*)opaque;
     uint32_t iteration;
@@ -72,6 +108,7 @@ static void resource_worker(void* opaque) {
             (void)__atomic_store_n(state->failure_flag, 1u, __ATOMIC_RELEASE);
             break;
         }
+        if (!sync_objects_round_trip(state->device)) state->failed = 1;
 
         __atomic_store_n(&state->live_handles[state->thread_index], buffer,
                          __ATOMIC_RELEASE);
