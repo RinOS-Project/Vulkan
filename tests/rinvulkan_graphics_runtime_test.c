@@ -448,6 +448,7 @@ int main(void)
     RinGpuHandle fence = 0u;
     uint8_t presented[64u] = {0};
     uint8_t readback[64u] = {0};
+    uint32_t compute_result = 0u;
 
     make_surface(&surface, presented);
     CHECK(rin_gpu_vulkan_graphics_runtime_init(
@@ -839,6 +840,10 @@ int main(void)
                                                 3u) == RIN_GPU_OK);
     CHECK(rin_gpu_vulkan_graphics_runtime_wait_fence(
               &runtime, fence, 3u, RIN_GPU_TIMEOUT_INFINITE) == RIN_GPU_OK);
+    CHECK(ringpu_runtime_readback_buffer(runtime.runtime, buffer, 0u,
+                                         &compute_result,
+                                         sizeof(compute_result)) == RIN_GPU_OK);
+    CHECK(compute_result == 42u);
     CHECK(rin_gpu_vulkan_graphics_runtime_shutdown(&runtime) == RIN_GPU_OK);
     return 0;
 }
