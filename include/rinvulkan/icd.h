@@ -49,6 +49,7 @@
 #define RIN_VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO 39
 #define RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO 40
 #define RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO 42
+#define RIN_VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO 16
 #define RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES 50
 #define RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES 51
 #define RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES 52
@@ -185,6 +186,7 @@ typedef uint64_t RinVkDescriptorPool;
 typedef uint64_t RinVkDescriptorSet;
 typedef uint64_t RinVkPipelineLayout;
 typedef uint64_t RinVkPipelineCache;
+typedef uint64_t RinVkShaderModule;
 typedef uint64_t RinVkQueryPool;
 typedef uint64_t RinVkEvent;
 
@@ -1029,6 +1031,14 @@ typedef struct RinVkPipelineCacheCreateInfo {
     const void* pInitialData;
 } RinVkPipelineCacheCreateInfo;
 
+typedef struct RinVkShaderModuleCreateInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    size_t codeSize;
+    const uint32_t* pCode;
+} RinVkShaderModuleCreateInfo;
+
 typedef struct RinVkDescriptorBufferInfo {
     RinVkBuffer buffer;
     uint64_t offset;
@@ -1198,6 +1208,13 @@ typedef struct RinVkSamplerCreateInfo {
 #endif
 
 #if defined(__cplusplus)
+#if UINTPTR_MAX == UINT64_MAX
+static_assert(sizeof(RinVkShaderModuleCreateInfo) == 40u,
+              "Vulkan shader-module create info ABI drift");
+#else
+static_assert(sizeof(RinVkShaderModuleCreateInfo) == 20u,
+              "Vulkan shader-module create info ABI drift");
+#endif
 static_assert(sizeof(RinVkApplicationInfo) == RIN_VK_APPLICATION_INFO_SIZE,
               "Vulkan application info ABI drift");
 static_assert(sizeof(RinVkInstanceCreateInfo) ==
@@ -1339,6 +1356,13 @@ static_assert(sizeof(RinVkCommandPool) == 8u,
 static_assert(sizeof(RinVkCommandBuffer) == sizeof(void*),
               "Vulkan command-buffer handle ABI drift");
 #else
+#if UINTPTR_MAX == UINT64_MAX
+_Static_assert(sizeof(RinVkShaderModuleCreateInfo) == 40u,
+               "Vulkan shader-module create info ABI drift");
+#else
+_Static_assert(sizeof(RinVkShaderModuleCreateInfo) == 20u,
+               "Vulkan shader-module create info ABI drift");
+#endif
 _Static_assert(sizeof(RinVkApplicationInfo) == RIN_VK_APPLICATION_INFO_SIZE,
                "Vulkan application info ABI drift");
 _Static_assert(sizeof(RinVkInstanceCreateInfo) ==
@@ -1753,6 +1777,14 @@ RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkMergePipelineCaches(RinVkDevice device, RinVkPipelineCache dst_cache,
                       uint32_t src_cache_count,
                       const RinVkPipelineCache* src_caches);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkCreateShaderModule(RinVkDevice device,
+                     const RinVkShaderModuleCreateInfo* create_info,
+                     const void* allocator,
+                     RinVkShaderModule* shader_module_out);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkDestroyShaderModule(RinVkDevice device, RinVkShaderModule shader_module,
+                      const void* allocator);
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkCmdBindDescriptorSets(RinVkCommandBuffer command_buffer,
                          uint32_t pipeline_bind_point,

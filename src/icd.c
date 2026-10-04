@@ -4,6 +4,7 @@
 #include <rinvulkan/command_runtime.h>
 #include <rinvulkan/descriptor_runtime.h>
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "atomic_compat.h"
@@ -41,6 +42,7 @@
 #define RIN_VK_MAX_SAMPLERS 128u
 #define RIN_VK_MAX_PIPELINE_LAYOUTS 64u
 #define RIN_VK_MAX_PIPELINE_CACHES 32u
+#define RIN_VK_MAX_SHADER_MODULES 64u
 #define RIN_VK_MAX_QUERY_POOLS 32u
 #define RIN_VK_MAX_EVENTS 128u
 #define RIN_VK_QUERY_POOL_MAX_QUERIES 64u
@@ -55,6 +57,7 @@
 #define RIN_VK_SAMPLER_TAG UINT64_C(0x5254)
 #define RIN_VK_PIPELINE_LAYOUT_TAG UINT64_C(0x5250)
 #define RIN_VK_PIPELINE_CACHE_TAG UINT64_C(0x5243)
+#define RIN_VK_SHADER_MODULE_TAG UINT64_C(0x5248)
 #define RIN_VK_QUERY_POOL_TAG UINT64_C(0x5251)
 #define RIN_VK_EVENT_TAG UINT64_C(0x5245)
 #define RIN_VK_PIPELINE_CACHE_MAGIC UINT32_C(0x52494e43)
@@ -83,6 +86,8 @@ static void zero_vulkan12_properties(
         RinVkPhysicalDeviceVulkan12Properties* properties);
 static void zero_vulkan13_properties(
         RinVkPhysicalDeviceVulkan13Properties* properties);
+static void sync_lock(void);
+static void sync_unlock(void);
 
 struct RinVkPhysicalDevice_T {
     uintptr_t loader_magic;
@@ -220,6 +225,14 @@ typedef struct RinVkPipelineCacheSlot {
     uint8_t payload[RIN_VK_PIPELINE_CACHE_MAX_PAYLOAD];
 } RinVkPipelineCacheSlot;
 
+typedef struct RinVkShaderModuleSlot {
+    uint32_t state;
+    uint32_t generation;
+    struct RinVkDevice_T* owner;
+    size_t code_size;
+    uint32_t* code;
+} RinVkShaderModuleSlot;
+
 typedef struct RinVkQueryValue {
     uint64_t values[9];
     uint64_t availability;
@@ -332,6 +345,7 @@ static RinVkImageViewSlot g_image_views[RIN_VK_MAX_IMAGE_VIEWS];
 static RinVkSamplerSlot g_samplers[RIN_VK_MAX_SAMPLERS];
 static RinVkPipelineLayoutSlot g_pipeline_layouts[RIN_VK_MAX_PIPELINE_LAYOUTS];
 static RinVkPipelineCacheSlot g_pipeline_caches[RIN_VK_MAX_PIPELINE_CACHES];
+static RinVkShaderModuleSlot g_shader_modules[RIN_VK_MAX_SHADER_MODULES];
 static RinVkQueryPoolSlot g_query_pools[RIN_VK_MAX_QUERY_POOLS];
 static RinVkEventSlot g_events[RIN_VK_MAX_EVENTS];
 static RinVkFenceSlot g_fences[RIN_VK_MAX_FENCES];
@@ -1035,6 +1049,23 @@ static RinVkPipelineCacheSlot* pipeline_cache_slot(
     return slot;
 }
 
+static RinVkShaderModuleSlot* shader_module_slot(
+        RinVkDevice device, RinVkShaderModule handle) {
+    struct RinVkDevice_T* owner = device_slot(device);
+    uint32_t index_field = (uint32_t)(handle & UINT64_C(0xffff));
+    uint32_t generation = (uint32_t)(handle >> 16u);
+    RinVkShaderModuleSlot* slot;
+    if (!owner || (handle >> 48u) != RIN_VK_SHADER_MODULE_TAG ||
+        index_field == 0u || index_field > RIN_VK_MAX_SHADER_MODULES ||
+        generation == 0u)
+        return NULL;
+    slot = &g_shader_modules[index_field - 1u];
+    if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) != 1u ||
+        slot->generation != generation || slot->owner != owner)
+        return NULL;
+    return slot;
+}
+
 static RinVkQueryPoolSlot* query_pool_slot(
         RinVkDevice device, RinVkQueryPool handle) {
     struct RinVkDevice_T* owner = device_slot(device);
@@ -1317,6 +1348,32 @@ static RinVkPipelineCacheSlot* reserve_pipeline_cache_slot(
     uint32_t index;
     for (index = 0u; index < RIN_VK_MAX_PIPELINE_CACHES; ++index) {
         RinVkPipelineCacheSlot* slot = &g_pipeline_caches[index];
+        uint32_t expected = 0u;
+        uint32_t generation;
+        if (!__atomic_compare_exchange_n(&slot->state, &expected, 2u, 0,
+                                         __ATOMIC_ACQUIRE,
+                                         __ATOMIC_RELAXED))
+            continue;
+        generation = slot->generation;
+        if (generation == UINT32_MAX) {
+            __atomic_store_n(&slot->state, 3u, __ATOMIC_RELEASE);
+            continue;
+        }
+        memset(slot, 0, sizeof(*slot));
+        slot->generation = generation + 1u;
+        slot->owner = owner;
+        __atomic_store_n(&slot->state, 2u, __ATOMIC_RELEASE);
+        *index_out = index;
+        return slot;
+    }
+    return NULL;
+}
+
+static RinVkShaderModuleSlot* reserve_shader_module_slot(
+        struct RinVkDevice_T* owner, uint32_t* index_out) {
+    uint32_t index;
+    for (index = 0u; index < RIN_VK_MAX_SHADER_MODULES; ++index) {
+        RinVkShaderModuleSlot* slot = &g_shader_modules[index];
         uint32_t expected = 0u;
         uint32_t generation;
         if (!__atomic_compare_exchange_n(&slot->state, &expected, 2u, 0,
@@ -1811,6 +1868,28 @@ static void clear_pipeline_cache_slot(RinVkPipelineCacheSlot* slot) {
     slot->reserved = 0u;
     memset(slot->payload, 0, sizeof(slot->payload));
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
+}
+
+static void clear_shader_module_slot(RinVkShaderModuleSlot* slot) {
+    if (!slot) return;
+    free(slot->code);
+    slot->owner = NULL;
+    slot->code_size = 0u;
+    slot->code = NULL;
+    __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
+}
+
+static void cleanup_device_shader_modules(struct RinVkDevice_T* device) {
+    uint32_t index;
+    if (!device) return;
+    sync_lock();
+    for (index = 0u; index < RIN_VK_MAX_SHADER_MODULES; ++index) {
+        RinVkShaderModuleSlot* slot = &g_shader_modules[index];
+        if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) == 1u &&
+            slot->owner == device)
+            clear_shader_module_slot(slot);
+    }
+    sync_unlock();
 }
 
 static void clear_query_pool_slot(RinVkQueryPoolSlot* slot) {
@@ -3527,6 +3606,7 @@ void RIN_VKAPI_CALL vkDestroyDevice(RinVkDevice device,
     (void)rin_gpu_vulkan_command_owner_cleanup(
         &g_command_runtime, (uintptr_t)slot);
     cleanup_device_sync_objects(slot);
+    cleanup_device_shader_modules(slot);
     (void)rin_gpu_vulkan_descriptor_runtime_shutdown(
         &slot->descriptor_runtime);
     __atomic_store_n(&slot->descriptor_validation_error, 0u,
@@ -7384,6 +7464,80 @@ static int pipeline_cache_blob_valid(const struct RinVkDevice_T* device,
     return 1;
 }
 
+static int shader_module_code_valid(
+        const RinVkShaderModuleCreateInfo* info) {
+    const uint32_t* words;
+    size_t word_count;
+    size_t cursor;
+    if (!info || !info->pCode || info->codeSize < 6u * sizeof(uint32_t) ||
+        info->codeSize % sizeof(uint32_t) != 0u ||
+        (uintptr_t)info->pCode % sizeof(uint32_t) != 0u)
+        return 0;
+    words = info->pCode;
+    word_count = info->codeSize / sizeof(uint32_t);
+    if (words[0] != UINT32_C(0x07230203) ||
+        (words[1] & UINT32_C(0xff0000ff)) != 0u ||
+        (words[1] >> 16u) != 1u || ((words[1] >> 8u) & 0xffu) > 6u ||
+        words[3] == 0u || words[4] != 0u)
+        return 0;
+    cursor = 5u;
+    while (cursor < word_count) {
+        size_t instruction_word_count = (size_t)(words[cursor] >> 16u);
+        if (instruction_word_count == 0u ||
+            instruction_word_count > word_count - cursor)
+            return 0;
+        cursor += instruction_word_count;
+    }
+    return cursor == word_count;
+}
+
+RinVkResult RIN_VKAPI_CALL vkCreateShaderModule(
+        RinVkDevice device, const RinVkShaderModuleCreateInfo* info,
+        const void* allocator, RinVkShaderModule* shader_module_out) {
+    struct RinVkDevice_T* owner = device_slot(device);
+    RinVkShaderModuleSlot* module;
+    uint32_t* code_copy;
+    uint32_t index;
+    (void)allocator;
+    if (!shader_module_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    *shader_module_out = 0u;
+    if (!owner || !info ||
+        info->sType != RIN_VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO ||
+        info->pNext || info->flags != 0u || !shader_module_code_valid(info))
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    code_copy = (uint32_t*)malloc(info->codeSize);
+    if (!code_copy) return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+    memcpy(code_copy, info->pCode, info->codeSize);
+    sync_lock();
+    owner = device_slot(device);
+    module = owner ? reserve_shader_module_slot(owner, &index) : NULL;
+    if (!module) {
+        sync_unlock();
+        free(code_copy);
+        return owner ? RIN_VK_ERROR_OUT_OF_HOST_MEMORY
+                     : RIN_VK_ERROR_INITIALIZATION_FAILED;
+    }
+    module->code_size = info->codeSize;
+    module->code = code_copy;
+    __atomic_store_n(&module->state, 1u, __ATOMIC_RELEASE);
+    *shader_module_out = resource_handle(RIN_VK_SHADER_MODULE_TAG, index,
+                                         module->generation);
+    sync_unlock();
+    return RIN_VK_SUCCESS;
+}
+
+void RIN_VKAPI_CALL vkDestroyShaderModule(
+        RinVkDevice device, RinVkShaderModule shader_module,
+        const void* allocator) {
+    RinVkShaderModuleSlot* module;
+    (void)allocator;
+    if (shader_module == 0u) return;
+    sync_lock();
+    module = shader_module_slot(device, shader_module);
+    if (module) clear_shader_module_slot(module);
+    sync_unlock();
+}
+
 RinVkResult RIN_VKAPI_CALL vkCreatePipelineCache(
         RinVkDevice device, const RinVkPipelineCacheCreateInfo* info,
         const void* allocator, RinVkPipelineCache* cache_out) {
@@ -7671,6 +7825,10 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
         return (RinVkVoidFunction)vkGetPipelineCacheData;
     if (name_equal(name, "vkMergePipelineCaches"))
         return (RinVkVoidFunction)vkMergePipelineCaches;
+    if (name_equal(name, "vkCreateShaderModule"))
+        return (RinVkVoidFunction)vkCreateShaderModule;
+    if (name_equal(name, "vkDestroyShaderModule"))
+        return (RinVkVoidFunction)vkDestroyShaderModule;
     return NULL;
 }
 
