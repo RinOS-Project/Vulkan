@@ -243,6 +243,7 @@ int main(void) {
     RinVkQueue second_queue = NULL;
     RinVkFence fence = 0u;
     RinVkFence second_fence = 0u;
+    RinVkFence queue_order_fence = 0u;
     RinVkSemaphore semaphore = 0u;
     RinVkSemaphore deferred_semaphore = 0u;
     RinVkSemaphore timeline_gate = 0u;
@@ -349,6 +350,8 @@ int main(void) {
 
     CHECK(vkCreateFence(device, &fence_create, NULL, &second_fence) ==
           RIN_VK_SUCCESS);
+    CHECK(vkCreateFence(device, &fence_create, NULL, &queue_order_fence) ==
+          RIN_VK_SUCCESS);
     CHECK(vkCreateSemaphore(device, &semaphore_create, NULL,
                             &deferred_semaphore) == RIN_VK_SUCCESS);
     memset(&deferred_wait, 0, sizeof(deferred_wait));
@@ -358,6 +361,9 @@ int main(void) {
     deferred_wait.pWaitDstStageMask = &wait_stage;
     CHECK(vkQueueSubmit(queue, 1u, &deferred_wait, fence) == RIN_VK_SUCCESS);
     CHECK(vkGetFenceStatus(device, fence) == RIN_VK_NOT_READY);
+    CHECK(vkQueueSubmit2(queue, 0u, NULL, queue_order_fence) ==
+          RIN_VK_SUCCESS);
+    CHECK(vkGetFenceStatus(device, queue_order_fence) == RIN_VK_NOT_READY);
     memset(&deferred_signal, 0, sizeof(deferred_signal));
     deferred_signal.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
     deferred_signal.signalSemaphoreCount = 1u;
@@ -366,6 +372,7 @@ int main(void) {
           RIN_VK_SUCCESS);
     CHECK(vkGetFenceStatus(device, second_fence) == RIN_VK_SUCCESS);
     CHECK(vkGetFenceStatus(device, fence) == RIN_VK_SUCCESS);
+    CHECK(vkGetFenceStatus(device, queue_order_fence) == RIN_VK_SUCCESS);
     CHECK(vkResetFences(device, 1u, &fence) == RIN_VK_SUCCESS);
 
     CHECK(vkCreateSemaphore(device, &semaphore_create, NULL, &semaphore) ==
@@ -532,6 +539,7 @@ cleanup:
         vkDestroySemaphore(device, deferred_semaphore, NULL);
     if (timeline_gate) vkDestroySemaphore(device, timeline_gate, NULL);
     if (timeline_output) vkDestroySemaphore(device, timeline_output, NULL);
+    if (queue_order_fence) vkDestroyFence(device, queue_order_fence, NULL);
     if (second_fence) vkDestroyFence(device, second_fence, NULL);
     if (semaphore) vkDestroySemaphore(device, semaphore, NULL);
     if (fence) vkDestroyFence(device, fence, NULL);
