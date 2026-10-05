@@ -91,6 +91,10 @@
 #define RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT 1000128002
 #define RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CALLBACK_DATA_EXT 1000128003
 #define RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT 1000128004
+#define RIN_VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR 1000001000
+#define RIN_VK_STRUCTURE_TYPE_PRESENT_INFO_KHR 1000001001
+#define RIN_VK_STRUCTURE_TYPE_DISPLAY_MODE_CREATE_INFO_KHR 1000002000
+#define RIN_VK_STRUCTURE_TYPE_DISPLAY_SURFACE_CREATE_INFO_KHR 1000002001
 
 #define RIN_VK_SEMAPHORE_TYPE_BINARY 0u
 #define RIN_VK_SEMAPHORE_TYPE_TIMELINE 1u
@@ -101,6 +105,12 @@
     "VK_KHR_synchronization2"
 #define RIN_VK_KHR_DYNAMIC_RENDERING_EXTENSION \
     "VK_KHR_dynamic_rendering"
+#define RIN_VK_KHR_SURFACE_EXTENSION "VK_KHR_surface"
+#define RIN_VK_KHR_DISPLAY_EXTENSION "VK_KHR_display"
+#define RIN_VK_KHR_SWAPCHAIN_EXTENSION "VK_KHR_swapchain"
+#define RIN_VK_KHR_SURFACE_SPEC_VERSION 25u
+#define RIN_VK_KHR_DISPLAY_SPEC_VERSION 23u
+#define RIN_VK_KHR_SWAPCHAIN_SPEC_VERSION 70u
 #define RIN_VK_EXT_DEBUG_UTILS_EXTENSION "VK_EXT_debug_utils"
 #define RIN_VK_DEBUG_UTILS_SPEC_VERSION 2u
 #define RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT 0x00000001u
@@ -238,6 +248,10 @@ typedef struct RinVkCommandBuffer_T* RinVkCommandBuffer;
 typedef uint64_t RinVkBuffer;
 typedef uint64_t RinVkImage;
 typedef uint64_t RinVkImageView;
+typedef uint64_t RinVkSurfaceKHR;
+typedef uint64_t RinVkDisplayKHR;
+typedef uint64_t RinVkDisplayModeKHR;
+typedef uint64_t RinVkSwapchainKHR;
 typedef uint64_t RinVkSampler;
 typedef uint64_t RinVkDeviceMemory;
 typedef uint64_t RinVkFence;
@@ -769,6 +783,123 @@ typedef struct RinVkExtent3D {
     uint32_t depth;
 } RinVkExtent3D;
 
+typedef struct RinVkExtent2D {
+    uint32_t width;
+    uint32_t height;
+} RinVkExtent2D;
+
+typedef struct RinVkOffset2D {
+    int32_t x;
+    int32_t y;
+} RinVkOffset2D;
+
+typedef struct RinVkDisplayPropertiesKHR {
+    RinVkDisplayKHR display;
+    const char* displayName;
+    RinVkExtent2D physicalDimensions;
+    RinVkExtent2D physicalResolution;
+    uint32_t supportedTransforms;
+    uint32_t planeReorderPossible;
+    uint32_t persistentContent;
+} RinVkDisplayPropertiesKHR;
+
+typedef struct RinVkDisplayModeParametersKHR {
+    RinVkExtent2D visibleRegion;
+    uint32_t refreshRate;
+} RinVkDisplayModeParametersKHR;
+
+typedef struct RinVkDisplayModePropertiesKHR {
+    RinVkDisplayModeKHR displayMode;
+    RinVkDisplayModeParametersKHR parameters;
+} RinVkDisplayModePropertiesKHR;
+
+typedef struct RinVkDisplayPlanePropertiesKHR {
+    RinVkDisplayKHR currentDisplay;
+    uint32_t currentStackIndex;
+} RinVkDisplayPlanePropertiesKHR;
+
+typedef struct RinVkDisplayPlaneCapabilitiesKHR {
+    uint32_t supportedAlpha;
+    RinVkOffset2D minSrcPosition;
+    RinVkOffset2D maxSrcPosition;
+    RinVkExtent2D minSrcExtent;
+    RinVkExtent2D maxSrcExtent;
+    RinVkOffset2D minDstPosition;
+    RinVkOffset2D maxDstPosition;
+    RinVkExtent2D minDstExtent;
+    RinVkExtent2D maxDstExtent;
+} RinVkDisplayPlaneCapabilitiesKHR;
+
+typedef struct RinVkSurfaceCapabilitiesKHR {
+    uint32_t minImageCount;
+    uint32_t maxImageCount;
+    RinVkExtent2D currentExtent;
+    RinVkExtent2D minImageExtent;
+    RinVkExtent2D maxImageExtent;
+    uint32_t maxImageArrayLayers;
+    uint32_t supportedTransforms;
+    uint32_t currentTransform;
+    uint32_t supportedCompositeAlpha;
+    uint32_t supportedUsageFlags;
+} RinVkSurfaceCapabilitiesKHR;
+
+typedef struct RinVkSurfaceFormatKHR {
+    int32_t format;
+    int32_t colorSpace;
+} RinVkSurfaceFormatKHR;
+
+typedef struct RinVkDisplayModeCreateInfoKHR {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    RinVkDisplayModeParametersKHR parameters;
+} RinVkDisplayModeCreateInfoKHR;
+
+typedef struct RinVkDisplaySurfaceCreateInfoKHR {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    RinVkDisplayModeKHR displayMode;
+    uint32_t planeIndex;
+    uint32_t planeStackIndex;
+    uint32_t transform;
+    float globalAlpha;
+    uint32_t alphaMode;
+    RinVkExtent2D imageExtent;
+} RinVkDisplaySurfaceCreateInfoKHR;
+
+typedef struct RinVkSwapchainCreateInfoKHR {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    RinVkSurfaceKHR surface;
+    uint32_t minImageCount;
+    int32_t imageFormat;
+    int32_t imageColorSpace;
+    RinVkExtent2D imageExtent;
+    uint32_t imageArrayLayers;
+    uint32_t imageUsage;
+    uint32_t imageSharingMode;
+    uint32_t queueFamilyIndexCount;
+    const uint32_t* pQueueFamilyIndices;
+    uint32_t preTransform;
+    uint32_t compositeAlpha;
+    uint32_t presentMode;
+    uint32_t clipped;
+    RinVkSwapchainKHR oldSwapchain;
+} RinVkSwapchainCreateInfoKHR;
+
+typedef struct RinVkPresentInfoKHR {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t waitSemaphoreCount;
+    const RinVkSemaphore* pWaitSemaphores;
+    uint32_t swapchainCount;
+    const RinVkSwapchainKHR* pSwapchains;
+    const uint32_t* pImageIndices;
+    RinVkResult* pResults;
+} RinVkPresentInfoKHR;
+
 typedef struct RinVkQueueFamilyProperties {
     uint32_t queueFlags;
     uint32_t queueCount;
@@ -1227,16 +1358,6 @@ typedef struct RinVkViewport {
     float minDepth;
     float maxDepth;
 } RinVkViewport;
-
-typedef struct RinVkOffset2D {
-    int32_t x;
-    int32_t y;
-} RinVkOffset2D;
-
-typedef struct RinVkExtent2D {
-    uint32_t width;
-    uint32_t height;
-} RinVkExtent2D;
 
 typedef struct RinVkRect2D {
     RinVkOffset2D offset;
