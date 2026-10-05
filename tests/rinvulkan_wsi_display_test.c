@@ -312,6 +312,8 @@ int main(void) {
     RinVkDisplayModePropertiesKHR mode_properties[2];
     RinVkDisplayModeCreateInfoKHR mode_create_info;
     RinVkDisplayModeKHR created_mode = 0u;
+    RinVkDisplaySurfaceCreateInfoKHR surface_create_info;
+    RinVkSurfaceKHR created_surface = 0u;
     RinVkDisplayPlanePropertiesKHR plane_properties[1];
     RinVkDisplayPlaneCapabilitiesKHR plane_capabilities;
     RinVkDisplayKHR supported_displays[1];
@@ -537,6 +539,80 @@ int main(void) {
           plane_capabilities.minDstPosition.x == -2 &&
           plane_capabilities.maxDstPosition.y == 5 &&
           plane_capabilities.maxDstExtent.height == 2160u);
+
+    memset(&surface_create_info, 0, sizeof(surface_create_info));
+    surface_create_info.sType =
+        RIN_VK_STRUCTURE_TYPE_DISPLAY_SURFACE_CREATE_INFO_KHR;
+    surface_create_info.displayMode = mode_properties[0].displayMode;
+    surface_create_info.planeIndex = 0u;
+    surface_create_info.planeStackIndex = 0u;
+    surface_create_info.transform =
+        RIN_VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    surface_create_info.globalAlpha = 0.75f;
+    surface_create_info.alphaMode =
+        RIN_VK_DISPLAY_PLANE_ALPHA_GLOBAL_BIT_KHR;
+    surface_create_info.imageExtent.width = 1920u;
+    surface_create_info.imageExtent.height = 1080u;
+    CHECK(vkCreateDisplayPlaneSurfaceKHR(instance, &surface_create_info, NULL,
+              &created_surface) == RIN_VK_SUCCESS);
+    CHECK(created_surface != 0u);
+    {
+        const RinVkSurfaceKHR stale_surface = created_surface;
+        vkDestroySurfaceKHR(instance, created_surface, NULL);
+        created_surface = 0u;
+        CHECK(vkCreateDisplayPlaneSurfaceKHR(instance, &surface_create_info,
+                  NULL, &created_surface) == RIN_VK_SUCCESS);
+        CHECK(created_surface != 0u && created_surface != stale_surface);
+        vkDestroySurfaceKHR(instance, stale_surface, NULL);
+        vkDestroySurfaceKHR(instance, created_surface, NULL);
+        created_surface = 0u;
+    }
+    surface_create_info.planeStackIndex = 1u;
+    created_surface = UINT64_C(0xfeed);
+    CHECK(vkCreateDisplayPlaneSurfaceKHR(instance, &surface_create_info, NULL,
+              &created_surface) == RIN_VK_ERROR_INITIALIZATION_FAILED);
+    CHECK(created_surface == 0u);
+    surface_create_info.planeStackIndex = 0u;
+    surface_create_info.alphaMode =
+        RIN_VK_DISPLAY_PLANE_ALPHA_PER_PIXEL_BIT_KHR;
+    CHECK(vkCreateDisplayPlaneSurfaceKHR(instance, &surface_create_info, NULL,
+              &created_surface) == RIN_VK_ERROR_FEATURE_NOT_PRESENT);
+    CHECK(created_surface == 0u);
+    surface_create_info.alphaMode =
+        RIN_VK_DISPLAY_PLANE_ALPHA_GLOBAL_BIT_KHR;
+    surface_create_info.globalAlpha = 1.01f;
+    CHECK(vkCreateDisplayPlaneSurfaceKHR(instance, &surface_create_info, NULL,
+              &created_surface) == RIN_VK_ERROR_INITIALIZATION_FAILED);
+    CHECK(created_surface == 0u);
+    surface_create_info.globalAlpha = 0.75f;
+    surface_create_info.transform = UINT32_C(0x00000002);
+    CHECK(vkCreateDisplayPlaneSurfaceKHR(instance, &surface_create_info, NULL,
+              &created_surface) == RIN_VK_ERROR_FEATURE_NOT_PRESENT);
+    CHECK(created_surface == 0u);
+    surface_create_info.transform =
+        RIN_VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    surface_create_info.imageExtent.width = 4097u;
+    CHECK(vkCreateDisplayPlaneSurfaceKHR(instance, &surface_create_info, NULL,
+              &created_surface) == RIN_VK_ERROR_INITIALIZATION_FAILED);
+    CHECK(created_surface == 0u);
+    surface_create_info.imageExtent.width = 1920u;
+    surface_create_info.pNext = &mode_create_info;
+    CHECK(vkCreateDisplayPlaneSurfaceKHR(instance, &surface_create_info, NULL,
+              &created_surface) == RIN_VK_ERROR_FEATURE_NOT_PRESENT);
+    CHECK(created_surface == 0u);
+    surface_create_info.pNext = NULL;
+    provider.supported_display_cookies[0] = UINT64_C(0xdead);
+    CHECK(vkCreateDisplayPlaneSurfaceKHR(instance, &surface_create_info, NULL,
+              &created_surface) == RIN_VK_ERROR_OUT_OF_DATE_KHR);
+    CHECK(created_surface == 0u);
+    provider.supported_display_cookies[0] = provider.display.display_cookie;
+    provider.query_plane_capabilities_result =
+        RIN_VULKAN_WSI_PLATFORM_UNSUPPORTED;
+    CHECK(vkCreateDisplayPlaneSurfaceKHR(instance, &surface_create_info, NULL,
+              &created_surface) == RIN_VK_ERROR_FEATURE_NOT_PRESENT);
+    CHECK(created_surface == 0u);
+    provider.query_plane_capabilities_result = RIN_VULKAN_WSI_PLATFORM_OK;
+
     provider.plane_capabilities.max_src_width = 0u;
     CHECK(vkGetDisplayPlaneCapabilitiesKHR(
               physical, mode_properties[0].displayMode, 0u,

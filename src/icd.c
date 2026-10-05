@@ -23,6 +23,7 @@
 #define RIN_VK_MAX_MEMORIES 64u
 #define RIN_VK_MAX_DISPLAYS 128u
 #define RIN_VK_MAX_DISPLAY_MODES 512u
+#define RIN_VK_MAX_DISPLAY_SURFACES 64u
 #define RIN_VK_MAX_FENCES 128u
 #define RIN_VK_MAX_SEMAPHORES 128u
 #define RIN_VK_MAX_SUBMISSIONS 64u
@@ -68,6 +69,7 @@
 #define RIN_VK_EVENT_TAG UINT64_C(0x5245)
 #define RIN_VK_DISPLAY_TAG UINT64_C(0x5244)
 #define RIN_VK_DISPLAY_MODE_TAG UINT64_C(0x524f)
+#define RIN_VK_SURFACE_TAG UINT64_C(0x5259)
 #define RIN_VK_PIPELINE_CACHE_MAGIC UINT32_C(0x52494e43)
 #define RIN_VK_PIPELINE_CACHE_VERSION 1u
 #define RIN_VK_PIPELINE_KIND_COMPUTE 1u
@@ -236,6 +238,24 @@ typedef struct RinVkDisplayModeSlot {
     uint64_t mode_cookie;
     uint64_t output_generation;
 } RinVkDisplayModeSlot;
+
+typedef struct RinVkDisplaySurfaceSlot {
+    uint32_t state;
+    uint32_t generation;
+    struct RinVkInstance_T* owner_instance;
+    RinVkDisplaySlot* display;
+    uint32_t display_generation;
+    RinVkDisplayModeSlot* mode;
+    uint32_t mode_generation;
+    uint32_t plane_index;
+    uint32_t plane_stack_index;
+    uint32_t transform;
+    uint32_t alpha_mode;
+    float global_alpha;
+    RinVkExtent2D image_extent;
+    uint64_t output_generation;
+    uint64_t device_generation;
+} RinVkDisplaySurfaceSlot;
 
 typedef struct RinVkImageViewSlot {
     uint32_t state;
@@ -454,6 +474,8 @@ static RinVkBufferSlot g_buffers[RIN_VK_MAX_BUFFERS];
 static RinVkImageSlot g_images[RIN_VK_MAX_IMAGES];
 static RinVkDisplaySlot g_displays[RIN_VK_MAX_DISPLAYS];
 static RinVkDisplayModeSlot g_display_modes[RIN_VK_MAX_DISPLAY_MODES];
+static RinVkDisplaySurfaceSlot
+    g_display_surfaces[RIN_VK_MAX_DISPLAY_SURFACES];
 static RinVkImageViewSlot g_image_views[RIN_VK_MAX_IMAGE_VIEWS];
 static RinVkSamplerSlot g_samplers[RIN_VK_MAX_SAMPLERS];
 static RinVkPipelineLayoutSlot g_pipeline_layouts[RIN_VK_MAX_PIPELINE_LAYOUTS];
@@ -1122,6 +1144,23 @@ static RinVkDisplayModeSlot* display_mode_slot_from_handle(
     return slot;
 }
 
+static RinVkDisplayModeSlot* display_mode_slot_from_handle_any(
+        RinVkDisplayModeKHR handle) {
+    uint32_t index_field = (uint32_t)(handle & UINT64_C(0xffff));
+    uint32_t generation = (uint32_t)(handle >> 16u);
+    RinVkDisplayModeSlot* slot;
+    if ((handle >> 48u) != RIN_VK_DISPLAY_MODE_TAG || index_field == 0u ||
+        index_field > RIN_VK_MAX_DISPLAY_MODES || generation == 0u)
+        return NULL;
+    slot = &g_display_modes[index_field - 1u];
+    if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) != 1u ||
+        slot->generation != generation || !slot->display ||
+        slot->display_generation != slot->display->generation ||
+        __atomic_load_n(&slot->display->state, __ATOMIC_ACQUIRE) != 1u)
+        return NULL;
+    return slot;
+}
+
 static RinVkDisplaySlot* reserve_display_slot(uint32_t* index_out) {
     uint32_t index;
     for (index = 0u; index < RIN_VK_MAX_DISPLAYS; ++index) {
@@ -1171,7 +1210,41 @@ static RinVkDisplayModeSlot* reserve_display_mode_slot(
     return NULL;
 }
 
+static RinVkDisplaySurfaceSlot* reserve_display_surface_slot(
+        uint32_t* index_out) {
+    uint32_t index;
+    for (index = 0u; index < RIN_VK_MAX_DISPLAY_SURFACES; ++index) {
+        RinVkDisplaySurfaceSlot* slot = &g_display_surfaces[index];
+        uint32_t expected = 0u;
+        uint32_t generation;
+        if (!__atomic_compare_exchange_n(&slot->state, &expected, 2u, 0,
+                                         __ATOMIC_ACQUIRE,
+                                         __ATOMIC_RELAXED))
+            continue;
+        generation = slot->generation;
+        if (generation == UINT32_MAX) {
+            __atomic_store_n(&slot->state, 3u, __ATOMIC_RELEASE);
+            continue;
+        }
+        memset(slot, 0, sizeof(*slot));
+        slot->generation = generation + 1u;
+        __atomic_store_n(&slot->state, 2u, __ATOMIC_RELEASE);
+        *index_out = index;
+        return slot;
+    }
+    return NULL;
+}
+
 static void clear_display_mode_slot(RinVkDisplayModeSlot* slot) {
+    uint32_t generation;
+    if (!slot) return;
+    generation = slot->generation;
+    memset(slot, 0, sizeof(*slot));
+    slot->generation = generation;
+    __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
+}
+
+static void clear_display_surface_slot(RinVkDisplaySurfaceSlot* slot) {
     uint32_t generation;
     if (!slot) return;
     generation = slot->generation;
@@ -4689,6 +4762,175 @@ RinVkResult RIN_VKAPI_CALL vkCreateDisplayModeKHR(
     return RIN_VK_ERROR_INITIALIZATION_FAILED;
 }
 
+RinVkResult RIN_VKAPI_CALL vkCreateDisplayPlaneSurfaceKHR(
+        RinVkInstance instance_handle,
+        const RinVkDisplaySurfaceCreateInfoKHR* create_info,
+        const void* allocator, RinVkSurfaceKHR* surface_out) {
+    RinVkDisplayPlanePropertiesKHR plane_properties[RIN_VULKAN_WSI_MAX_PLANES];
+    RinVkDisplayKHR supported_displays[RIN_VULKAN_WSI_MAX_DISPLAYS];
+    RinVkDisplayPlaneCapabilitiesKHR capabilities;
+    RinVkPhysicalDeviceProperties physical_properties;
+    struct RinVkInstance_T* instance;
+    struct RinVkInstance_T* mode_instance = NULL;
+    struct RinVkPhysicalDevice_T* physical;
+    RinVkDisplayModeSlot* mode;
+    RinVkDisplaySlot* display;
+    RinVkDisplaySurfaceSlot* surface;
+    uint32_t plane_count = RIN_VULKAN_WSI_MAX_PLANES;
+    uint32_t supported_count = RIN_VULKAN_WSI_MAX_DISPLAYS;
+    uint32_t slot_index = 0u;
+    uint32_t index;
+    RinVkResult result;
+    (void)allocator;
+    if (!surface_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    *surface_out = 0u;
+    instance = instance_slot(instance_handle);
+    if (!instance || !create_info ||
+        create_info->sType !=
+            RIN_VK_STRUCTURE_TYPE_DISPLAY_SURFACE_CREATE_INFO_KHR ||
+        create_info->flags != 0u)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    if (create_info->pNext != NULL)
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    mode = display_mode_slot_from_handle_any(create_info->displayMode);
+    if (!mode) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    display = mode->display;
+    physical = display->owner_physical_device;
+    if (display->owner_instance != instance ||
+        !physical_slot((RinVkPhysicalDevice)physical, &mode_instance) ||
+        mode_instance != instance)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    if (create_info->transform !=
+        RIN_VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    if (create_info->alphaMode == 0u ||
+        (create_info->alphaMode &
+         (create_info->alphaMode - 1u)) != 0u ||
+        (create_info->alphaMode &
+         ~RIN_VK_DISPLAY_PLANE_ALPHA_KNOWN_BITS_KHR) != 0u)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    if (create_info->alphaMode == RIN_VK_DISPLAY_PLANE_ALPHA_GLOBAL_BIT_KHR &&
+        (!finite_graphics_float(create_info->globalAlpha) ||
+         create_info->globalAlpha < 0.0f ||
+         create_info->globalAlpha > 1.0f))
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    if ((display->flags & RIN_VULKAN_WSI_DISPLAY_TRANSFORM_IDENTITY) == 0u)
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    if (display->device_generation == 0u ||
+        mode->output_generation != display->output_generation ||
+        mode->display_generation != display->generation)
+        return RIN_VK_ERROR_OUT_OF_DATE_KHR;
+
+    result = vkGetPhysicalDeviceDisplayPlanePropertiesKHR(
+        (RinVkPhysicalDevice)physical, &plane_count, plane_properties);
+    if (result == RIN_VK_INCOMPLETE)
+        return RIN_VK_ERROR_TOO_MANY_OBJECTS;
+    if (result != RIN_VK_SUCCESS) return result;
+    if (create_info->planeIndex >= plane_count)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    if ((display->flags & RIN_VULKAN_WSI_DISPLAY_PLANE_REORDER) != 0u) {
+        if (create_info->planeStackIndex >= plane_count)
+            return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    } else if (create_info->planeStackIndex !=
+               plane_properties[create_info->planeIndex].currentStackIndex) {
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    result = vkGetDisplayPlaneSupportedDisplaysKHR(
+        (RinVkPhysicalDevice)physical, create_info->planeIndex,
+        &supported_count, supported_displays);
+    if (result == RIN_VK_INCOMPLETE)
+        return RIN_VK_ERROR_TOO_MANY_OBJECTS;
+    if (result != RIN_VK_SUCCESS) return result;
+    for (index = 0u; index < supported_count; ++index) {
+        if (display_slot_from_handle(physical, supported_displays[index]) ==
+            display)
+            break;
+    }
+    if (index == supported_count) {
+        if (__atomic_load_n(&display->state, __ATOMIC_ACQUIRE) != 1u ||
+            __atomic_load_n(&mode->state, __ATOMIC_ACQUIRE) != 1u ||
+            mode->output_generation != display->output_generation)
+            return RIN_VK_ERROR_OUT_OF_DATE_KHR;
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    }
+
+    result = vkGetDisplayPlaneCapabilitiesKHR(
+        (RinVkPhysicalDevice)physical, create_info->displayMode,
+        create_info->planeIndex, &capabilities);
+    if (result != RIN_VK_SUCCESS) return result;
+    if ((capabilities.supportedAlpha & create_info->alphaMode) == 0u)
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    vkGetPhysicalDeviceProperties((RinVkPhysicalDevice)physical,
+                                  &physical_properties);
+    if (physical_properties.limits.maxImageDimension2D == 0u)
+        return RIN_VK_ERROR_DEVICE_LOST;
+    if (create_info->imageExtent.width >
+            physical_properties.limits.maxImageDimension2D ||
+        create_info->imageExtent.height >
+            physical_properties.limits.maxImageDimension2D)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+
+    if (__atomic_load_n(&instance->state, __ATOMIC_ACQUIRE) != 1u ||
+        __atomic_load_n(&display->state, __ATOMIC_ACQUIRE) != 1u ||
+        __atomic_load_n(&mode->state, __ATOMIC_ACQUIRE) != 1u ||
+        mode->display != display ||
+        mode->generation !=
+            (uint32_t)(create_info->displayMode >> 16u) ||
+        mode->display_generation != display->generation ||
+        mode->output_generation != display->output_generation ||
+        mode->output_generation == 0u)
+        return RIN_VK_ERROR_OUT_OF_DATE_KHR;
+    surface = reserve_display_surface_slot(&slot_index);
+    if (!surface) return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+    surface->owner_instance = instance;
+    surface->display = display;
+    surface->display_generation = display->generation;
+    surface->mode = mode;
+    surface->mode_generation = mode->generation;
+    surface->plane_index = create_info->planeIndex;
+    surface->plane_stack_index = create_info->planeStackIndex;
+    surface->transform = create_info->transform;
+    surface->alpha_mode = create_info->alphaMode;
+    surface->global_alpha = create_info->globalAlpha;
+    surface->image_extent = create_info->imageExtent;
+    surface->output_generation = display->output_generation;
+    surface->device_generation = display->device_generation;
+    if (__atomic_load_n(&display->state, __ATOMIC_ACQUIRE) != 1u ||
+        __atomic_load_n(&mode->state, __ATOMIC_ACQUIRE) != 1u ||
+        surface->display_generation != display->generation ||
+        surface->mode_generation != mode->generation ||
+        surface->output_generation != mode->output_generation) {
+        clear_display_surface_slot(surface);
+        return RIN_VK_ERROR_OUT_OF_DATE_KHR;
+    }
+    __atomic_store_n(&surface->state, 1u, __ATOMIC_RELEASE);
+    *surface_out = resource_handle(RIN_VK_SURFACE_TAG, slot_index,
+                                   surface->generation);
+    return RIN_VK_SUCCESS;
+}
+
+void RIN_VKAPI_CALL vkDestroySurfaceKHR(RinVkInstance instance_handle,
+                                        RinVkSurfaceKHR surface_handle,
+                                        const void* allocator) {
+    struct RinVkInstance_T* instance = instance_slot(instance_handle);
+    uint32_t index_field = (uint32_t)(surface_handle & UINT64_C(0xffff));
+    uint32_t generation = (uint32_t)(surface_handle >> 16u);
+    RinVkDisplaySurfaceSlot* surface;
+    (void)allocator;
+    if (!instance || (surface_handle >> 48u) != RIN_VK_SURFACE_TAG ||
+        index_field == 0u || index_field > RIN_VK_MAX_DISPLAY_SURFACES ||
+        generation == 0u)
+        return;
+    surface = &g_display_surfaces[index_field - 1u];
+    sync_lock();
+    if (__atomic_load_n(&surface->state, __ATOMIC_ACQUIRE) == 1u &&
+        surface->generation == generation &&
+        surface->owner_instance == instance)
+        clear_display_surface_slot(surface);
+    sync_unlock();
+}
+
 RinVkResult RIN_VKAPI_CALL vkGetPhysicalDeviceDisplayPlanePropertiesKHR(
         RinVkPhysicalDevice physical_device, uint32_t* property_count,
         RinVkDisplayPlanePropertiesKHR* properties) {
@@ -5105,6 +5347,12 @@ static void wsi_cleanup_instance(struct RinVkInstance_T* instance) {
     uint32_t index;
     if (!instance) return;
     sync_lock();
+    for (index = 0u; index < RIN_VK_MAX_DISPLAY_SURFACES; ++index) {
+        RinVkDisplaySurfaceSlot* surface = &g_display_surfaces[index];
+        if (__atomic_load_n(&surface->state, __ATOMIC_ACQUIRE) == 1u &&
+            surface->owner_instance == instance)
+            clear_display_surface_slot(surface);
+    }
     for (index = 0u; index < RIN_VK_MAX_DISPLAY_MODES; ++index) {
         RinVkDisplayModeSlot* mode = &g_display_modes[index];
         if (__atomic_load_n(&mode->state, __ATOMIC_ACQUIRE) == 1u &&

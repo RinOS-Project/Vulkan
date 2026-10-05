@@ -112,6 +112,7 @@
 #define RIN_VK_KHR_SURFACE_SPEC_VERSION 25u
 #define RIN_VK_KHR_DISPLAY_SPEC_VERSION 23u
 #define RIN_VK_KHR_SWAPCHAIN_SPEC_VERSION 70u
+#define RIN_VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR UINT32_C(0x00000001)
 #define RIN_VK_EXT_DEBUG_UTILS_EXTENSION "VK_EXT_debug_utils"
 #define RIN_VK_DEBUG_UTILS_SPEC_VERSION 2u
 #define RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT 0x00000001u
@@ -2158,6 +2159,13 @@ vkCreateDisplayModeKHR(
     RinVkPhysicalDevice physical_device, RinVkDisplayKHR display,
     const RinVkDisplayModeCreateInfoKHR* create_info, const void* allocator,
     RinVkDisplayModeKHR* mode_out);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkCreateDisplayPlaneSurfaceKHR(
+    RinVkInstance instance, const RinVkDisplaySurfaceCreateInfoKHR* create_info,
+    const void* allocator, RinVkSurfaceKHR* surface_out);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkDestroySurfaceKHR(RinVkInstance instance, RinVkSurfaceKHR surface,
+                    const void* allocator);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkGetPhysicalDeviceDisplayPlanePropertiesKHR(
     RinVkPhysicalDevice physical_device, uint32_t* property_count,
