@@ -2,7 +2,10 @@
 
 #include <rinvulkan/software_platform.h>
 #include <rinvulkan/icd.h>
+#include <ringpu/runtime.h>
+#include <ringpu/spirv_frontend.h>
 
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -95,6 +98,251 @@ static int resource_has_access(const RinVulkanProductResourceV1* resources,
             return 1;
     }
     return 0;
+}
+
+static int software_execute_compute(
+    RinGpuVulkanSoftwarePlatformV1* platform,
+    const RinGpuVulkanComputePacketV1* packet,
+    const RinVulkanProductResourceV1* resources, uint32_t resource_count) {
+    RinGpuRuntimeDescV1 runtime_desc;
+    RinGpuRuntime* runtime = NULL;
+    RinShaderInfoV1 shader_info;
+    RinGpuBufferBindingV1 bindings[RIN_SHADER_MAX_RESOURCES];
+    RinGpuHandle buffers[RIN_SHADER_MAX_RESOURCES];
+    RinGpuHandle shader_module = 0u;
+    RinGpuHandle pipeline = 0u;
+    RinGpuHandle bind_group = 0u;
+    RinGpuHandle queue = 0u;
+    RinGpuHandle command_list = 0u;
+    RinGpuHandle fence = 0u;
+    RinGpuComputePipelineDescV1 pipeline_desc;
+    RinGpuQueueDescV1 queue_desc;
+    RinGpuCommandListDescV1 command_desc;
+    RinGpuDispatchV1 dispatch;
+    RinGpuSubmitInfoV1 submit;
+    const size_t packet_prefix = offsetof(RinGpuVulkanComputePacketV1,
+                                          shader_ir);
+    uint64_t total_buffer_bytes = 0u;
+    uint32_t buffer_count = 0u;
+    uint32_t index;
+    int shader_result;
+    int result = RIN_VULKAN_PRODUCT_PROTOCOL;
+
+    if (!platform || !packet ||
+        packet->struct_size < packet_prefix ||
+        packet->version != RIN_GPU_VULKAN_COMPUTE_PACKET_VERSION ||
+        packet->queue_family_index >= RIN_GPU_VULKAN_MAX_QUEUE_FAMILIES ||
+        packet->queue_index >= RIN_VULKAN_PRODUCT_MAX_QUEUES ||
+        packet->product_queue_id >= platform->queue_count ||
+        packet->group_count_x == 0u || packet->group_count_y == 0u ||
+        packet->group_count_z == 0u || packet->group_count_x > 65535u ||
+        packet->group_count_y > 65535u || packet->group_count_z > 65535u ||
+        packet->binding_count > RIN_SHADER_MAX_RESOURCES ||
+        packet->shader_size_bytes == 0u || packet->flags != 0u ||
+        packet->reserved != 0u ||
+        packet->shader_size_bytes > UINT32_MAX - packet_prefix ||
+        packet->struct_size != packet_prefix + packet->shader_size_bytes ||
+        packet->binding_count != resource_count ||
+        (resource_count != 0u && !resources))
+        return RIN_VULKAN_PRODUCT_PROTOCOL;
+    shader_result = ringpu_shader_validate(
+        packet->shader_ir, packet->shader_size_bytes, &shader_info);
+    if (shader_result == RIN_SHADER_ERROR_UNSUPPORTED ||
+        shader_result == RIN_SHADER_ERROR_NO_MEMORY)
+        return RIN_VULKAN_PRODUCT_BACKEND_FAILED;
+    if (shader_result != RIN_SHADER_OK ||
+        shader_info.stage != RIN_SHADER_STAGE_COMPUTE ||
+        shader_info.resource_count != packet->binding_count)
+        return RIN_VULKAN_PRODUCT_PROTOCOL;
+
+    memset(bindings, 0, sizeof(bindings));
+    memset(buffers, 0, sizeof(buffers));
+    for (index = 0u; index < packet->binding_count; ++index) {
+        const RinGpuVulkanComputeBindingV1* source =
+            &packet->bindings[index];
+        RinGpuVulkanSoftwareAllocationV1* allocation;
+        uint32_t prior;
+        uint64_t end;
+        if (source->allocation_handle == 0u ||
+            source->resource_index >= packet->binding_count ||
+            source->access == 0u ||
+            (source->access & ~(RIN_GPU_RESOURCE_READ |
+                                RIN_GPU_RESOURCE_WRITE)) != 0u ||
+            source->reserved[0] != 0u || source->reserved[1] != 0u ||
+            source->size_bytes == 0u ||
+            source->offset > UINT64_MAX - source->size_bytes)
+            return RIN_VULKAN_PRODUCT_PROTOCOL;
+        for (prior = 0u; prior < index; ++prior) {
+            const RinGpuVulkanComputeBindingV1* previous =
+                &packet->bindings[prior];
+            if (previous->resource_index == source->resource_index ||
+                previous->allocation_handle == source->allocation_handle)
+                return RIN_VULKAN_PRODUCT_PROTOCOL;
+        }
+        allocation = allocation_by_handle(platform,
+                                          source->allocation_handle);
+        end = source->offset + source->size_bytes;
+        if (!allocation || end > allocation->size_bytes ||
+            !resource_has_access(
+                resources, resource_count, source->allocation_handle,
+                ((source->access & RIN_GPU_RESOURCE_READ) != 0u
+                     ? RIN_VULKAN_PRODUCT_MEMORY_GPU_READ : 0u) |
+                    ((source->access & RIN_GPU_RESOURCE_WRITE) != 0u
+                         ? RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE : 0u)))
+            return RIN_VULKAN_PRODUCT_PROTOCOL;
+        if (source->size_bytes > UINT32_MAX ||
+            total_buffer_bytes > UINT64_MAX - source->size_bytes)
+            return RIN_VULKAN_PRODUCT_PROTOCOL;
+        total_buffer_bytes += source->size_bytes;
+        buffers[source->resource_index] = UINT64_MAX;
+        ++buffer_count;
+    }
+    for (index = 0u; index < packet->binding_count; ++index)
+        if (buffers[index] != UINT64_MAX)
+            return RIN_VULKAN_PRODUCT_PROTOCOL;
+
+    memset(&runtime_desc, 0, sizeof(runtime_desc));
+    runtime_desc.struct_size = sizeof(runtime_desc);
+    runtime_desc.version = RIN_GPU_RUNTIME_VERSION;
+    runtime_desc.device_generation = 1u;
+    runtime_desc.handle_secret = UINT64_C(0x564b434f4d505554);
+    runtime_desc.max_buffer_size = total_buffer_bytes < UINT64_C(1048576)
+                                       ? UINT64_C(1048576)
+                                       : total_buffer_bytes;
+    runtime_desc.max_image_size = UINT64_C(1048576);
+    runtime_desc.max_total_allocation_size =
+        total_buffer_bytes < UINT64_C(4194304)
+            ? UINT64_C(4194304) : total_buffer_bytes;
+    runtime_desc.max_image_dimension = 64u;
+    runtime_desc.max_image_layers = 1u;
+    runtime_desc.max_image_mip_levels = 1u;
+    runtime_desc.max_image_sample_count = 1u;
+    runtime_desc.flags = RIN_GPU_RUNTIME_FLAG_HEADLESS;
+    runtime_desc.adapter.abi_version = RIN_GPU_ABI_VERSION;
+    runtime_desc.adapter.struct_size = sizeof(runtime_desc.adapter);
+    runtime_desc.adapter.queue_capabilities = RIN_GPU_QUEUE_COMPUTE |
+                                              RIN_GPU_QUEUE_COPY;
+    memcpy(runtime_desc.adapter.name, "RinVulkan software compute", 27u);
+    result = ringpu_runtime_create(&runtime_desc, &runtime);
+    if (result != RIN_GPU_OK || !runtime) goto done;
+
+    memset(buffers, 0, sizeof(buffers));
+    for (index = 0u; index < packet->binding_count; ++index) {
+        const RinGpuVulkanComputeBindingV1* source =
+            &packet->bindings[index];
+        RinGpuVulkanSoftwareAllocationV1* allocation =
+            allocation_by_handle(platform, source->allocation_handle);
+        RinGpuBufferDescV1 buffer_desc;
+        uint32_t usage = RIN_GPU_BUFFER_STORAGE;
+        if (!allocation) {
+            result = RIN_VULKAN_PRODUCT_PROTOCOL;
+            goto done;
+        }
+        if ((source->access & RIN_GPU_RESOURCE_READ) != 0u)
+            usage |= RIN_GPU_BUFFER_COPY_SOURCE;
+        if ((source->access & RIN_GPU_RESOURCE_WRITE) != 0u)
+            usage |= RIN_GPU_BUFFER_COPY_DESTINATION;
+        memset(&buffer_desc, 0, sizeof(buffer_desc));
+        buffer_desc.abi_version = RIN_GPU_ABI_VERSION;
+        buffer_desc.struct_size = sizeof(buffer_desc);
+        buffer_desc.size_bytes = source->size_bytes;
+        buffer_desc.usage = usage;
+        buffer_desc.flags = RIN_GPU_BUFFER_CPU_VISIBLE;
+        result = ringpu_runtime_create_buffer(runtime, &buffer_desc,
+                                              &buffers[source->resource_index]);
+        if (result != RIN_GPU_OK || buffers[source->resource_index] == 0u)
+            goto done;
+        result = ringpu_runtime_upload_buffer(
+            runtime, buffers[source->resource_index], 0u,
+            allocation->bytes + source->offset, source->size_bytes);
+        if (result != RIN_GPU_OK) goto done;
+        bindings[source->resource_index].abi_version = RIN_GPU_ABI_VERSION;
+        bindings[source->resource_index].struct_size =
+            sizeof(bindings[source->resource_index]);
+        bindings[source->resource_index].binding = source->resource_index;
+        bindings[source->resource_index].access = source->access;
+        bindings[source->resource_index].buffer =
+            buffers[source->resource_index];
+        bindings[source->resource_index].size_bytes = source->size_bytes;
+    }
+
+    result = ringpu_runtime_create_shader_module(
+        runtime, packet->shader_ir, packet->shader_size_bytes,
+        &shader_module);
+    if (result != RIN_GPU_OK || shader_module == 0u) goto done;
+    memset(&pipeline_desc, 0, sizeof(pipeline_desc));
+    pipeline_desc.abi_version = RIN_GPU_ABI_VERSION;
+    pipeline_desc.struct_size = sizeof(pipeline_desc);
+    pipeline_desc.shader_module = shader_module;
+    result = ringpu_runtime_create_compute_pipeline(
+        runtime, &pipeline_desc, &pipeline);
+    if (result != RIN_GPU_OK || pipeline == 0u) goto done;
+    if (buffer_count != 0u) {
+        result = ringpu_runtime_create_compute_bind_group(
+            runtime, pipeline, bindings, buffer_count, &bind_group);
+        if (result != RIN_GPU_OK || bind_group == 0u) goto done;
+    }
+    memset(&queue_desc, 0, sizeof(queue_desc));
+    queue_desc.abi_version = RIN_GPU_ABI_VERSION;
+    queue_desc.struct_size = sizeof(queue_desc);
+    queue_desc.capabilities = RIN_GPU_QUEUE_COMPUTE | RIN_GPU_QUEUE_COPY;
+    result = ringpu_runtime_create_queue(runtime, &queue_desc, &queue);
+    if (result != RIN_GPU_OK || queue == 0u) goto done;
+    memset(&command_desc, 0, sizeof(command_desc));
+    command_desc.abi_version = RIN_GPU_ABI_VERSION;
+    command_desc.struct_size = sizeof(command_desc);
+    command_desc.capabilities = RIN_GPU_QUEUE_COMPUTE;
+    result = ringpu_runtime_create_command_list(runtime, &command_desc,
+                                               &command_list);
+    if (result != RIN_GPU_OK || command_list == 0u) goto done;
+    memset(&dispatch, 0, sizeof(dispatch));
+    dispatch.abi_version = RIN_GPU_ABI_VERSION;
+    dispatch.struct_size = sizeof(dispatch);
+    dispatch.pipeline = pipeline;
+    dispatch.bind_group = bind_group;
+    dispatch.group_count_x = packet->group_count_x;
+    dispatch.group_count_y = packet->group_count_y;
+    dispatch.group_count_z = packet->group_count_z;
+    result = ringpu_runtime_command_dispatch(runtime, command_list, &dispatch);
+    if (result != RIN_GPU_OK) goto done;
+    result = ringpu_runtime_command_list_close(runtime, command_list);
+    if (result != RIN_GPU_OK) goto done;
+    result = ringpu_runtime_create_fence(runtime, 0u, &fence);
+    if (result != RIN_GPU_OK || fence == 0u) goto done;
+    memset(&submit, 0, sizeof(submit));
+    submit.abi_version = RIN_GPU_ABI_VERSION;
+    submit.struct_size = sizeof(submit);
+    submit.command_list = command_list;
+    submit.signal_fence = fence;
+    submit.signal_value = 1u;
+    result = ringpu_runtime_queue_submit(runtime, queue, &submit);
+    if (result != RIN_GPU_OK) goto done;
+    result = ringpu_runtime_wait_fence(runtime, fence, 1u, UINT64_MAX);
+    if (result != RIN_GPU_OK) goto done;
+
+    for (index = 0u; index < packet->binding_count; ++index) {
+        const RinGpuVulkanComputeBindingV1* source =
+            &packet->bindings[index];
+        RinGpuVulkanSoftwareAllocationV1* allocation =
+            allocation_by_handle(platform, source->allocation_handle);
+        if ((source->access & RIN_GPU_RESOURCE_WRITE) == 0u) continue;
+        if (!allocation || ringpu_runtime_readback_buffer(
+                               runtime, buffers[source->resource_index], 0u,
+                               allocation->bytes + source->offset,
+                               source->size_bytes) != RIN_GPU_OK) {
+            result = RIN_GPU_ERROR_BACKEND;
+            goto done;
+        }
+    }
+    result = RIN_VULKAN_PRODUCT_OK;
+
+done:
+    if (runtime) ringpu_runtime_destroy(runtime);
+    return result == RIN_VULKAN_PRODUCT_OK
+               ? RIN_VULKAN_PRODUCT_OK
+               : (result == RIN_VULKAN_PRODUCT_PROTOCOL
+                      ? RIN_VULKAN_PRODUCT_PROTOCOL
+                      : RIN_VULKAN_PRODUCT_BACKEND_FAILED);
 }
 
 static int software_get_status(void* context,
@@ -192,11 +440,13 @@ static int software_submit(void* context,
     const RinGpuVulkanTransferPacketV1* packet;
     const RinGpuVulkanTransferPacketV2* packet_v2;
     const RinGpuVulkanTransferPacketV3* packet_v3;
+    const RinGpuVulkanComputePacketV1* compute_packet;
     RinGpuVulkanTransferPacketV2 routed_operations;
     RinVulkanProductReportV1* report;
     uint32_t copy_index;
     uint32_t operation_index;
     uint32_t next_tail;
+    int compute_result;
     if (!platform || !submission || submission->struct_size != sizeof(*submission) ||
         submission->version != RIN_VULKAN_PRODUCT_PLATFORM_VERSION ||
         submission->flags != 0u || submission->queue_id >= platform->queue_count ||
@@ -213,10 +463,22 @@ static int software_submit(void* context,
     if (next_tail == platform->report_head) return RIN_VULKAN_PRODUCT_BUSY;
     packet = (const RinGpuVulkanTransferPacketV1*)(uintptr_t)
         submission->command_cookie;
-    if (!packet || packet->struct_size < sizeof(uint32_t) * 4u ||
-        packet->reserved != 0u)
+    if (!packet || packet->struct_size < sizeof(uint32_t) * 2u)
         return RIN_VULKAN_PRODUCT_PROTOCOL;
-    if (packet->version == RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION) {
+    if (packet->version == RIN_GPU_VULKAN_COMPUTE_PACKET_VERSION) {
+        compute_packet = (const RinGpuVulkanComputePacketV1*)(uintptr_t)
+            submission->command_cookie;
+        if (compute_packet->struct_size <
+                offsetof(RinGpuVulkanComputePacketV1, shader_ir) ||
+            compute_packet->product_queue_id != submission->queue_id)
+            return RIN_VULKAN_PRODUCT_PROTOCOL;
+        compute_result = software_execute_compute(
+            platform, compute_packet, resources, resource_count);
+        if (compute_result != RIN_VULKAN_PRODUCT_OK) return compute_result;
+    } else if (packet->struct_size < sizeof(uint32_t) * 4u ||
+               packet->reserved != 0u) {
+        return RIN_VULKAN_PRODUCT_PROTOCOL;
+    } else if (packet->version == RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION) {
         if (packet->struct_size != sizeof(*packet) ||
             packet->copy_count > RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_COPIES)
             return RIN_VULKAN_PRODUCT_PROTOCOL;

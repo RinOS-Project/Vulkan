@@ -11,11 +11,11 @@
 #define RIN_GPU_VULKAN_SOFTWARE_MAX_ALLOCATIONS 64u
 #define RIN_GPU_VULKAN_SOFTWARE_MAX_REPORTS 64u
 
-/* Host-only RinVulkan product owner. It is a real bounded executor for the
- * transfer packet ABI: allocations own zeroed byte storage, GPU addresses are
- * validated against that storage, and submit publishes completion only after
- * every transfer and barrier operation has been validated and executed. It is
- * not a physical GPU backend. */
+/* Host-only RinVulkan product owner. It executes bounded transfer packets and
+ * the versioned RSH1 compute packet through RinGPU's explicit software
+ * runtime. Allocation addresses/ranges and leases are validated before
+ * execution, and completion is published only after execution succeeds. This
+ * is not a physical GPU backend. */
 typedef struct RinGpuVulkanSoftwareAllocationV1 {
     uint64_t handle;
     uint64_t gpu_virtual_address;

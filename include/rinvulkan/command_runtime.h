@@ -2,6 +2,7 @@
 #ifndef RINVULKAN_PUBLIC_COMMAND_RUNTIME_H
 #define RINVULKAN_PUBLIC_COMMAND_RUNTIME_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #define RIN_GPU_VULKAN_COMMAND_MAX_POOLS 64u
@@ -11,7 +12,9 @@
 #define RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION 1u
 #define RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_2 2u
 #define RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_3 3u
+#define RIN_GPU_VULKAN_COMPUTE_PACKET_VERSION 4u
 #define RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS 16u
+#define RIN_GPU_VULKAN_COMPUTE_MAX_BINDINGS 64u
 #define RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS 8u
 #define RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS 4u
 #define RIN_GPU_VULKAN_COMMAND_MAX_DYNAMIC_OFFSETS 32u
@@ -177,6 +180,38 @@ typedef struct RinGpuVulkanTransferPacketV3 {
         operations[RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS];
 } RinGpuVulkanTransferPacketV3;
 
+/* A bounded, API-neutral compute submission. The trailing bytes contain one
+ * validated RSH1 module. Buffer binding offsets are relative to the leased
+ * product allocation; resource_index matches the RSH1 resource operand.
+ * command_cookie points to this immutable packet for the synchronous prepare
+ * callback and remains owned by the submission until completion. */
+typedef struct RinGpuVulkanComputeBindingV1 {
+    uint64_t allocation_handle;
+    uint64_t offset;
+    uint64_t size_bytes;
+    uint32_t resource_index;
+    uint32_t access;
+    uint32_t reserved[2];
+} RinGpuVulkanComputeBindingV1;
+
+typedef struct RinGpuVulkanComputePacketV1 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint32_t queue_family_index;
+    uint32_t queue_index;
+    uint32_t product_queue_id;
+    uint32_t group_count_x;
+    uint32_t group_count_y;
+    uint32_t group_count_z;
+    uint32_t binding_count;
+    uint32_t shader_size_bytes;
+    uint32_t flags;
+    uint32_t reserved;
+    RinGpuVulkanComputeBindingV1
+        bindings[RIN_GPU_VULKAN_COMPUTE_MAX_BINDINGS];
+    uint8_t shader_ir[1];
+} RinGpuVulkanComputePacketV1;
+
 typedef struct RinGpuVulkanQueryCommandV1 {
     uint64_t query_pool;
     uint32_t query;
@@ -317,11 +352,19 @@ static_assert(sizeof(RinGpuVulkanTransferOpV2) == 88u,
               "RinVulkan transfer operation ABI drift");
 static_assert(sizeof(RinGpuVulkanTransferPacketV3) == 1440u,
               "RinVulkan routed transfer packet ABI drift");
+static_assert(sizeof(RinGpuVulkanComputeBindingV1) == 40u,
+              "RinVulkan compute binding ABI drift");
+static_assert(offsetof(RinGpuVulkanComputePacketV1, shader_ir) == 2608u,
+              "RinVulkan compute packet ABI drift");
 #else
 _Static_assert(sizeof(RinGpuVulkanTransferOpV2) == 88u,
                "RinVulkan transfer operation ABI drift");
 _Static_assert(sizeof(RinGpuVulkanTransferPacketV3) == 1440u,
                "RinVulkan routed transfer packet ABI drift");
+_Static_assert(sizeof(RinGpuVulkanComputeBindingV1) == 40u,
+               "RinVulkan compute binding ABI drift");
+_Static_assert(offsetof(RinGpuVulkanComputePacketV1, shader_ir) == 2608u,
+               "RinVulkan compute packet ABI drift");
 #endif
 
 #endif
