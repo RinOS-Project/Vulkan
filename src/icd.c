@@ -4647,6 +4647,48 @@ RinVkResult RIN_VKAPI_CALL vkGetDisplayModePropertiesKHR(
     return RIN_VK_SUCCESS;
 }
 
+RinVkResult RIN_VKAPI_CALL vkCreateDisplayModeKHR(
+        RinVkPhysicalDevice physical_device, RinVkDisplayKHR display_handle,
+        const RinVkDisplayModeCreateInfoKHR* create_info,
+        const void* allocator, RinVkDisplayModeKHR* mode_out) {
+    RinVkDisplayModePropertiesKHR modes[RIN_VULKAN_WSI_MAX_MODES];
+    struct RinVkPhysicalDevice_T* physical;
+    uint32_t mode_count = RIN_VULKAN_WSI_MAX_MODES;
+    uint32_t index;
+    RinVkResult result;
+    (void)allocator;
+    if (!mode_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    *mode_out = 0u;
+    if (!create_info ||
+        create_info->sType != RIN_VK_STRUCTURE_TYPE_DISPLAY_MODE_CREATE_INFO_KHR ||
+        create_info->pNext != NULL || create_info->flags != 0u ||
+        create_info->parameters.visibleRegion.width == 0u ||
+        create_info->parameters.visibleRegion.height == 0u ||
+        create_info->parameters.refreshRate == 0u)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    physical = physical_slot(physical_device, NULL);
+    if (!physical || !display_slot_from_handle(physical, display_handle))
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    result = vkGetDisplayModePropertiesKHR(
+        physical_device, display_handle, &mode_count, modes);
+    if (result != RIN_VK_SUCCESS)
+        return result == RIN_VK_INCOMPLETE
+                   ? RIN_VK_ERROR_OUT_OF_DATE_KHR
+                   : result;
+    for (index = 0u; index < mode_count; ++index) {
+        if (modes[index].parameters.visibleRegion.width ==
+                create_info->parameters.visibleRegion.width &&
+            modes[index].parameters.visibleRegion.height ==
+                create_info->parameters.visibleRegion.height &&
+            modes[index].parameters.refreshRate ==
+                create_info->parameters.refreshRate) {
+            *mode_out = modes[index].displayMode;
+            return RIN_VK_SUCCESS;
+        }
+    }
+    return RIN_VK_ERROR_INITIALIZATION_FAILED;
+}
+
 RinVkResult RIN_VKAPI_CALL vkGetPhysicalDeviceDisplayPlanePropertiesKHR(
         RinVkPhysicalDevice physical_device, uint32_t* property_count,
         RinVkDisplayPlanePropertiesKHR* properties) {

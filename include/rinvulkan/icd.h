@@ -2154,6 +2154,11 @@ vkGetDisplayModePropertiesKHR(
     RinVkPhysicalDevice physical_device, RinVkDisplayKHR display,
     uint32_t* property_count, RinVkDisplayModePropertiesKHR* properties);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkCreateDisplayModeKHR(
+    RinVkPhysicalDevice physical_device, RinVkDisplayKHR display,
+    const RinVkDisplayModeCreateInfoKHR* create_info, const void* allocator,
+    RinVkDisplayModeKHR* mode_out);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkGetPhysicalDeviceDisplayPlanePropertiesKHR(
     RinVkPhysicalDevice physical_device, uint32_t* property_count,
     RinVkDisplayPlanePropertiesKHR* properties);

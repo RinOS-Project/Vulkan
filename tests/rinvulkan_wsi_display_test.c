@@ -310,6 +310,8 @@ int main(void) {
     RinVkPhysicalDevice physical_devices[1];
     RinVkDisplayPropertiesKHR display_properties[1];
     RinVkDisplayModePropertiesKHR mode_properties[2];
+    RinVkDisplayModeCreateInfoKHR mode_create_info;
+    RinVkDisplayModeKHR created_mode = 0u;
     RinVkDisplayPlanePropertiesKHR plane_properties[1];
     RinVkDisplayPlaneCapabilitiesKHR plane_capabilities;
     RinVkDisplayKHR supported_displays[1];
@@ -415,6 +417,9 @@ int main(void) {
               instance, "vkGetDisplayPlaneSupportedDisplaysKHR") == NULL);
     CHECK(vk_icdGetPhysicalDeviceProcAddr(
               instance, "vkGetDisplayPlaneCapabilitiesKHR") == NULL);
+    CHECK(vkGetInstanceProcAddr(instance, "vkCreateDisplayModeKHR") == NULL);
+    CHECK(vk_icdGetPhysicalDeviceProcAddr(
+              instance, "vkCreateDisplayModeKHR") == NULL);
 
     count = 0u;
     CHECK(vkEnumeratePhysicalDevices(instance, &count, NULL) == RIN_VK_SUCCESS);
@@ -501,6 +506,24 @@ int main(void) {
           RIN_VK_SUCCESS);
     CHECK(count == 2u && mode_properties[1].parameters.visibleRegion.width ==
           1280u && mode_properties[1].parameters.visibleRegion.height == 720u);
+    memset(&mode_create_info, 0, sizeof(mode_create_info));
+    mode_create_info.sType = RIN_VK_STRUCTURE_TYPE_DISPLAY_MODE_CREATE_INFO_KHR;
+    mode_create_info.parameters = mode_properties[1].parameters;
+    CHECK(vkCreateDisplayModeKHR(physical, display_properties[0].display,
+              &mode_create_info, NULL, &created_mode) == RIN_VK_SUCCESS);
+    CHECK(created_mode == mode_properties[1].displayMode);
+    mode_create_info.parameters.visibleRegion.width = 2048u;
+    created_mode = UINT64_C(0xfeed);
+    CHECK(vkCreateDisplayModeKHR(physical, display_properties[0].display,
+              &mode_create_info, NULL, &created_mode) ==
+          RIN_VK_ERROR_INITIALIZATION_FAILED);
+    CHECK(created_mode == 0u);
+    mode_create_info.parameters.visibleRegion.width = 1280u;
+    mode_create_info.sType = RIN_VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    CHECK(vkCreateDisplayModeKHR(physical, display_properties[0].display,
+              &mode_create_info, NULL, &created_mode) ==
+          RIN_VK_ERROR_INITIALIZATION_FAILED);
+    mode_create_info.sType = RIN_VK_STRUCTURE_TYPE_DISPLAY_MODE_CREATE_INFO_KHR;
     CHECK(vkGetDisplayPlaneCapabilitiesKHR(
               physical, mode_properties[0].displayMode, 0u,
               &plane_capabilities) == RIN_VK_SUCCESS);
