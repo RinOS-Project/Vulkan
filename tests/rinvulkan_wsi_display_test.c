@@ -6,6 +6,15 @@
 #include <string.h>
 
 #define TEST_DISPLAY_SURFACE_CAPACITY 64u
+#define TEST_PENDING_PRESENT_CAPACITY 32u
+
+typedef struct TestPendingPresent {
+    uint64_t token;
+    uint64_t display_cookie;
+    uint64_t output_generation;
+    uint64_t device_generation;
+    uint32_t active;
+} TestPendingPresent;
 
 typedef struct TestWsiProvider {
     uint64_t output_generation;
@@ -21,6 +30,12 @@ typedef struct TestWsiProvider {
     uint32_t plane_count;
     uint32_t supported_display_count;
     uint32_t present_call_count;
+    uint32_t poll_call_count;
+    uint32_t cancel_call_count;
+    uint32_t complete_presents;
+    uint64_t next_present_token;
+    RinVulkanWsiPresentRequestV1 last_present;
+    TestPendingPresent pending_presents[TEST_PENDING_PRESENT_CAPACITY];
     uint32_t surface_support;
     uint32_t surface_support_calls;
     uint32_t surface_properties_calls;
@@ -190,11 +205,13 @@ static void make_display_provider(TestWsiProvider* provider) {
         RIN_VK_FORMAT_R8G8B8A8_UNORM;
     provider->surface_properties.formats[0].color_space =
         RIN_VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-    provider->surface_properties.present_mode_count = 2u;
+    provider->surface_properties.present_mode_count = 3u;
     provider->surface_properties.present_modes[0] =
         RIN_VK_PRESENT_MODE_IMMEDIATE_KHR;
     provider->surface_properties.present_modes[1] =
         RIN_VK_PRESENT_MODE_FIFO_KHR;
+    provider->surface_properties.present_modes[2] =
+        RIN_VK_PRESENT_MODE_FIFO_RELAXED_KHR;
 }
 
 static int query_displays(void* context, uint64_t device_generation,
@@ -345,6 +362,103 @@ static int cancel_present_unsupported(void* context, uint64_t display_cookie,
     return RIN_VULKAN_WSI_PLATFORM_UNSUPPORTED;
 }
 
+static int present_retained(
+    void* context, const RinVulkanWsiPresentRequestV1* request,
+    uint64_t* present_token_out) {
+    TestWsiProvider* provider = (TestWsiProvider*)context;
+    uint32_t index;
+    if (present_token_out) *present_token_out = 0u;
+    if (!provider || !request || !present_token_out ||
+        request->struct_size != sizeof(*request) ||
+        request->version != RIN_VULKAN_WSI_PLATFORM_VERSION ||
+        request->display_cookie != provider->display.display_cookie ||
+        request->output_generation != provider->output_generation ||
+        request->device_generation != provider->device_generation ||
+        request->allocation_handle == 0u || request->allocation_size == 0u ||
+        request->frame_id == 0u || request->width == 0u ||
+        request->height == 0u || request->reserved[0] != 0u ||
+        request->reserved[1] != 0u)
+        return RIN_VULKAN_WSI_PLATFORM_INVALID_ARGUMENT;
+    for (index = 0u; index < TEST_PENDING_PRESENT_CAPACITY; ++index)
+        if (provider->pending_presents[index].active == 0u) break;
+    if (index == TEST_PENDING_PRESENT_CAPACITY)
+        return RIN_VULKAN_WSI_PLATFORM_LIMIT;
+    if (provider->next_present_token == UINT64_MAX)
+        return RIN_VULKAN_WSI_PLATFORM_LIMIT;
+    ++provider->next_present_token;
+    if (provider->next_present_token == 0u)
+        return RIN_VULKAN_WSI_PLATFORM_LIMIT;
+    provider->pending_presents[index].token =
+        provider->next_present_token;
+    provider->pending_presents[index].display_cookie =
+        request->display_cookie;
+    provider->pending_presents[index].output_generation =
+        request->output_generation;
+    provider->pending_presents[index].device_generation =
+        request->device_generation;
+    provider->pending_presents[index].active = 1u;
+    provider->last_present = *request;
+    ++provider->present_call_count;
+    *present_token_out = provider->next_present_token;
+    return RIN_VULKAN_WSI_PLATFORM_OK;
+}
+
+static int present_retained_then_lost(
+    void* context, const RinVulkanWsiPresentRequestV1* request,
+    uint64_t* present_token_out) {
+    const int result = present_retained(context, request, present_token_out);
+    return result == RIN_VULKAN_WSI_PLATFORM_OK
+               ? RIN_VULKAN_WSI_PLATFORM_DEVICE_LOST
+               : result;
+}
+
+static int poll_present_retained(
+    void* context, uint64_t display_cookie, uint64_t present_token,
+    RinVulkanWsiPresentStatusV1* status_out) {
+    TestWsiProvider* provider = (TestWsiProvider*)context;
+    uint32_t index;
+    if (!provider || !status_out || present_token == 0u)
+        return RIN_VULKAN_WSI_PLATFORM_INVALID_ARGUMENT;
+    ++provider->poll_call_count;
+    for (index = 0u; index < TEST_PENDING_PRESENT_CAPACITY; ++index) {
+        TestPendingPresent* pending = &provider->pending_presents[index];
+        if (pending->active == 0u || pending->token != present_token ||
+            pending->display_cookie != display_cookie)
+            continue;
+        memset(status_out, 0, sizeof(*status_out));
+        status_out->struct_size = sizeof(*status_out);
+        status_out->version = RIN_VULKAN_WSI_PLATFORM_VERSION;
+        status_out->output_generation = pending->output_generation;
+        status_out->device_generation = pending->device_generation;
+        if (provider->complete_presents == 0u) {
+            status_out->state = RIN_VULKAN_WSI_PRESENT_PENDING;
+            return RIN_VULKAN_WSI_PLATFORM_OK;
+        }
+        status_out->state = RIN_VULKAN_WSI_PRESENT_COMPLETE;
+        pending->active = 0u;
+        return RIN_VULKAN_WSI_PLATFORM_OK;
+    }
+    return RIN_VULKAN_WSI_PLATFORM_OUT_OF_DATE;
+}
+
+static int cancel_present_retained(void* context, uint64_t display_cookie,
+                                   uint64_t present_token) {
+    TestWsiProvider* provider = (TestWsiProvider*)context;
+    uint32_t index;
+    if (!provider || present_token == 0u)
+        return RIN_VULKAN_WSI_PLATFORM_INVALID_ARGUMENT;
+    for (index = 0u; index < TEST_PENDING_PRESENT_CAPACITY; ++index) {
+        TestPendingPresent* pending = &provider->pending_presents[index];
+        if (pending->active != 0u && pending->token == present_token &&
+            pending->display_cookie == display_cookie) {
+            pending->active = 0u;
+            ++provider->cancel_call_count;
+            return RIN_VULKAN_WSI_PLATFORM_OK;
+        }
+    }
+    return RIN_VULKAN_WSI_PLATFORM_OUT_OF_DATE;
+}
+
 static int query_surface_support(void* context, uint64_t device_generation,
                                  uint64_t display_cookie,
                                  uint64_t output_generation,
@@ -428,8 +542,15 @@ int main(void) {
     RinVkSurfaceKHR created_surface = 0u;
     RinVkSurfaceKHR stale_output_surface = 0u;
     RinVkDevice device = NULL;
+    RinVkQueue queue = NULL;
     RinVkDeviceQueueCreateInfo device_queue_info;
     RinVkDeviceCreateInfo device_create_info;
+    RinVkFenceCreateInfo fence_create_info;
+    RinVkSemaphoreCreateInfo semaphore_create_info;
+    RinVkFence fence = 0u;
+    RinVkSemaphore semaphore = 0u;
+    RinVkPresentInfoKHR present_info;
+    RinVkResult present_result = RIN_VK_ERROR_INITIALIZATION_FAILED;
     RinVkSwapchainCreateInfoKHR swapchain_create_info;
     RinVkSwapchainKHR swapchain = 0u;
     RinVkImage swapchain_images[2];
@@ -785,7 +906,7 @@ int main(void) {
     {
         RinVkSurfaceCapabilitiesKHR capabilities;
         RinVkSurfaceFormatKHR formats[2];
-        RinVkPresentModeKHR present_modes[2];
+        RinVkPresentModeKHR present_modes[3];
         CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
                   physical, created_surface, &capabilities) == RIN_VK_SUCCESS);
         CHECK(capabilities.minImageCount == 2u &&
@@ -822,19 +943,20 @@ int main(void) {
         count = 0u;
         CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(
                   physical, created_surface, &count, NULL) == RIN_VK_SUCCESS);
-        CHECK(count == 2u);
+        CHECK(count == 3u);
         count = 1u;
         CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(
                   physical, created_surface, &count, present_modes) ==
               RIN_VK_INCOMPLETE);
         CHECK(count == 1u &&
               present_modes[0] == RIN_VK_PRESENT_MODE_IMMEDIATE_KHR);
-        count = 2u;
+        count = 3u;
         CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(
                   physical, created_surface, &count, present_modes) ==
               RIN_VK_SUCCESS);
-        CHECK(count == 2u &&
-              present_modes[1] == RIN_VK_PRESENT_MODE_FIFO_KHR);
+        CHECK(count == 3u &&
+              present_modes[1] == RIN_VK_PRESENT_MODE_FIFO_KHR &&
+              present_modes[2] == RIN_VK_PRESENT_MODE_FIFO_RELAXED_KHR);
 
         provider.surface_properties.supported_usage_flags |= UINT32_C(0x8000);
         CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
@@ -1160,6 +1282,20 @@ int main(void) {
             CHECK(vkCreateDevice(physical, &device_create_info, NULL,
                                  &device) == RIN_VK_SUCCESS);
             CHECK(vkGetDeviceProcAddr(device, "vkCreateSwapchainKHR") == NULL);
+            CHECK(vkGetDeviceProcAddr(device, "vkAcquireNextImageKHR") == NULL);
+            CHECK(vkGetDeviceProcAddr(device, "vkQueuePresentKHR") == NULL);
+            vkGetDeviceQueue(device, 0u, 0u, &queue);
+            CHECK(queue != NULL);
+
+            memset(&fence_create_info, 0, sizeof(fence_create_info));
+            fence_create_info.sType = RIN_VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+            CHECK(vkCreateFence(device, &fence_create_info, NULL, &fence) ==
+                  RIN_VK_SUCCESS);
+            memset(&semaphore_create_info, 0, sizeof(semaphore_create_info));
+            semaphore_create_info.sType =
+                RIN_VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+            CHECK(vkCreateSemaphore(device, &semaphore_create_info, NULL,
+                                    &semaphore) == RIN_VK_SUCCESS);
 
             memset(&swapchain_create_info, 0, sizeof(swapchain_create_info));
             swapchain_create_info.sType =
@@ -1230,6 +1366,139 @@ int main(void) {
             swapchain_image_view = 0u;
             vkDestroySwapchainKHR(device, swapchain, NULL);
             swapchain = 0u;
+
+            {
+                uint32_t first_image = UINT32_MAX;
+                uint32_t second_image = UINT32_MAX;
+                uint32_t third_image = UINT32_MAX;
+                uint32_t acquired_image = UINT32_MAX;
+                uint32_t retained_present_base;
+                uint32_t cancel_base;
+
+                CHECK(vkCreateSwapchainKHR(device, &swapchain_create_info,
+                                          NULL, &swapchain) == RIN_VK_SUCCESS);
+                CHECK(vkAcquireNextImageKHR(device, swapchain, 0u, semaphore,
+                                            fence, &acquired_image) ==
+                      RIN_VK_SUCCESS);
+                CHECK(vkResetFences(device, 1u, &fence) == RIN_VK_SUCCESS);
+                memset(&present_info, 0, sizeof(present_info));
+                present_info.sType = RIN_VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+                present_info.waitSemaphoreCount = 1u;
+                present_info.pWaitSemaphores = &semaphore;
+                present_info.swapchainCount = 1u;
+                present_info.pSwapchains = &swapchain;
+                present_info.pImageIndices = &acquired_image;
+                present_info.pResults = &present_result;
+                CHECK(vkQueuePresentKHR(queue, &present_info) ==
+                      RIN_VK_ERROR_FEATURE_NOT_PRESENT);
+                CHECK(present_result == RIN_VK_ERROR_FEATURE_NOT_PRESENT &&
+                      provider.present_call_count == 1u);
+                vkDestroySwapchainKHR(device, swapchain, NULL);
+                swapchain = 0u;
+
+                wsi_v4.present = present_retained_then_lost;
+                wsi_v4.poll_present = poll_present_retained;
+                wsi_v4.cancel_present = cancel_present_retained;
+                CHECK(vkCreateSwapchainKHR(device, &swapchain_create_info,
+                                          NULL, &swapchain) == RIN_VK_SUCCESS);
+                CHECK(vkAcquireNextImageKHR(device, swapchain, 0u, semaphore,
+                                            fence, &acquired_image) ==
+                      RIN_VK_SUCCESS);
+                CHECK(vkResetFences(device, 1u, &fence) == RIN_VK_SUCCESS);
+                CHECK(vkQueuePresentKHR(queue, &present_info) ==
+                      RIN_VK_ERROR_DEVICE_LOST);
+                CHECK(present_result == RIN_VK_ERROR_DEVICE_LOST &&
+                      provider.present_call_count == 2u);
+                vkDestroySwapchainKHR(device, swapchain, NULL);
+                swapchain = 0u;
+                CHECK(provider.cancel_call_count == 1u);
+                retained_present_base = provider.present_call_count;
+                cancel_base = provider.cancel_call_count;
+                wsi_v4.present = present_retained;
+
+                CHECK(vkCreateSwapchainKHR(device, &swapchain_create_info,
+                                          NULL, &swapchain) == RIN_VK_SUCCESS);
+                CHECK(vkAcquireNextImageKHR(device, swapchain, 0u, semaphore,
+                                            fence, &first_image) ==
+                      RIN_VK_SUCCESS);
+                CHECK(first_image < 2u &&
+                      vkGetFenceStatus(device, fence) == RIN_VK_SUCCESS);
+                CHECK(vkResetFences(device, 1u, &fence) == RIN_VK_SUCCESS);
+                memset(&present_info, 0, sizeof(present_info));
+                present_info.sType = RIN_VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+                present_info.waitSemaphoreCount = 1u;
+                present_info.pWaitSemaphores = &semaphore;
+                present_info.swapchainCount = 1u;
+                present_info.pSwapchains = &swapchain;
+                present_info.pImageIndices = &first_image;
+                present_info.pResults = &present_result;
+                CHECK(vkQueuePresentKHR(queue, &present_info) ==
+                      RIN_VK_SUCCESS);
+                CHECK(present_result == RIN_VK_SUCCESS &&
+                      provider.present_call_count == retained_present_base + 1u &&
+                      provider.last_present.image_index == first_image &&
+                      provider.last_present.present_mode ==
+                          RIN_VK_PRESENT_MODE_FIFO_KHR &&
+                      provider.last_present.allocation_handle != 0u &&
+                      provider.last_present.allocation_size != 0u &&
+                      provider.last_present.frame_id != 0u &&
+                      provider.last_present.display_cookie ==
+                          provider.display.display_cookie &&
+                      provider.last_present.output_generation ==
+                          provider.output_generation &&
+                      provider.last_present.device_generation ==
+                          provider.device_generation);
+
+                /* A pending FIFO present must not prevent acquisition of a
+                 * different, still-available swapchain image. */
+                CHECK(vkAcquireNextImageKHR(device, swapchain, 0u, semaphore,
+                                            fence, &second_image) ==
+                      RIN_VK_SUCCESS);
+                CHECK(second_image < 2u && second_image != first_image &&
+                      vkGetFenceStatus(device, fence) == RIN_VK_SUCCESS);
+                CHECK(vkResetFences(device, 1u, &fence) == RIN_VK_SUCCESS);
+                present_info.pImageIndices = &second_image;
+                CHECK(vkQueuePresentKHR(queue, &present_info) ==
+                      RIN_VK_SUCCESS);
+                CHECK(provider.present_call_count == retained_present_base + 2u);
+
+                CHECK(vkAcquireNextImageKHR(device, swapchain, 0u, semaphore,
+                                            fence, &acquired_image) ==
+                      RIN_VK_NOT_READY);
+                provider.complete_presents = 1u;
+                CHECK(vkAcquireNextImageKHR(device, swapchain, 0u, semaphore,
+                                            fence, &third_image) ==
+                      RIN_VK_SUCCESS);
+                CHECK(provider.poll_call_count >= 5u && third_image < 2u &&
+                      vkGetFenceStatus(device, fence) == RIN_VK_SUCCESS);
+                CHECK(vkResetFences(device, 1u, &fence) == RIN_VK_SUCCESS);
+                present_info.pImageIndices = &third_image;
+                CHECK(vkQueuePresentKHR(queue, &present_info) ==
+                      RIN_VK_SUCCESS);
+                CHECK(provider.present_call_count == retained_present_base + 3u);
+                vkDestroySwapchainKHR(device, swapchain, NULL);
+                swapchain = 0u;
+                CHECK(provider.cancel_call_count == cancel_base + 1u);
+
+                swapchain_create_info.presentMode =
+                    RIN_VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+                CHECK(vkCreateSwapchainKHR(device, &swapchain_create_info,
+                                          NULL, &swapchain) == RIN_VK_SUCCESS);
+                CHECK(vkAcquireNextImageKHR(device, swapchain, 0u, semaphore,
+                                            fence, &acquired_image) ==
+                      RIN_VK_SUCCESS);
+                CHECK(vkResetFences(device, 1u, &fence) == RIN_VK_SUCCESS);
+                present_info.pSwapchains = &swapchain;
+                present_info.pImageIndices = &acquired_image;
+                CHECK(vkQueuePresentKHR(queue, &present_info) ==
+                      RIN_VK_SUCCESS);
+                CHECK(provider.last_present.present_mode ==
+                      RIN_VK_PRESENT_MODE_FIFO_RELAXED_KHR);
+                CHECK(vkQueueWaitIdle(queue) == RIN_VK_SUCCESS);
+                vkDestroySwapchainKHR(device, swapchain, NULL);
+                swapchain = 0u;
+                swapchain_create_info.presentMode = RIN_VK_PRESENT_MODE_FIFO_KHR;
+            }
             for (recycle_index = 0u; recycle_index < 2u; ++recycle_index) {
                 CHECK(vkCreateSwapchainKHR(device, &swapchain_create_info,
                                           NULL, &swapchain) ==
@@ -1243,6 +1512,44 @@ int main(void) {
                 vkDestroySwapchainKHR(device, swapchain, NULL);
                 swapchain = 0u;
             }
+
+            CHECK(vkCreateSwapchainKHR(device, &swapchain_create_info,
+                                      NULL, &swapchain) == RIN_VK_SUCCESS);
+            {
+                uint32_t pre_resize_image = UINT32_MAX;
+                uint32_t stale_acquired_image = UINT32_MAX;
+                const uint32_t presents_before_resize =
+                    provider.present_call_count;
+                CHECK(vkAcquireNextImageKHR(device, swapchain, 0u, semaphore,
+                                            fence, &pre_resize_image) ==
+                      RIN_VK_SUCCESS);
+                provider.output_generation += 1u;
+                provider.display.output_generation =
+                    provider.output_generation;
+                provider.planes[0].output_generation =
+                    provider.output_generation;
+                provider.modes[0].output_generation =
+                    provider.output_generation;
+                provider.modes[0].width = provider.display.width;
+                provider.modes[0].height = provider.display.height;
+                provider.modes[1].output_generation =
+                    provider.output_generation;
+                CHECK(vkAcquireNextImageKHR(device, swapchain, 0u,
+                                            semaphore, fence,
+                                            &stale_acquired_image) ==
+                      RIN_VK_ERROR_OUT_OF_DATE_KHR);
+                present_info.pImageIndices = &pre_resize_image;
+                CHECK(vkQueuePresentKHR(queue, &present_info) ==
+                      RIN_VK_ERROR_OUT_OF_DATE_KHR);
+                CHECK(present_result == RIN_VK_ERROR_OUT_OF_DATE_KHR &&
+                      provider.present_call_count == presents_before_resize);
+            }
+            vkDestroySwapchainKHR(device, swapchain, NULL);
+            swapchain = 0u;
+            vkDestroySemaphore(device, semaphore, NULL);
+            semaphore = 0u;
+            vkDestroyFence(device, fence, NULL);
+            fence = 0u;
             vkDestroyDevice(device, NULL);
             device = NULL;
         }
@@ -1255,6 +1562,8 @@ cleanup:
     if (swapchain_image_view && device)
         vkDestroyImageView(device, swapchain_image_view, NULL);
     if (swapchain && device) vkDestroySwapchainKHR(device, swapchain, NULL);
+    if (semaphore && device) vkDestroySemaphore(device, semaphore, NULL);
+    if (fence && device) vkDestroyFence(device, fence, NULL);
     if (device) vkDestroyDevice(device, NULL);
     if (created_surface && instance)
         vkDestroySurfaceKHR(instance, created_surface, NULL);

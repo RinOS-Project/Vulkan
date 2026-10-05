@@ -26,6 +26,15 @@
 #define RIN_VK_MAX_DISPLAY_SURFACES 64u
 #define RIN_VK_MAX_SWAPCHAINS 32u
 #define RIN_VK_MAX_SWAPCHAIN_IMAGES 8u
+#define RIN_VK_MAX_WSI_PRESENTS \
+    (RIN_VK_MAX_SWAPCHAINS * RIN_VK_MAX_SWAPCHAIN_IMAGES)
+#define RIN_VK_SWAPCHAIN_IMAGE_AVAILABLE 0u
+#define RIN_VK_SWAPCHAIN_IMAGE_ACQUIRED 1u
+#define RIN_VK_SWAPCHAIN_IMAGE_PRESENT_PENDING 2u
+#define RIN_VK_SWAPCHAIN_IMAGE_PRESENT_UNTRACKED 3u
+#define RIN_VK_PRESENT_RECORD_ACTIVE 1u
+#define RIN_VK_PRESENT_RECORD_RESERVED 2u
+#define RIN_VK_PRESENT_RECORD_UNTRACKED 3u
 #define RIN_VK_MAX_FENCES 128u
 #define RIN_VK_MAX_SEMAPHORES 128u
 #define RIN_VK_MAX_SUBMISSIONS 64u
@@ -138,6 +147,19 @@ struct RinVkQueue_T {
     uint32_t reserved;
 };
 
+typedef struct RinVkPendingPresent {
+    uint32_t state;
+    uint32_t presentation_display_id;
+    uint32_t queue_index;
+    uint32_t image_index;
+    uint64_t display_cookie;
+    uint64_t image_token;
+    uint64_t output_generation;
+    uint64_t device_generation;
+    uint64_t frame_id;
+    uint64_t platform_token;
+} RinVkPendingPresent;
+
 struct RinVkDevice_T {
     uintptr_t loader_magic;
     uint32_t state;
@@ -155,6 +177,8 @@ struct RinVkDevice_T {
     uint32_t queue_count;
     uint32_t reserved_queue;
     uint64_t next_submission_order;
+    volatile uint32_t wsi_lock;
+    RinVkPendingPresent pending_presents[RIN_VK_MAX_WSI_PRESENTS];
     struct RinVkQueue_T queues[RIN_VULKAN_PRODUCT_MAX_QUEUES];
 };
 
@@ -271,6 +295,7 @@ typedef struct RinVkSwapchainSlot {
     uint32_t generation;
     struct RinVkDevice_T* owner;
     RinVkDisplaySurfaceSlot* surface;
+    RinVkSurfaceKHR surface_handle;
     uint32_t surface_generation;
     uint64_t output_generation;
     uint64_t device_generation;
@@ -282,6 +307,12 @@ typedef struct RinVkSwapchainSlot {
     RinVkExtent2D image_extent;
     uint32_t image_usage;
     uint32_t retired;
+    uint32_t presentation_display_id;
+    uint32_t next_image_index;
+    uint64_t next_frame_id;
+    uint32_t image_states[RIN_VK_MAX_SWAPCHAIN_IMAGES];
+    uint64_t acquired_frame_ids[RIN_VK_MAX_SWAPCHAIN_IMAGES];
+    uint64_t present_tokens[RIN_VK_MAX_SWAPCHAIN_IMAGES];
     RinVkImage images[RIN_VK_MAX_SWAPCHAIN_IMAGES];
     RinVkDeviceMemory memories[RIN_VK_MAX_SWAPCHAIN_IMAGES];
 } RinVkSwapchainSlot;
@@ -6177,6 +6208,270 @@ static int surface_supports_present_mode(
     return 0;
 }
 
+static void device_wsi_lock(struct RinVkDevice_T* device) {
+    while (__atomic_exchange_n(&device->wsi_lock, 1u, __ATOMIC_ACQUIRE) != 0u)
+        yield_thread();
+}
+
+static void device_wsi_unlock(struct RinVkDevice_T* device) {
+    __atomic_store_n(&device->wsi_lock, 0u, __ATOMIC_RELEASE);
+}
+
+static RinVkSwapchainSlot* swapchain_for_presentation(
+        struct RinVkDevice_T* device, uint32_t presentation_display_id) {
+    uint32_t index;
+    if (!device || presentation_display_id == 0u) return NULL;
+    for (index = 0u; index < RIN_VK_MAX_SWAPCHAINS; ++index) {
+        RinVkSwapchainSlot* swapchain = &g_swapchains[index];
+        if (__atomic_load_n(&swapchain->state, __ATOMIC_ACQUIRE) != 0u &&
+            swapchain->owner == device &&
+            swapchain->presentation_display_id == presentation_display_id)
+            return swapchain;
+    }
+    return NULL;
+}
+
+static RinVkPendingPresent* reserve_pending_present(
+        struct RinVkDevice_T* device) {
+    uint32_t index;
+    for (index = 0u; index < RIN_VK_MAX_WSI_PRESENTS; ++index) {
+        RinVkPendingPresent* pending = &device->pending_presents[index];
+        if (pending->state == 0u) {
+            memset(pending, 0, sizeof(*pending));
+            pending->state = RIN_VK_PRESENT_RECORD_RESERVED;
+            return pending;
+        }
+    }
+    return NULL;
+}
+
+static RinVkResult poll_pending_present(
+        struct RinVkDevice_T* device, RinVkPendingPresent* pending) {
+    RinVulkanWsiPresentStatusV1 status;
+    RinVulkanWsiPlatformV4* platform;
+    RinVkSwapchainSlot* swapchain;
+    RinVkImageSlot* image;
+    int result;
+    if (!device || !pending ||
+        (pending->state != RIN_VK_PRESENT_RECORD_ACTIVE &&
+         pending->state != RIN_VK_PRESENT_RECORD_UNTRACKED) ||
+        pending->platform_token == 0u)
+        return RIN_VK_ERROR_DEVICE_LOST;
+    memset(&status, 0, sizeof(status));
+    status.struct_size = sizeof(status);
+    status.version = RIN_VULKAN_WSI_PLATFORM_VERSION;
+    platform = acquire_wsi_v4();
+    if (!platform) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    result = platform->poll_present(platform->context,
+                                    pending->display_cookie,
+                                    pending->platform_token, &status);
+    release_wsi();
+    if (result == RIN_VULKAN_WSI_PLATFORM_NOT_READY)
+        return RIN_VK_NOT_READY;
+    if (result != RIN_VULKAN_WSI_PLATFORM_OK)
+        return map_wsi_platform_result(result);
+    if (status.struct_size != sizeof(status) ||
+        status.version != RIN_VULKAN_WSI_PLATFORM_VERSION ||
+        status.reserved0 != 0u || !wsi_zero_words(status.reserved, 2u))
+        return RIN_VK_ERROR_DEVICE_LOST;
+    if (status.output_generation != pending->output_generation ||
+        status.device_generation != pending->device_generation)
+        return RIN_VK_ERROR_OUT_OF_DATE_KHR;
+    if (status.state == RIN_VULKAN_WSI_PRESENT_PENDING)
+        return RIN_VK_NOT_READY;
+    if (status.state != RIN_VULKAN_WSI_PRESENT_COMPLETE)
+        return RIN_VK_ERROR_DEVICE_LOST;
+
+    swapchain = swapchain_for_presentation(
+        device, pending->presentation_display_id);
+    if (!swapchain || pending->image_index >= swapchain->image_count ||
+        swapchain->output_generation != pending->output_generation ||
+        swapchain->device_generation != pending->device_generation ||
+        swapchain->acquired_frame_ids[pending->image_index] !=
+            pending->frame_id ||
+        swapchain->present_tokens[pending->image_index] !=
+            pending->platform_token ||
+        (swapchain->image_states[pending->image_index] !=
+             RIN_VK_SWAPCHAIN_IMAGE_PRESENT_PENDING &&
+         swapchain->image_states[pending->image_index] !=
+             RIN_VK_SWAPCHAIN_IMAGE_PRESENT_UNTRACKED))
+        return RIN_VK_ERROR_DEVICE_LOST;
+    image = image_slot((RinVkDevice)device,
+                       swapchain->images[pending->image_index]);
+    if (!image || !image->memory ||
+        image->memory->product_allocation != pending->image_token ||
+        image->memory_generation != image->memory->generation)
+        return RIN_VK_ERROR_DEVICE_LOST;
+
+    swapchain->image_states[pending->image_index] =
+        RIN_VK_SWAPCHAIN_IMAGE_AVAILABLE;
+    swapchain->acquired_frame_ids[pending->image_index] = 0u;
+    swapchain->present_tokens[pending->image_index] = 0u;
+    memset(pending, 0, sizeof(*pending));
+    return RIN_VK_SUCCESS;
+}
+
+static RinVkResult poll_device_presentations_locked(
+        struct RinVkDevice_T* device, uint32_t queue_index) {
+    uint32_t index;
+    RinVkResult result = RIN_VK_SUCCESS;
+    for (index = 0u; index < RIN_VK_MAX_WSI_PRESENTS; ++index) {
+        RinVkPendingPresent* pending = &device->pending_presents[index];
+        RinVkResult poll_result;
+        if (pending->state != RIN_VK_PRESENT_RECORD_ACTIVE &&
+            pending->state != RIN_VK_PRESENT_RECORD_UNTRACKED)
+            continue;
+        if (queue_index != UINT32_MAX &&
+            pending->queue_index != queue_index)
+            continue;
+        poll_result = poll_pending_present(device, pending);
+        if (poll_result == RIN_VK_NOT_READY)
+            result = RIN_VK_NOT_READY;
+        else if (poll_result != RIN_VK_SUCCESS)
+            return poll_result;
+    }
+    return result;
+}
+
+static RinVkResult poll_device_presentations(
+        struct RinVkDevice_T* device, uint32_t queue_index) {
+    RinVkResult result;
+    if (!device) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    device_wsi_lock(device);
+    result = poll_device_presentations_locked(device, queue_index);
+    device_wsi_unlock(device);
+    return result;
+}
+
+static RinVkResult poll_swapchain_presentations_locked(
+        struct RinVkDevice_T* device, uint32_t presentation_display_id) {
+    uint32_t index;
+    RinVkResult result = RIN_VK_SUCCESS;
+    for (index = 0u; index < RIN_VK_MAX_WSI_PRESENTS; ++index) {
+        RinVkPendingPresent* pending = &device->pending_presents[index];
+        RinVkResult poll_result;
+        if ((pending->state != RIN_VK_PRESENT_RECORD_ACTIVE &&
+             pending->state != RIN_VK_PRESENT_RECORD_UNTRACKED) ||
+            pending->presentation_display_id != presentation_display_id)
+            continue;
+        poll_result = poll_pending_present(device, pending);
+        if (poll_result == RIN_VK_NOT_READY)
+            result = RIN_VK_NOT_READY;
+        else if (poll_result != RIN_VK_SUCCESS)
+            return poll_result;
+    }
+    return result;
+}
+
+static RinVkResult wait_present_semaphores(
+        struct RinVkDevice_T* device, uint32_t semaphore_count,
+        const RinVkSemaphore* semaphores) {
+    uint32_t index;
+    if (!device || semaphore_count > RIN_VK_MAX_SUBMIT_SEMAPHORES ||
+        (semaphore_count != 0u && !semaphores))
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    for (index = 0u; index < semaphore_count; ++index) {
+        uint32_t prior;
+        for (prior = 0u; prior < index; ++prior)
+            if (semaphores[prior] == semaphores[index])
+                return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    }
+    for (;;) {
+        uint32_t ready_count = 0u;
+        RinVkResult result = maintain_device_submissions(device);
+        if (result != RIN_VK_SUCCESS && result != RIN_VK_NOT_READY)
+            return result;
+        if (result == RIN_VK_NOT_READY) {
+            yield_thread();
+            continue;
+        }
+        sync_lock();
+        for (index = 0u; index < semaphore_count; ++index) {
+            RinVkSemaphoreSlot* semaphore = semaphore_slot(
+                (RinVkDevice)device, semaphores[index]);
+            if (!semaphore ||
+                semaphore->type != RIN_VK_SEMAPHORE_TYPE_BINARY) {
+                sync_unlock();
+                return RIN_VK_ERROR_INITIALIZATION_FAILED;
+            }
+            if (__atomic_load_n(&semaphore->signaled, __ATOMIC_ACQUIRE) != 0u &&
+                __atomic_load_n(&semaphore->pending, __ATOMIC_ACQUIRE) == 0u)
+                ++ready_count;
+        }
+        if (ready_count == semaphore_count) {
+            for (index = 0u; index < semaphore_count; ++index) {
+                RinVkSemaphoreSlot* semaphore = semaphore_slot(
+                    (RinVkDevice)device, semaphores[index]);
+                __atomic_store_n(&semaphore->signaled, 0u, __ATOMIC_RELEASE);
+            }
+            sync_unlock();
+            return RIN_VK_SUCCESS;
+        }
+        sync_unlock();
+        yield_thread();
+    }
+}
+
+static int cancel_swapchain_presentations_locked(
+        struct RinVkDevice_T* device, uint32_t presentation_display_id) {
+    uint32_t index;
+    RinVkSwapchainSlot* swapchain;
+    if (!device || presentation_display_id == 0u) return 0;
+    swapchain = swapchain_for_presentation(device, presentation_display_id);
+    if (!swapchain) return 0;
+    for (index = 0u; index < RIN_VK_MAX_WSI_PRESENTS; ++index) {
+        RinVkPendingPresent* pending = &device->pending_presents[index];
+        RinVulkanWsiPlatformV4* platform;
+        RinVkImageSlot* image;
+        int result;
+        if (pending->state == 0u ||
+            pending->presentation_display_id != presentation_display_id)
+            continue;
+        if ((pending->state != RIN_VK_PRESENT_RECORD_ACTIVE &&
+             pending->state != RIN_VK_PRESENT_RECORD_UNTRACKED) ||
+            pending->platform_token == 0u ||
+            pending->image_index >= swapchain->image_count ||
+            swapchain->acquired_frame_ids[pending->image_index] !=
+                pending->frame_id ||
+            swapchain->present_tokens[pending->image_index] !=
+                pending->platform_token)
+            return 0;
+        image = image_slot((RinVkDevice)device,
+                           swapchain->images[pending->image_index]);
+        if (!image || !image->memory ||
+            image->memory->product_allocation != pending->image_token ||
+            image->memory_generation != image->memory->generation)
+            return 0;
+        platform = acquire_wsi_v4();
+        if (!platform) return 0;
+        result = platform->cancel_present(platform->context,
+                                          pending->display_cookie,
+                                          pending->platform_token);
+        release_wsi();
+        if (result != RIN_VULKAN_WSI_PLATFORM_OK) return 0;
+        swapchain->image_states[pending->image_index] =
+            RIN_VK_SWAPCHAIN_IMAGE_AVAILABLE;
+        swapchain->acquired_frame_ids[pending->image_index] = 0u;
+        swapchain->present_tokens[pending->image_index] = 0u;
+        memset(pending, 0, sizeof(*pending));
+    }
+    return 1;
+}
+
+static RinVkResult wait_queue_submissions_idle(
+        struct RinVkQueue_T* queue) {
+    for (;;) {
+        RinVkResult result = maintain_device_submissions(queue->device);
+        if (result != RIN_VK_SUCCESS && result != RIN_VK_NOT_READY)
+            return result;
+        if (result == RIN_VK_SUCCESS &&
+            !queue_submission_slots_active(queue->device,
+                                          queue->queue_index))
+            return RIN_VK_SUCCESS;
+        yield_thread();
+    }
+}
+
 static RinVkResult swapchain_create_image(
         struct RinVkDevice_T* device, RinVkSwapchainSlot* swapchain,
         uint32_t image_index) {
@@ -6240,10 +6535,28 @@ static RinVkResult swapchain_create_image(
 
 static int swapchain_destroy_images(RinVkDevice device,
                                     RinVkSwapchainSlot* swapchain) {
+    struct RinVkDevice_T* owner = device_slot(device);
     uint32_t index;
+    if (!owner || device_submission_slots_active(owner)) return 0;
     for (index = 0u; index < swapchain->image_count; ++index) {
         RinVkImageSlot* image = image_slot(device, swapchain->images[index]);
         if (image && image_has_views(image)) return 0;
+    }
+    if (swapchain->presentation_display_id != 0u) {
+        device_wsi_lock(owner);
+        if (!cancel_swapchain_presentations_locked(
+                owner, swapchain->presentation_display_id)) {
+            device_wsi_unlock(owner);
+            return 0;
+        }
+        device_wsi_unlock(owner);
+    }
+    for (index = 0u; index < swapchain->image_count; ++index) {
+        if (swapchain->image_states[index] ==
+                RIN_VK_SWAPCHAIN_IMAGE_PRESENT_PENDING ||
+            swapchain->image_states[index] ==
+                RIN_VK_SWAPCHAIN_IMAGE_PRESENT_UNTRACKED)
+            return 0;
     }
     for (index = 0u; index < swapchain->image_count; ++index) {
         RinVkImageSlot* image = image_slot(device, swapchain->images[index]);
@@ -6366,6 +6679,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateSwapchainKHR(
     }
     swapchain->owner = device;
     swapchain->surface = lease.surface;
+    swapchain->surface_handle = create_info->surface;
     swapchain->surface_generation = lease.surface_generation;
     swapchain->output_generation = lease.output_generation;
     swapchain->device_generation = lease.device_generation;
@@ -6375,6 +6689,8 @@ RinVkResult RIN_VKAPI_CALL vkCreateSwapchainKHR(
     swapchain->image_color_space = create_info->imageColorSpace;
     swapchain->image_extent = create_info->imageExtent;
     swapchain->image_usage = create_info->imageUsage;
+    swapchain->presentation_display_id = slot_index + 1u;
+    swapchain->next_frame_id = 1u;
     for (index = 0u; index < create_info->minImageCount; ++index) {
         result = swapchain_create_image(device, swapchain, index);
         if (result != RIN_VK_SUCCESS) goto rollback;
@@ -6475,6 +6791,380 @@ RinVkResult RIN_VKAPI_CALL vkGetSwapchainImagesKHR(
         images[index] = swapchain->images[index];
     *image_count = count;
     return count < swapchain->image_count ? RIN_VK_INCOMPLETE : RIN_VK_SUCCESS;
+}
+
+RinVkResult RIN_VKAPI_CALL vkAcquireNextImageKHR(
+        RinVkDevice device_handle, RinVkSwapchainKHR swapchain_handle,
+        uint64_t timeout, RinVkSemaphore semaphore_handle,
+        RinVkFence fence_handle, uint32_t* image_index_out) {
+    struct RinVkDevice_T* device = device_slot(device_handle);
+    RinVkSwapchainSlot* swapchain;
+    uint64_t start_ns = 0u;
+    if (!image_index_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    *image_index_out = UINT32_MAX;
+    if (!device || (semaphore_handle == 0u && fence_handle == 0u))
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    swapchain = swapchain_slot(device_handle, swapchain_handle);
+    if (!swapchain || swapchain->owner != device ||
+        swapchain->presentation_display_id == 0u ||
+        __atomic_load_n(&swapchain->retired, __ATOMIC_ACQUIRE) != 0u)
+        return RIN_VK_ERROR_OUT_OF_DATE_KHR;
+    if (swapchain->image_count == 0u)
+        return RIN_VK_ERROR_DEVICE_LOST;
+    if (timeout != 0u && timeout != UINT64_MAX &&
+        !rinvulkan_platform_monotonic_time_ns(&start_ns))
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+
+    for (;;) {
+        RinVkSurfaceCapabilitiesKHR capabilities;
+        RinVkResult result;
+        uint32_t image_index = UINT32_MAX;
+        uint64_t frame_id = 0u;
+        uint32_t offset;
+
+        if (__atomic_load_n(&swapchain->retired, __ATOMIC_ACQUIRE) != 0u ||
+            !swapchain_surface_current(swapchain))
+            return RIN_VK_ERROR_OUT_OF_DATE_KHR;
+        result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+            (RinVkPhysicalDevice)device->physical_device,
+            swapchain->surface_handle, &capabilities);
+        if (result != RIN_VK_SUCCESS) return result;
+
+        sync_lock();
+        if (semaphore_handle != 0u) {
+            RinVkSemaphoreSlot* semaphore = semaphore_slot(
+                device_handle, semaphore_handle);
+            if (!semaphore ||
+                semaphore->type != RIN_VK_SEMAPHORE_TYPE_BINARY ||
+                __atomic_load_n(&semaphore->signaled, __ATOMIC_ACQUIRE) != 0u ||
+                __atomic_load_n(&semaphore->pending, __ATOMIC_ACQUIRE) != 0u) {
+                sync_unlock();
+                return RIN_VK_ERROR_INITIALIZATION_FAILED;
+            }
+        }
+        if (fence_handle != 0u) {
+            RinVkFenceSlot* fence = fence_slot(device_handle, fence_handle);
+            if (!fence ||
+                __atomic_load_n(&fence->signaled, __ATOMIC_ACQUIRE) != 0u ||
+                __atomic_load_n(&fence->pending, __ATOMIC_ACQUIRE) != 0u) {
+                sync_unlock();
+                return RIN_VK_ERROR_INITIALIZATION_FAILED;
+            }
+        }
+        sync_unlock();
+
+        device_wsi_lock(device);
+        result = poll_swapchain_presentations_locked(
+            device, swapchain->presentation_display_id);
+        if (result != RIN_VK_SUCCESS && result != RIN_VK_NOT_READY) {
+            device_wsi_unlock(device);
+            return result;
+        }
+        if (__atomic_load_n(&swapchain->retired, __ATOMIC_ACQUIRE) != 0u ||
+            !swapchain_surface_current(swapchain)) {
+            device_wsi_unlock(device);
+            return RIN_VK_ERROR_OUT_OF_DATE_KHR;
+        }
+        for (offset = 0u; offset < swapchain->image_count; ++offset) {
+            const uint32_t candidate =
+                (swapchain->next_image_index + offset) %
+                swapchain->image_count;
+            if (swapchain->image_states[candidate] ==
+                RIN_VK_SWAPCHAIN_IMAGE_AVAILABLE) {
+                image_index = candidate;
+                break;
+            }
+        }
+        if (image_index != UINT32_MAX) {
+            RinVkImageSlot* image = image_slot(
+                device_handle, swapchain->images[image_index]);
+            if (!image || !image->memory ||
+                image->memory->product_allocation == 0u ||
+                image->memory_generation != image->memory->generation ||
+                image->owner != device ||
+                image->swapchain_owner != swapchain ||
+                swapchain->next_frame_id == 0u) {
+                device_wsi_unlock(device);
+                return RIN_VK_ERROR_DEVICE_LOST;
+            }
+            frame_id = swapchain->next_frame_id++;
+            swapchain->next_image_index =
+                (image_index + 1u) % swapchain->image_count;
+            swapchain->image_states[image_index] =
+                RIN_VK_SWAPCHAIN_IMAGE_ACQUIRED;
+            swapchain->acquired_frame_ids[image_index] = frame_id;
+            swapchain->present_tokens[image_index] = 0u;
+            device_wsi_unlock(device);
+
+            sync_lock();
+            if (semaphore_handle != 0u) {
+                RinVkSemaphoreSlot* semaphore = semaphore_slot(
+                    device_handle, semaphore_handle);
+                if (!semaphore ||
+                    semaphore->type != RIN_VK_SEMAPHORE_TYPE_BINARY ||
+                    __atomic_load_n(&semaphore->signaled,
+                                    __ATOMIC_ACQUIRE) != 0u ||
+                    __atomic_load_n(&semaphore->pending,
+                                    __ATOMIC_ACQUIRE) != 0u) {
+                    sync_unlock();
+                    device_wsi_lock(device);
+                    if (swapchain->image_states[image_index] ==
+                            RIN_VK_SWAPCHAIN_IMAGE_ACQUIRED &&
+                        swapchain->acquired_frame_ids[image_index] == frame_id) {
+                        swapchain->image_states[image_index] =
+                            RIN_VK_SWAPCHAIN_IMAGE_AVAILABLE;
+                        swapchain->acquired_frame_ids[image_index] = 0u;
+                    }
+                    device_wsi_unlock(device);
+                    return RIN_VK_ERROR_INITIALIZATION_FAILED;
+                }
+                __atomic_store_n(&semaphore->signaled, 1u, __ATOMIC_RELEASE);
+            }
+            if (fence_handle != 0u) {
+                RinVkFenceSlot* fence = fence_slot(device_handle, fence_handle);
+                if (!fence ||
+                    __atomic_load_n(&fence->signaled, __ATOMIC_ACQUIRE) != 0u ||
+                    __atomic_load_n(&fence->pending, __ATOMIC_ACQUIRE) != 0u) {
+                    sync_unlock();
+                    device_wsi_lock(device);
+                    if (swapchain->image_states[image_index] ==
+                            RIN_VK_SWAPCHAIN_IMAGE_ACQUIRED &&
+                        swapchain->acquired_frame_ids[image_index] == frame_id) {
+                        swapchain->image_states[image_index] =
+                            RIN_VK_SWAPCHAIN_IMAGE_AVAILABLE;
+                        swapchain->acquired_frame_ids[image_index] = 0u;
+                    }
+                    device_wsi_unlock(device);
+                    return RIN_VK_ERROR_INITIALIZATION_FAILED;
+                }
+                __atomic_store_n(&fence->signaled, 1u, __ATOMIC_RELEASE);
+            }
+            sync_unlock();
+            *image_index_out = image_index;
+            return RIN_VK_SUCCESS;
+        }
+        device_wsi_unlock(device);
+        if (timeout == 0u) return RIN_VK_NOT_READY;
+        if (timeout != UINT64_MAX) {
+            const int elapsed = wait_timeout_elapsed(start_ns, timeout);
+            if (elapsed < 0) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+            if (elapsed != 0) return RIN_VK_TIMEOUT;
+        }
+        yield_thread();
+    }
+}
+
+RinVkResult RIN_VKAPI_CALL vkQueuePresentKHR(
+        RinVkQueue queue_handle, const RinVkPresentInfoKHR* present_info) {
+    struct RinVkQueue_T* queue = queue_slot(queue_handle);
+    struct RinVkDevice_T* device;
+    RinVkSwapchainSlot* swapchains[RIN_VK_MAX_SWAPCHAINS];
+    uint32_t index;
+    RinVkResult overall = RIN_VK_SUCCESS;
+    RinVkResult validation_result = RIN_VK_SUCCESS;
+    if (!queue || !present_info ||
+        present_info->sType != RIN_VK_STRUCTURE_TYPE_PRESENT_INFO_KHR ||
+        present_info->pNext ||
+        present_info->waitSemaphoreCount > RIN_VK_MAX_SUBMIT_SEMAPHORES ||
+        (present_info->waitSemaphoreCount != 0u &&
+         !present_info->pWaitSemaphores) ||
+        present_info->swapchainCount == 0u ||
+        present_info->swapchainCount > RIN_VK_MAX_SWAPCHAINS ||
+        !present_info->pSwapchains || !present_info->pImageIndices)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    device = queue->device;
+    if (present_info->pResults)
+        for (index = 0u; index < present_info->swapchainCount; ++index)
+            present_info->pResults[index] = RIN_VK_SUCCESS;
+
+    for (index = 0u; index < present_info->swapchainCount; ++index) {
+        uint32_t prior;
+        uint32_t supported = 0u;
+        uint32_t image_index = present_info->pImageIndices[index];
+        swapchains[index] = swapchain_slot(
+            (RinVkDevice)device, present_info->pSwapchains[index]);
+        if (!swapchains[index] || swapchains[index]->owner != device) {
+            validation_result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+            goto validation_failed;
+        }
+        for (prior = 0u; prior < index; ++prior)
+            if (present_info->pSwapchains[prior] ==
+                present_info->pSwapchains[index]) {
+                validation_result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+                goto validation_failed;
+            }
+        if (__atomic_load_n(&swapchains[index]->retired,
+                            __ATOMIC_ACQUIRE) != 0u ||
+            !swapchain_surface_current(swapchains[index])) {
+            validation_result = RIN_VK_ERROR_OUT_OF_DATE_KHR;
+            goto validation_failed;
+        }
+        if (image_index >= swapchains[index]->image_count ||
+            swapchains[index]->image_states[image_index] !=
+                RIN_VK_SWAPCHAIN_IMAGE_ACQUIRED ||
+            swapchains[index]->acquired_frame_ids[image_index] == 0u ||
+            swapchains[index]->presentation_display_id == 0u) {
+            validation_result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+            goto validation_failed;
+        }
+        validation_result = vkGetPhysicalDeviceSurfaceSupportKHR(
+            (RinVkPhysicalDevice)device->physical_device,
+            queue->queue_family_index, swapchains[index]->surface_handle,
+            &supported);
+        if (validation_result != RIN_VK_SUCCESS) goto validation_failed;
+        if (supported == 0u) {
+            validation_result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+            goto validation_failed;
+        }
+        {
+            RinVkSurfaceCapabilitiesKHR capabilities;
+            validation_result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+                (RinVkPhysicalDevice)device->physical_device,
+                swapchains[index]->surface_handle, &capabilities);
+        }
+        if (validation_result != RIN_VK_SUCCESS) goto validation_failed;
+    }
+
+    {
+        RinVkResult result = wait_queue_submissions_idle(queue);
+        if (result != RIN_VK_SUCCESS) {
+            overall = result;
+            goto validation_failed;
+        }
+    }
+    {
+        RinVkResult result = wait_present_semaphores(
+            device, present_info->waitSemaphoreCount,
+            present_info->pWaitSemaphores);
+        if (result != RIN_VK_SUCCESS) {
+            overall = result;
+            goto validation_failed;
+        }
+    }
+
+    for (index = 0u; index < present_info->swapchainCount; ++index) {
+        RinVkSwapchainSlot* swapchain = swapchains[index];
+        RinVkPendingPresent* pending;
+        RinVkImageSlot* image;
+        RinVulkanWsiPresentRequestV1 request;
+        RinVulkanWsiPlatformV4* platform;
+        const uint32_t image_index = present_info->pImageIndices[index];
+        uint64_t platform_token = 0u;
+        int platform_result;
+        RinVkResult result;
+
+        device_wsi_lock(device);
+        if (__atomic_load_n(&swapchain->retired, __ATOMIC_ACQUIRE) != 0u ||
+            !swapchain_surface_current(swapchain) ||
+            image_index >= swapchain->image_count ||
+            swapchain->image_states[image_index] !=
+                RIN_VK_SWAPCHAIN_IMAGE_ACQUIRED ||
+            swapchain->acquired_frame_ids[image_index] == 0u) {
+            result = RIN_VK_ERROR_OUT_OF_DATE_KHR;
+            device_wsi_unlock(device);
+            goto present_result;
+        }
+        image = image_slot((RinVkDevice)device, swapchain->images[image_index]);
+        if (!image || !image->memory ||
+            image->memory_generation != image->memory->generation ||
+            image->memory->owner != device ||
+            image->memory->product_allocation == 0u ||
+            image->memory_offset > image->memory->requested_size ||
+            image->memory_size > image->memory->requested_size -
+                                     image->memory_offset ||
+            image->swapchain_owner != swapchain) {
+            result = RIN_VK_ERROR_DEVICE_LOST;
+            device_wsi_unlock(device);
+            goto present_result;
+        }
+        pending = reserve_pending_present(device);
+        if (!pending) {
+            result = RIN_VK_ERROR_TOO_MANY_OBJECTS;
+            device_wsi_unlock(device);
+            goto present_result;
+        }
+        pending->presentation_display_id =
+            swapchain->presentation_display_id;
+        pending->queue_index = queue->queue_index;
+        pending->image_index = image_index;
+        pending->display_cookie = swapchain->surface->display->display_cookie;
+        pending->image_token = image->memory->product_allocation;
+        pending->output_generation = swapchain->output_generation;
+        pending->device_generation = swapchain->device_generation;
+        pending->frame_id = swapchain->acquired_frame_ids[image_index];
+
+        memset(&request, 0, sizeof(request));
+        request.struct_size = sizeof(request);
+        request.version = RIN_VULKAN_WSI_PLATFORM_VERSION;
+        request.display_cookie = pending->display_cookie;
+        request.mode_cookie = swapchain->mode_cookie;
+        request.allocation_handle = image->memory->product_allocation;
+        request.allocation_offset = image->memory_offset;
+        request.allocation_size = image->memory_size;
+        request.output_generation = swapchain->output_generation;
+        request.device_generation = swapchain->device_generation;
+        request.frame_id = pending->frame_id;
+        request.image_index = image_index;
+        request.width = swapchain->image_extent.width;
+        request.height = swapchain->image_extent.height;
+        request.format = (uint32_t)swapchain->image_format;
+        request.present_mode = swapchain->present_mode;
+
+        platform = acquire_wsi_v4();
+        if (!platform) {
+            memset(pending, 0, sizeof(*pending));
+            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+            device_wsi_unlock(device);
+            goto present_result;
+        }
+        platform_result = platform->present(platform->context, &request,
+                                            &platform_token);
+        release_wsi();
+        if (platform_result != RIN_VULKAN_WSI_PLATFORM_OK ||
+            platform_token == 0u) {
+            if (platform_token != 0u ||
+                platform_result == RIN_VULKAN_WSI_PLATFORM_OK) {
+                pending->platform_token = platform_token;
+                pending->state = RIN_VK_PRESENT_RECORD_UNTRACKED;
+                swapchain->image_states[image_index] =
+                    RIN_VK_SWAPCHAIN_IMAGE_PRESENT_UNTRACKED;
+                swapchain->present_tokens[image_index] = platform_token;
+                result = RIN_VK_ERROR_DEVICE_LOST;
+            } else {
+                memset(pending, 0, sizeof(*pending));
+                result = map_wsi_platform_result(platform_result);
+            }
+            device_wsi_unlock(device);
+            goto present_result;
+        }
+
+        pending->platform_token = platform_token;
+        pending->state = RIN_VK_PRESENT_RECORD_ACTIVE;
+        swapchain->image_states[image_index] =
+            RIN_VK_SWAPCHAIN_IMAGE_PRESENT_PENDING;
+        swapchain->present_tokens[image_index] = platform_token;
+        device_wsi_unlock(device);
+        result = RIN_VK_SUCCESS;
+
+present_result:
+        if (present_info->pResults)
+            present_info->pResults[index] = result;
+        if (result != RIN_VK_SUCCESS && result != RIN_VK_SUBOPTIMAL_KHR &&
+            overall == RIN_VK_SUCCESS)
+            overall = result;
+        else if (result == RIN_VK_SUBOPTIMAL_KHR &&
+                 overall == RIN_VK_SUCCESS)
+            overall = RIN_VK_SUBOPTIMAL_KHR;
+    }
+    return overall;
+
+validation_failed:
+    if (overall == RIN_VK_SUCCESS) overall = validation_result;
+    if (present_info->pResults)
+        for (index = 0u; index < present_info->swapchainCount; ++index)
+            if (present_info->pResults[index] == RIN_VK_SUCCESS)
+                present_info->pResults[index] = overall;
+    return overall;
 }
 
 void RIN_VKAPI_CALL vkGetPhysicalDeviceFeatures(
@@ -7065,8 +7755,12 @@ RinVkResult RIN_VKAPI_CALL vkDeviceWaitIdle(RinVkDevice device) {
         if (result != RIN_VK_SUCCESS && result != RIN_VK_NOT_READY)
             return result;
         if (result == RIN_VK_SUCCESS &&
-            !device_submission_slots_active(slot))
-            return RIN_VK_SUCCESS;
+            !device_submission_slots_active(slot)) {
+            result = poll_device_presentations(slot, UINT32_MAX);
+            if (result != RIN_VK_SUCCESS && result != RIN_VK_NOT_READY)
+                return result;
+            if (result == RIN_VK_SUCCESS) return RIN_VK_SUCCESS;
+        }
         yield_thread();
     }
 }
@@ -7081,8 +7775,13 @@ RinVkResult RIN_VKAPI_CALL vkQueueWaitIdle(RinVkQueue queue) {
             return result;
         if (result == RIN_VK_SUCCESS &&
             !queue_submission_slots_active(queue_value->device,
-                                          queue_value->queue_index))
-            return RIN_VK_SUCCESS;
+                                          queue_value->queue_index)) {
+            result = poll_device_presentations(queue_value->device,
+                                               queue_value->queue_index);
+            if (result != RIN_VK_SUCCESS && result != RIN_VK_NOT_READY)
+                return result;
+            if (result == RIN_VK_SUCCESS) return RIN_VK_SUCCESS;
+        }
         yield_thread();
     }
 }

@@ -89,6 +89,8 @@ static int mode_valid_for_output(const RinGpuPresentationOutputV1* output,
         flag = RIN_GPU_PRESENTATION_OUTPUT_MAILBOX;
     else if (mode == RIN_GPU_PRESENTATION_MODE_IMMEDIATE)
         flag = RIN_GPU_PRESENTATION_OUTPUT_IMMEDIATE;
+    else if (mode == RIN_GPU_PRESENTATION_MODE_FIFO_RELAXED)
+        flag = RIN_GPU_PRESENTATION_OUTPUT_FIFO_RELAXED;
     else
         return 0;
     return (output->flags & flag) != 0u;
@@ -259,9 +261,15 @@ static int create_swapchain(
     if (surface_id_out) *surface_id_out = 0u;
     if (!wsi_ready(state) || !output_valid(output) ||
         image_count < RIN_GPU_VULKAN_WSI_MIN_IMAGES ||
-        image_count > RIN_GPU_VULKAN_WSI_MAX_IMAGES ||
-        !mode_valid_for_output(output, mode) || !surface_id_out)
+        image_count > RIN_GPU_VULKAN_WSI_MAX_IMAGES || !surface_id_out)
         return RIN_GPU_VULKAN_WSI_INVALID_ARGUMENT;
+    if (mode != RIN_GPU_PRESENTATION_MODE_FIFO &&
+        mode != RIN_GPU_PRESENTATION_MODE_MAILBOX &&
+        mode != RIN_GPU_PRESENTATION_MODE_IMMEDIATE &&
+        mode != RIN_GPU_PRESENTATION_MODE_FIFO_RELAXED)
+        return RIN_GPU_VULKAN_WSI_INVALID_ARGUMENT;
+    if (!mode_valid_for_output(output, mode))
+        return RIN_GPU_VULKAN_WSI_UNSUPPORTED;
     if (requested_image_tokens) {
         for (uint32_t index = 0u; index < image_count; ++index) {
             if (requested_image_tokens[index] == 0u ||

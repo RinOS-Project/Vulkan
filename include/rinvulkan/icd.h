@@ -2214,6 +2214,12 @@ RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkGetSwapchainImagesKHR(RinVkDevice device, RinVkSwapchainKHR swapchain,
                         uint32_t* image_count, RinVkImage* images);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkAcquireNextImageKHR(RinVkDevice device, RinVkSwapchainKHR swapchain,
+                      uint64_t timeout, RinVkSemaphore semaphore,
+                      RinVkFence fence, uint32_t* image_index_out);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkQueuePresentKHR(RinVkQueue queue, const RinVkPresentInfoKHR* present_info);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkGetPhysicalDeviceDisplayPlanePropertiesKHR(
     RinVkPhysicalDevice physical_device, uint32_t* property_count,
     RinVkDisplayPlanePropertiesKHR* properties);
