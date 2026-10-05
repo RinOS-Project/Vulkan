@@ -245,8 +245,6 @@ int main(void) {
     wsi.present = present_unsupported;
     wsi.poll_present = poll_present_unsupported;
     wsi.cancel_present = cancel_present_unsupported;
-    CHECK(rin_gpu_vulkan_icd_bind_wsi_platform(&wsi) == RIN_GPU_VULKAN_OK);
-    wsi_bound = 1u;
 
     count = 2u;
     CHECK(vkEnumerateInstanceExtensionProperties(NULL, &count, extensions) ==
@@ -271,8 +269,6 @@ int main(void) {
     instance_create.ppEnabledExtensionNames = NULL;
     CHECK(vkCreateInstance(&instance_create, NULL, &instance) ==
           RIN_VK_SUCCESS);
-    CHECK(rin_gpu_vulkan_icd_unbind_wsi_platform(&wsi) ==
-          RIN_GPU_VULKAN_BUSY);
     CHECK(vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceDisplayPropertiesKHR")
           == NULL);
     CHECK(vk_icdGetPhysicalDeviceProcAddr(
@@ -286,6 +282,14 @@ int main(void) {
           RIN_VK_SUCCESS);
     CHECK(count == 1u);
     physical = physical_devices[0];
+
+    count = 0u;
+    CHECK(vkGetPhysicalDeviceDisplayPropertiesKHR(physical, &count, NULL) ==
+          RIN_VK_ERROR_EXTENSION_NOT_PRESENT);
+    CHECK(rin_gpu_vulkan_icd_bind_wsi_platform(&wsi) == RIN_GPU_VULKAN_OK);
+    wsi_bound = 1u;
+    CHECK(rin_gpu_vulkan_icd_unbind_wsi_platform(&wsi) ==
+          RIN_GPU_VULKAN_BUSY);
 
     count = 0u;
     CHECK(vkGetPhysicalDeviceDisplayPropertiesKHR(physical, &count, NULL) ==
