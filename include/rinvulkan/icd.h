@@ -835,6 +835,13 @@ typedef struct RinVkDisplayPlaneCapabilitiesKHR {
     RinVkExtent2D maxDstExtent;
 } RinVkDisplayPlaneCapabilitiesKHR;
 
+#define RIN_VK_DISPLAY_PLANE_ALPHA_OPAQUE_BIT_KHR UINT32_C(0x00000001)
+#define RIN_VK_DISPLAY_PLANE_ALPHA_GLOBAL_BIT_KHR UINT32_C(0x00000002)
+#define RIN_VK_DISPLAY_PLANE_ALPHA_PER_PIXEL_BIT_KHR UINT32_C(0x00000004)
+#define RIN_VK_DISPLAY_PLANE_ALPHA_PER_PIXEL_PREMULTIPLIED_BIT_KHR \
+    UINT32_C(0x00000008)
+#define RIN_VK_DISPLAY_PLANE_ALPHA_KNOWN_BITS_KHR UINT32_C(0x0000000f)
+
 typedef struct RinVkSurfaceCapabilitiesKHR {
     uint32_t minImageCount;
     uint32_t maxImageCount;
@@ -2039,6 +2046,10 @@ int rin_gpu_vulkan_icd_unbind_product_platform(
     RinVulkanProductPlatformV1* platform);
 int rin_gpu_vulkan_icd_bind_wsi_platform(RinVulkanWsiPlatformV1* platform);
 int rin_gpu_vulkan_icd_unbind_wsi_platform(RinVulkanWsiPlatformV1* platform);
+int rin_gpu_vulkan_icd_bind_wsi_platform_v2(
+    RinVulkanWsiPlatformV2* platform);
+int rin_gpu_vulkan_icd_unbind_wsi_platform_v2(
+    RinVulkanWsiPlatformV2* platform);
 /* Product completion is driven by the RinGPU service loop, not by a forged
  * synchronous Vulkan wait.  It retires only work reported complete by the
  * product runtime and leaves still-pending command buffers leased. */
@@ -2142,6 +2153,18 @@ RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkGetDisplayModePropertiesKHR(
     RinVkPhysicalDevice physical_device, RinVkDisplayKHR display,
     uint32_t* property_count, RinVkDisplayModePropertiesKHR* properties);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkGetPhysicalDeviceDisplayPlanePropertiesKHR(
+    RinVkPhysicalDevice physical_device, uint32_t* property_count,
+    RinVkDisplayPlanePropertiesKHR* properties);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkGetDisplayPlaneSupportedDisplaysKHR(
+    RinVkPhysicalDevice physical_device, uint32_t plane_index,
+    uint32_t* display_count, RinVkDisplayKHR* displays);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkGetDisplayPlaneCapabilitiesKHR(
+    RinVkPhysicalDevice physical_device, RinVkDisplayModeKHR mode,
+    uint32_t plane_index, RinVkDisplayPlaneCapabilitiesKHR* capabilities);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkCreateDevice(RinVkPhysicalDevice physical_device,
                const RinVkDeviceCreateInfo* create_info,

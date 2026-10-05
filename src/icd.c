@@ -929,6 +929,17 @@ static void release_wsi(void) {
     __atomic_sub_fetch(&g_active_wsi_calls, 1u, __ATOMIC_RELEASE);
 }
 
+static RinVulkanWsiPlatformV2* acquire_wsi_v2(void) {
+    RinVulkanWsiPlatformV1* platform = acquire_wsi();
+    if (!platform) return NULL;
+    if (platform->version != RIN_VULKAN_WSI_PLATFORM_V2_VERSION ||
+        platform->struct_size != sizeof(RinVulkanWsiPlatformV2)) {
+        release_wsi();
+        return NULL;
+    }
+    return (RinVulkanWsiPlatformV2*)platform;
+}
+
 static RinVkResult map_result(int result) {
     switch (result) {
     case RIN_GPU_VULKAN_OK:
@@ -1087,6 +1098,26 @@ static RinVkDisplaySlot* display_slot_from_handle(
     if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) != 1u ||
         slot->generation != generation ||
         slot->owner_physical_device != physical)
+        return NULL;
+    return slot;
+}
+
+static RinVkDisplayModeSlot* display_mode_slot_from_handle(
+        struct RinVkPhysicalDevice_T* physical,
+        RinVkDisplayModeKHR handle) {
+    uint32_t index_field = (uint32_t)(handle & UINT64_C(0xffff));
+    uint32_t generation = (uint32_t)(handle >> 16u);
+    RinVkDisplayModeSlot* slot;
+    if (!physical || (handle >> 48u) != RIN_VK_DISPLAY_MODE_TAG ||
+        index_field == 0u || index_field > RIN_VK_MAX_DISPLAY_MODES ||
+        generation == 0u)
+        return NULL;
+    slot = &g_display_modes[index_field - 1u];
+    if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) != 1u ||
+        slot->generation != generation || !slot->display ||
+        slot->display->owner_physical_device != physical ||
+        slot->display_generation != slot->display->generation ||
+        __atomic_load_n(&slot->display->state, __ATOMIC_ACQUIRE) != 1u)
         return NULL;
     return slot;
 }
@@ -3632,11 +3663,39 @@ int rin_gpu_vulkan_icd_bind_wsi_platform(
     return RIN_GPU_VULKAN_OK;
 }
 
-int rin_gpu_vulkan_icd_unbind_wsi_platform(
-    RinVulkanWsiPlatformV1* platform) {
+int rin_gpu_vulkan_icd_bind_wsi_platform_v2(
+    RinVulkanWsiPlatformV2* platform) {
+    uintptr_t expected = 0u;
+    if (!platform || (uintptr_t)platform == RIN_VK_ICD_BINDING_TRANSITION ||
+        __atomic_load_n(&g_runtime_binding, __ATOMIC_ACQUIRE) == 0u ||
+        __atomic_load_n(&g_runtime_binding, __ATOMIC_ACQUIRE) ==
+            RIN_VK_ICD_BINDING_TRANSITION ||
+        __atomic_load_n(&g_product_binding, __ATOMIC_ACQUIRE) == 0u ||
+        __atomic_load_n(&g_product_binding, __ATOMIC_ACQUIRE) ==
+            RIN_VK_ICD_BINDING_TRANSITION ||
+        platform->struct_size != sizeof(*platform) ||
+        platform->version != RIN_VULKAN_WSI_PLATFORM_V2_VERSION ||
+        !platform->context || !platform->query_displays ||
+        !platform->query_modes || !platform->present ||
+        !platform->poll_present || !platform->cancel_present ||
+        !platform->query_planes ||
+        !platform->query_plane_supported_displays ||
+        !platform->query_plane_capabilities ||
+        !wsi_zero_words(platform->reserved, 4u) ||
+        !wsi_zero_words(platform->reserved_v2, 4u))
+        return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    if (!__atomic_compare_exchange_n(&g_wsi_binding, &expected,
+                                     (uintptr_t)platform, 0,
+                                     __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+        return RIN_GPU_VULKAN_BUSY;
+    return RIN_GPU_VULKAN_OK;
+}
+
+static int unbind_wsi_platform(void* platform) {
     uintptr_t expected;
     uint32_t index;
-    if (!platform) return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    if (!platform || (uintptr_t)platform == RIN_VK_ICD_BINDING_TRANSITION)
+        return RIN_GPU_VULKAN_INVALID_ARGUMENT;
     expected = (uintptr_t)platform;
     if (!__atomic_compare_exchange_n(
             &g_wsi_binding, &expected, RIN_VK_ICD_BINDING_TRANSITION, 0,
@@ -3676,6 +3735,16 @@ int rin_gpu_vulkan_icd_unbind_wsi_platform(
     }
     __atomic_store_n(&g_wsi_binding, 0u, __ATOMIC_RELEASE);
     return RIN_GPU_VULKAN_OK;
+}
+
+int rin_gpu_vulkan_icd_unbind_wsi_platform(
+    RinVulkanWsiPlatformV1* platform) {
+    return unbind_wsi_platform(platform);
+}
+
+int rin_gpu_vulkan_icd_unbind_wsi_platform_v2(
+    RinVulkanWsiPlatformV2* platform) {
+    return unbind_wsi_platform(platform);
 }
 
 RinVkResult rin_gpu_vulkan_icd_maintain(RinVkDevice device) {
@@ -4262,9 +4331,131 @@ static int wsi_query_display_records(
         }
     }
     *count_out = count;
-    *instance_out = instance;
+    if (instance_out) *instance_out = instance;
     *result_out = map_wsi_platform_result(result);
     return 1;
+}
+
+static int wsi_plane_record_valid(
+        const RinVulkanWsiDisplayPlaneV2* plane, uint32_t expected_index,
+        uint64_t device_generation) {
+    if (!plane || plane->struct_size != sizeof(*plane) ||
+        plane->version != RIN_VULKAN_WSI_PLATFORM_V2_VERSION ||
+        plane->plane_index != expected_index ||
+        plane->device_generation != device_generation ||
+        plane->flags != 0u || plane->reserved0 != 0u ||
+        !wsi_zero_words(plane->reserved, 2u))
+        return 0;
+    if (plane->current_display_cookie == 0u)
+        return plane->output_generation == 0u;
+    return plane->output_generation != 0u &&
+           plane->output_generation != UINT64_MAX;
+}
+
+static int wsi_query_plane_records(
+        struct RinVkPhysicalDevice_T* physical,
+        struct RinVkInstance_T** instance_out,
+        RinVulkanWsiDisplayPlaneV2 planes[RIN_VULKAN_WSI_MAX_PLANES],
+        uint32_t* count_out, uint64_t* device_generation_out,
+        RinVkResult* result_out) {
+    RinGpuVulkanPhysicalDeviceV2 profile;
+    RinGpuVulkanRuntimeV1* runtime;
+    RinVulkanWsiPlatformV2* platform;
+    struct RinVkInstance_T* instance = NULL;
+    uint32_t count = 0u;
+    uint32_t index;
+    int result;
+    if (!physical_slot((RinVkPhysicalDevice)physical, &instance)) {
+        *result_out = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        return 0;
+    }
+    runtime = acquire_runtime();
+    if (!runtime) {
+        *result_out = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        return 0;
+    }
+    memset(&profile, 0, sizeof(profile));
+    result = call_query_physical(runtime, physical->owner_instance,
+                                 physical->runtime_handle, &profile);
+    release_runtime();
+    if (result != RIN_GPU_VULKAN_OK || profile.device_epoch == 0u) {
+        *result_out = result == RIN_GPU_VULKAN_OK
+                          ? RIN_VK_ERROR_DEVICE_LOST
+                          : map_result(result);
+        return 0;
+    }
+    platform = acquire_wsi_v2();
+    if (!platform) {
+        *result_out = RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
+        return 0;
+    }
+    memset(planes, 0,
+           sizeof(RinVulkanWsiDisplayPlaneV2) *
+               RIN_VULKAN_WSI_MAX_PLANES);
+    result = platform->query_planes(
+        platform->context, profile.device_epoch,
+        RIN_VULKAN_WSI_MAX_PLANES, &count, planes);
+    release_wsi();
+    if (count > RIN_VULKAN_WSI_MAX_PLANES) {
+        *result_out = RIN_VK_ERROR_DEVICE_LOST;
+        return 0;
+    }
+    if (result != RIN_VULKAN_WSI_PLATFORM_OK &&
+        result != RIN_VULKAN_WSI_PLATFORM_INCOMPLETE) {
+        *result_out = map_wsi_platform_result(result);
+        return 0;
+    }
+    for (index = 0u; index < count; ++index) {
+        if (!wsi_plane_record_valid(&planes[index], index,
+                                    profile.device_epoch) ||
+            (planes[index].current_display_cookie != 0u &&
+             planes[index].current_stack_index >= count)) {
+            *result_out = RIN_VK_ERROR_DEVICE_LOST;
+            return 0;
+        }
+    }
+    *count_out = count;
+    *device_generation_out = profile.device_epoch;
+    if (instance_out) *instance_out = instance;
+    *result_out = map_wsi_platform_result(result);
+    return 1;
+}
+
+static const RinVulkanWsiDisplayV1* wsi_find_display_record(
+        const RinVulkanWsiDisplayV1* displays, uint32_t display_count,
+        uint64_t display_cookie, uint64_t output_generation,
+        uint64_t device_generation) {
+    uint32_t index;
+    if (!displays || display_cookie == 0u) return NULL;
+    for (index = 0u; index < display_count; ++index) {
+        if (displays[index].display_cookie == display_cookie &&
+            displays[index].output_generation == output_generation &&
+            displays[index].device_generation == device_generation)
+            return &displays[index];
+    }
+    return NULL;
+}
+
+static RinVkResult wsi_cache_display_handle(
+        struct RinVkInstance_T* instance,
+        struct RinVkPhysicalDevice_T* physical,
+        const RinVulkanWsiDisplayV1* source, RinVkDisplayKHR* handle_out) {
+    RinVkDisplaySlot* slot;
+    uint32_t slot_index = 0u;
+    int cache_result = RIN_GPU_VULKAN_OK;
+    if (!instance || !physical || !source || !handle_out)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    sync_lock();
+    slot = cache_display_locked(instance, physical, source, &slot_index, NULL,
+                                &cache_result);
+    if (slot)
+        *handle_out = resource_handle(RIN_VK_DISPLAY_TAG, slot_index,
+                                      slot->generation);
+    sync_unlock();
+    if (slot) return RIN_VK_SUCCESS;
+    return cache_result == RIN_GPU_VULKAN_LIMIT
+               ? RIN_VK_ERROR_TOO_MANY_OBJECTS
+               : RIN_VK_ERROR_DEVICE_LOST;
 }
 
 RinVkResult RIN_VKAPI_CALL vkGetPhysicalDeviceDisplayPropertiesKHR(
@@ -4453,6 +4644,253 @@ RinVkResult RIN_VKAPI_CALL vkGetDisplayModePropertiesKHR(
     if (written < available ||
         callback_result == RIN_VULKAN_WSI_PLATFORM_INCOMPLETE)
         return RIN_VK_INCOMPLETE;
+    return RIN_VK_SUCCESS;
+}
+
+RinVkResult RIN_VKAPI_CALL vkGetPhysicalDeviceDisplayPlanePropertiesKHR(
+        RinVkPhysicalDevice physical_device, uint32_t* property_count,
+        RinVkDisplayPlanePropertiesKHR* properties) {
+    RinVulkanWsiDisplayPlaneV2 planes[RIN_VULKAN_WSI_MAX_PLANES];
+    RinVulkanWsiDisplayV1 displays[RIN_VULKAN_WSI_MAX_DISPLAYS];
+    RinVkDisplayPlanePropertiesKHR converted[RIN_VULKAN_WSI_MAX_PLANES];
+    struct RinVkPhysicalDevice_T* physical;
+    struct RinVkInstance_T* instance = NULL;
+    RinVkResult plane_result = RIN_VK_SUCCESS;
+    RinVkResult display_result = RIN_VK_SUCCESS;
+    uint32_t available = 0u;
+    uint32_t display_count = 0u;
+    uint32_t capacity;
+    uint32_t written;
+    uint32_t index;
+    uint64_t device_generation = 0u;
+    int needs_displays = 0;
+    if (!property_count) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    capacity = *property_count;
+    *property_count = 0u;
+    physical = physical_slot(physical_device, NULL);
+    if (!physical || !wsi_query_plane_records(
+                         physical, &instance, planes, &available,
+                         &device_generation, &plane_result))
+        return plane_result;
+    if (!properties) {
+        *property_count = available;
+        return plane_result;
+    }
+    written = capacity < available ? capacity : available;
+    if (written == 0u)
+        return available != 0u ? RIN_VK_INCOMPLETE : plane_result;
+    for (index = 0u; index < written; ++index)
+        needs_displays |= planes[index].current_display_cookie != 0u;
+    if (needs_displays) {
+        if (!wsi_query_display_records(physical, NULL, displays,
+                                       &display_count, &display_result))
+            return display_result;
+        if (display_result == RIN_VK_SUCCESS)
+            wsi_retire_stale_displays(instance, physical, displays,
+                                      display_count);
+    }
+    memset(converted, 0, sizeof(converted));
+    for (index = 0u; index < written; ++index) {
+        const RinVulkanWsiDisplayPlaneV2* plane = &planes[index];
+        converted[index].currentStackIndex = plane->current_stack_index;
+        if (plane->current_display_cookie != 0u) {
+            const RinVulkanWsiDisplayV1* display = wsi_find_display_record(
+                displays, display_count, plane->current_display_cookie,
+                plane->output_generation, device_generation);
+            RinVkResult handle_result;
+            if (!display) return RIN_VK_ERROR_OUT_OF_DATE_KHR;
+            handle_result = wsi_cache_display_handle(
+                instance, physical, display,
+                &converted[index].currentDisplay);
+            if (handle_result != RIN_VK_SUCCESS) return handle_result;
+        }
+    }
+    memcpy(properties, converted, sizeof(converted[0]) * written);
+    *property_count = written;
+    if (written < available || plane_result == RIN_VK_INCOMPLETE ||
+        display_result == RIN_VK_INCOMPLETE)
+        return RIN_VK_INCOMPLETE;
+    return RIN_VK_SUCCESS;
+}
+
+RinVkResult RIN_VKAPI_CALL vkGetDisplayPlaneSupportedDisplaysKHR(
+        RinVkPhysicalDevice physical_device, uint32_t plane_index,
+        uint32_t* display_count, RinVkDisplayKHR* displays) {
+    RinVulkanWsiDisplayPlaneV2 planes[RIN_VULKAN_WSI_MAX_PLANES];
+    RinVulkanWsiDisplayV1 display_records[RIN_VULKAN_WSI_MAX_DISPLAYS];
+    RinVkDisplayKHR converted[RIN_VULKAN_WSI_MAX_DISPLAYS];
+    uint64_t display_cookies[RIN_VULKAN_WSI_MAX_DISPLAYS];
+    struct RinVkPhysicalDevice_T* physical;
+    struct RinVkInstance_T* instance = NULL;
+    RinVulkanWsiPlatformV2* platform;
+    RinVkResult plane_result = RIN_VK_SUCCESS;
+    RinVkResult records_result = RIN_VK_SUCCESS;
+    uint32_t plane_count = 0u;
+    uint32_t available = 0u;
+    uint32_t record_count = 0u;
+    uint32_t capacity;
+    uint32_t written;
+    uint32_t index;
+    uint64_t device_generation = 0u;
+    int callback_result;
+    if (!display_count) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    capacity = *display_count;
+    *display_count = 0u;
+    physical = physical_slot(physical_device, NULL);
+    if (!physical || !wsi_query_plane_records(
+                         physical, &instance, planes, &plane_count,
+                         &device_generation, &plane_result))
+        return plane_result;
+    if (plane_index >= plane_count) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    platform = acquire_wsi_v2();
+    if (!platform) return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
+    memset(display_cookies, 0, sizeof(display_cookies));
+    callback_result = platform->query_plane_supported_displays(
+        platform->context, device_generation, plane_index,
+        RIN_VULKAN_WSI_MAX_DISPLAYS, &available, display_cookies);
+    release_wsi();
+    if (available > RIN_VULKAN_WSI_MAX_DISPLAYS)
+        return RIN_VK_ERROR_DEVICE_LOST;
+    if (callback_result != RIN_VULKAN_WSI_PLATFORM_OK &&
+        callback_result != RIN_VULKAN_WSI_PLATFORM_INCOMPLETE)
+        return map_wsi_platform_result(callback_result);
+    for (index = 0u; index < available; ++index) {
+        if (display_cookies[index] == 0u)
+            return RIN_VK_ERROR_DEVICE_LOST;
+        for (uint32_t prior = 0u; prior < index; ++prior) {
+            if (display_cookies[prior] == display_cookies[index])
+                return RIN_VK_ERROR_DEVICE_LOST;
+        }
+    }
+    if (!displays) {
+        *display_count = available;
+        return callback_result == RIN_VULKAN_WSI_PLATFORM_INCOMPLETE
+                   ? RIN_VK_INCOMPLETE
+                   : RIN_VK_SUCCESS;
+    }
+    written = capacity < available ? capacity : available;
+    if (written == 0u)
+        return available != 0u ? RIN_VK_INCOMPLETE : RIN_VK_SUCCESS;
+    if (!wsi_query_display_records(physical, NULL, display_records,
+                                   &record_count, &records_result))
+        return records_result;
+    if (records_result == RIN_VK_SUCCESS)
+        wsi_retire_stale_displays(instance, physical, display_records,
+                                  record_count);
+    memset(converted, 0, sizeof(converted));
+    for (index = 0u; index < written; ++index) {
+        const RinVulkanWsiDisplayV1* record = NULL;
+        uint32_t record_index;
+        for (record_index = 0u; record_index < record_count;
+             ++record_index) {
+            if (display_records[record_index].display_cookie ==
+                display_cookies[index]) {
+                record = &display_records[record_index];
+                break;
+            }
+        }
+        if (!record || record->device_generation != device_generation)
+            return RIN_VK_ERROR_OUT_OF_DATE_KHR;
+        {
+            RinVkResult handle_result = wsi_cache_display_handle(
+                instance, physical, record, &converted[index]);
+            if (handle_result != RIN_VK_SUCCESS) return handle_result;
+        }
+    }
+    memcpy(displays, converted, sizeof(converted[0]) * written);
+    *display_count = written;
+    if (written < available ||
+        callback_result == RIN_VULKAN_WSI_PLATFORM_INCOMPLETE ||
+        records_result == RIN_VK_INCOMPLETE)
+        return RIN_VK_INCOMPLETE;
+    return RIN_VK_SUCCESS;
+}
+
+static int wsi_plane_capabilities_valid(
+        const RinVulkanWsiPlaneCapabilitiesV2* capabilities) {
+    return capabilities && capabilities->supported_alpha != 0u &&
+           (capabilities->supported_alpha &
+            ~RIN_VK_DISPLAY_PLANE_ALPHA_KNOWN_BITS_KHR) == 0u &&
+           capabilities->min_src_x <= capabilities->max_src_x &&
+           capabilities->min_src_y <= capabilities->max_src_y &&
+           capabilities->min_src_width != 0u &&
+           capabilities->min_src_height != 0u &&
+           capabilities->min_src_width <= capabilities->max_src_width &&
+           capabilities->min_src_height <= capabilities->max_src_height &&
+           capabilities->min_dst_x <= capabilities->max_dst_x &&
+           capabilities->min_dst_y <= capabilities->max_dst_y &&
+           capabilities->min_dst_width != 0u &&
+           capabilities->min_dst_height != 0u &&
+           capabilities->min_dst_width <= capabilities->max_dst_width &&
+           capabilities->min_dst_height <= capabilities->max_dst_height;
+}
+
+RinVkResult RIN_VKAPI_CALL vkGetDisplayPlaneCapabilitiesKHR(
+        RinVkPhysicalDevice physical_device, RinVkDisplayModeKHR mode_handle,
+        uint32_t plane_index,
+        RinVkDisplayPlaneCapabilitiesKHR* capabilities_out) {
+    RinVulkanWsiDisplayPlaneV2 planes[RIN_VULKAN_WSI_MAX_PLANES];
+    RinVulkanWsiPlaneCapabilitiesV2 source;
+    RinVkDisplayPlaneCapabilitiesKHR converted;
+    struct RinVkPhysicalDevice_T* physical;
+    RinVkDisplayModeSlot* mode;
+    RinVkDisplaySlot* display;
+    RinVulkanWsiPlatformV2* platform;
+    RinVkResult plane_result = RIN_VK_SUCCESS;
+    uint32_t plane_count = 0u;
+    uint64_t device_generation = 0u;
+    int callback_result;
+    if (!capabilities_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    physical = physical_slot(physical_device, NULL);
+    if (!physical || !wsi_query_plane_records(
+                         physical, NULL, planes, &plane_count,
+                         &device_generation, &plane_result))
+        return plane_result;
+    if (plane_result != RIN_VK_SUCCESS)
+        return RIN_VK_ERROR_OUT_OF_DATE_KHR;
+    if (plane_index >= plane_count)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    mode = display_mode_slot_from_handle(physical, mode_handle);
+    if (!mode) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    display = mode->display;
+    if (display->device_generation != device_generation ||
+        mode->output_generation != display->output_generation)
+        return RIN_VK_ERROR_OUT_OF_DATE_KHR;
+    platform = acquire_wsi_v2();
+    if (!platform) return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
+    memset(&source, 0, sizeof(source));
+    callback_result = platform->query_plane_capabilities(
+        platform->context, device_generation, display->display_cookie,
+        display->output_generation, mode->mode_cookie, plane_index, &source);
+    release_wsi();
+    if (__atomic_load_n(&display->state, __ATOMIC_ACQUIRE) != 1u ||
+        __atomic_load_n(&mode->state, __ATOMIC_ACQUIRE) != 1u)
+        return RIN_VK_ERROR_OUT_OF_DATE_KHR;
+    if (callback_result != RIN_VULKAN_WSI_PLATFORM_OK)
+        return callback_result == RIN_VULKAN_WSI_PLATFORM_INCOMPLETE
+                   ? RIN_VK_ERROR_DEVICE_LOST
+                   : map_wsi_platform_result(callback_result);
+    if (!wsi_plane_capabilities_valid(&source))
+        return RIN_VK_ERROR_DEVICE_LOST;
+    memset(&converted, 0, sizeof(converted));
+    converted.supportedAlpha = source.supported_alpha;
+    converted.minSrcPosition.x = source.min_src_x;
+    converted.minSrcPosition.y = source.min_src_y;
+    converted.maxSrcPosition.x = source.max_src_x;
+    converted.maxSrcPosition.y = source.max_src_y;
+    converted.minSrcExtent.width = source.min_src_width;
+    converted.minSrcExtent.height = source.min_src_height;
+    converted.maxSrcExtent.width = source.max_src_width;
+    converted.maxSrcExtent.height = source.max_src_height;
+    converted.minDstPosition.x = source.min_dst_x;
+    converted.minDstPosition.y = source.min_dst_y;
+    converted.maxDstPosition.x = source.max_dst_x;
+    converted.maxDstPosition.y = source.max_dst_y;
+    converted.minDstExtent.width = source.min_dst_width;
+    converted.minDstExtent.height = source.min_dst_height;
+    converted.maxDstExtent.width = source.max_dst_width;
+    converted.maxDstExtent.height = source.max_dst_height;
+    *capabilities_out = converted;
     return RIN_VK_SUCCESS;
 }
 

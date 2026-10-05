@@ -10,10 +10,17 @@ typedef struct TestWsiProvider {
     uint64_t device_generation;
     int query_displays_result;
     int query_modes_result;
+    int query_planes_result;
+    int query_plane_capabilities_result;
     uint32_t display_count;
     uint32_t mode_count;
+    uint32_t plane_count;
+    uint32_t supported_display_count;
     RinVulkanWsiDisplayV1 display;
     RinVulkanWsiModeV1 modes[RIN_VULKAN_WSI_MAX_MODES];
+    RinVulkanWsiDisplayPlaneV2 planes[RIN_VULKAN_WSI_MAX_PLANES];
+    uint64_t supported_display_cookies[RIN_VULKAN_WSI_MAX_DISPLAYS];
+    RinVulkanWsiPlaneCapabilitiesV2 plane_capabilities;
 } TestWsiProvider;
 
 static void make_profile(RinGpuVulkanPhysicalDeviceV2* profile) {
@@ -109,6 +116,36 @@ static void make_display_provider(TestWsiProvider* provider) {
     mode->height = 720u;
     mode->refresh_millihertz = 60000u;
     mode->format = display->format;
+
+    provider->plane_count = 1u;
+    provider->planes[0].struct_size = sizeof(provider->planes[0]);
+    provider->planes[0].version = RIN_VULKAN_WSI_PLATFORM_V2_VERSION;
+    provider->planes[0].plane_index = 0u;
+    provider->planes[0].current_stack_index = 0u;
+    provider->planes[0].current_display_cookie = display->display_cookie;
+    provider->planes[0].output_generation = provider->output_generation;
+    provider->planes[0].device_generation = provider->device_generation;
+    provider->supported_display_count = 1u;
+    provider->supported_display_cookies[0] = display->display_cookie;
+    provider->plane_capabilities.supported_alpha =
+        RIN_VK_DISPLAY_PLANE_ALPHA_OPAQUE_BIT_KHR |
+        RIN_VK_DISPLAY_PLANE_ALPHA_GLOBAL_BIT_KHR;
+    provider->plane_capabilities.min_src_x = 1;
+    provider->plane_capabilities.min_src_y = 2;
+    provider->plane_capabilities.max_src_x = 3;
+    provider->plane_capabilities.max_src_y = 4;
+    provider->plane_capabilities.min_src_width = 1u;
+    provider->plane_capabilities.min_src_height = 1u;
+    provider->plane_capabilities.max_src_width = 4096u;
+    provider->plane_capabilities.max_src_height = 2160u;
+    provider->plane_capabilities.min_dst_x = -2;
+    provider->plane_capabilities.min_dst_y = -3;
+    provider->plane_capabilities.max_dst_x = 4;
+    provider->plane_capabilities.max_dst_y = 5;
+    provider->plane_capabilities.min_dst_width = 1u;
+    provider->plane_capabilities.min_dst_height = 1u;
+    provider->plane_capabilities.max_dst_width = 4096u;
+    provider->plane_capabilities.max_dst_height = 2160u;
 }
 
 static int query_displays(void* context, uint64_t device_generation,
@@ -160,6 +197,77 @@ static int query_modes(void* context, uint64_t device_generation,
                : RIN_VULKAN_WSI_PLATFORM_OK;
 }
 
+static int query_planes(void* context, uint64_t device_generation,
+                        uint32_t capacity, uint32_t* count_out,
+                        RinVulkanWsiDisplayPlaneV2* planes_out) {
+    TestWsiProvider* provider = (TestWsiProvider*)context;
+    uint32_t written;
+    if (!provider || !count_out || (capacity != 0u && !planes_out))
+        return RIN_VULKAN_WSI_PLATFORM_INVALID_ARGUMENT;
+    *count_out = 0u;
+    if (provider->query_planes_result != RIN_VULKAN_WSI_PLATFORM_OK)
+        return provider->query_planes_result;
+    if (device_generation != provider->device_generation)
+        return RIN_VULKAN_WSI_PLATFORM_DEVICE_LOST;
+    written = capacity < provider->plane_count ? capacity
+                                                : provider->plane_count;
+    if (written != 0u)
+        memcpy(planes_out, provider->planes,
+               sizeof(provider->planes[0]) * written);
+    *count_out = written;
+    return written < provider->plane_count
+               ? RIN_VULKAN_WSI_PLATFORM_INCOMPLETE
+               : RIN_VULKAN_WSI_PLATFORM_OK;
+}
+
+static int query_plane_supported_displays(
+    void* context, uint64_t device_generation, uint32_t plane_index,
+    uint32_t capacity, uint32_t* count_out, uint64_t* display_cookies_out) {
+    TestWsiProvider* provider = (TestWsiProvider*)context;
+    uint32_t written;
+    if (!provider || !count_out ||
+        (capacity != 0u && !display_cookies_out))
+        return RIN_VULKAN_WSI_PLATFORM_INVALID_ARGUMENT;
+    *count_out = 0u;
+    if (device_generation != provider->device_generation)
+        return RIN_VULKAN_WSI_PLATFORM_DEVICE_LOST;
+    if (plane_index >= provider->plane_count)
+        return RIN_VULKAN_WSI_PLATFORM_INVALID_ARGUMENT;
+    written = capacity < provider->supported_display_count
+                  ? capacity
+                  : provider->supported_display_count;
+    if (written != 0u)
+        memcpy(display_cookies_out, provider->supported_display_cookies,
+               sizeof(provider->supported_display_cookies[0]) * written);
+    *count_out = written;
+    return written < provider->supported_display_count
+               ? RIN_VULKAN_WSI_PLATFORM_INCOMPLETE
+               : RIN_VULKAN_WSI_PLATFORM_OK;
+}
+
+static int query_plane_capabilities(
+    void* context, uint64_t device_generation, uint64_t display_cookie,
+    uint64_t output_generation, uint64_t mode_cookie, uint32_t plane_index,
+    RinVulkanWsiPlaneCapabilitiesV2* capabilities_out) {
+    TestWsiProvider* provider = (TestWsiProvider*)context;
+    if (!provider || !capabilities_out)
+        return RIN_VULKAN_WSI_PLATFORM_INVALID_ARGUMENT;
+    if (provider->query_plane_capabilities_result !=
+        RIN_VULKAN_WSI_PLATFORM_OK)
+        return provider->query_plane_capabilities_result;
+    if (device_generation != provider->device_generation)
+        return RIN_VULKAN_WSI_PLATFORM_DEVICE_LOST;
+    if (display_cookie != provider->display.display_cookie ||
+        output_generation != provider->output_generation)
+        return RIN_VULKAN_WSI_PLATFORM_OUT_OF_DATE;
+    if ((mode_cookie != provider->modes[0].mode_cookie &&
+         mode_cookie != provider->modes[1].mode_cookie) ||
+        plane_index >= provider->plane_count)
+        return RIN_VULKAN_WSI_PLATFORM_UNSUPPORTED;
+    *capabilities_out = provider->plane_capabilities;
+    return RIN_VULKAN_WSI_PLATFORM_OK;
+}
+
 static int present_unsupported(
     void* context, const RinVulkanWsiPresentRequestV1* request,
     uint64_t* present_token_out) {
@@ -191,7 +299,8 @@ int main(void) {
     RinGpuVulkanPhysicalDeviceV2 profile;
     RinGpuVulkanRuntimeV1 runtime;
     RinGpuVulkanSoftwarePlatformV1 software;
-    RinVulkanWsiPlatformV1 wsi;
+    RinVulkanWsiPlatformV1 legacy_wsi;
+    RinVulkanWsiPlatformV2 wsi;
     TestWsiProvider provider;
     RinVkApplicationInfo application;
     RinVkInstanceCreateInfo instance_create;
@@ -201,6 +310,9 @@ int main(void) {
     RinVkPhysicalDevice physical_devices[1];
     RinVkDisplayPropertiesKHR display_properties[1];
     RinVkDisplayModePropertiesKHR mode_properties[2];
+    RinVkDisplayPlanePropertiesKHR plane_properties[1];
+    RinVkDisplayPlaneCapabilitiesKHR plane_capabilities;
+    RinVkDisplayKHR supported_displays[1];
     RinVkExtensionProperties extensions[2];
     RinVkPhysicalDevice physical = NULL;
     uint32_t count;
@@ -238,13 +350,29 @@ int main(void) {
     make_display_provider(&provider);
     memset(&wsi, 0, sizeof(wsi));
     wsi.struct_size = sizeof(wsi);
-    wsi.version = RIN_VULKAN_WSI_PLATFORM_VERSION;
+    wsi.version = RIN_VULKAN_WSI_PLATFORM_V2_VERSION;
     wsi.context = &provider;
     wsi.query_displays = query_displays;
     wsi.query_modes = query_modes;
     wsi.present = present_unsupported;
     wsi.poll_present = poll_present_unsupported;
     wsi.cancel_present = cancel_present_unsupported;
+    wsi.query_planes = query_planes;
+    wsi.query_plane_supported_displays = query_plane_supported_displays;
+    wsi.query_plane_capabilities = query_plane_capabilities;
+    memset(&legacy_wsi, 0, sizeof(legacy_wsi));
+    legacy_wsi.struct_size = sizeof(legacy_wsi);
+    legacy_wsi.version = RIN_VULKAN_WSI_PLATFORM_VERSION;
+    legacy_wsi.context = &provider;
+    legacy_wsi.query_displays = query_displays;
+    legacy_wsi.query_modes = query_modes;
+    legacy_wsi.present = present_unsupported;
+    legacy_wsi.poll_present = poll_present_unsupported;
+    legacy_wsi.cancel_present = cancel_present_unsupported;
+    CHECK(rin_gpu_vulkan_icd_bind_wsi_platform(&legacy_wsi) ==
+          RIN_GPU_VULKAN_OK);
+    CHECK(rin_gpu_vulkan_icd_unbind_wsi_platform(&legacy_wsi) ==
+          RIN_GPU_VULKAN_OK);
 
     count = 2u;
     CHECK(vkEnumerateInstanceExtensionProperties(NULL, &count, extensions) ==
@@ -273,6 +401,20 @@ int main(void) {
           == NULL);
     CHECK(vk_icdGetPhysicalDeviceProcAddr(
               instance, "vkGetPhysicalDeviceDisplayPropertiesKHR") == NULL);
+    CHECK(vkGetInstanceProcAddr(
+              instance, "vkGetPhysicalDeviceDisplayPlanePropertiesKHR") ==
+          NULL);
+    CHECK(vkGetInstanceProcAddr(
+              instance, "vkGetDisplayPlaneSupportedDisplaysKHR") == NULL);
+    CHECK(vkGetInstanceProcAddr(
+              instance, "vkGetDisplayPlaneCapabilitiesKHR") == NULL);
+    CHECK(vk_icdGetPhysicalDeviceProcAddr(
+              instance, "vkGetPhysicalDeviceDisplayPlanePropertiesKHR") ==
+          NULL);
+    CHECK(vk_icdGetPhysicalDeviceProcAddr(
+              instance, "vkGetDisplayPlaneSupportedDisplaysKHR") == NULL);
+    CHECK(vk_icdGetPhysicalDeviceProcAddr(
+              instance, "vkGetDisplayPlaneCapabilitiesKHR") == NULL);
 
     count = 0u;
     CHECK(vkEnumeratePhysicalDevices(instance, &count, NULL) == RIN_VK_SUCCESS);
@@ -286,9 +428,10 @@ int main(void) {
     count = 0u;
     CHECK(vkGetPhysicalDeviceDisplayPropertiesKHR(physical, &count, NULL) ==
           RIN_VK_ERROR_EXTENSION_NOT_PRESENT);
-    CHECK(rin_gpu_vulkan_icd_bind_wsi_platform(&wsi) == RIN_GPU_VULKAN_OK);
+    CHECK(rin_gpu_vulkan_icd_bind_wsi_platform_v2(&wsi) ==
+          RIN_GPU_VULKAN_OK);
     wsi_bound = 1u;
-    CHECK(rin_gpu_vulkan_icd_unbind_wsi_platform(&wsi) ==
+    CHECK(rin_gpu_vulkan_icd_unbind_wsi_platform_v2(&wsi) ==
           RIN_GPU_VULKAN_BUSY);
 
     count = 0u;
@@ -310,6 +453,38 @@ int main(void) {
           display_properties[0].persistentContent == 1u);
 
     count = 0u;
+    CHECK(vkGetPhysicalDeviceDisplayPlanePropertiesKHR(
+              physical, &count, NULL) == RIN_VK_SUCCESS);
+    CHECK(count == 1u);
+    count = 0u;
+    CHECK(vkGetPhysicalDeviceDisplayPlanePropertiesKHR(
+              physical, &count, plane_properties) == RIN_VK_INCOMPLETE);
+    CHECK(count == 0u);
+    count = 1u;
+    CHECK(vkGetPhysicalDeviceDisplayPlanePropertiesKHR(
+              physical, &count, plane_properties) == RIN_VK_SUCCESS);
+    CHECK(count == 1u &&
+          plane_properties[0].currentDisplay ==
+              display_properties[0].display &&
+          plane_properties[0].currentStackIndex == 0u);
+    count = 0u;
+    CHECK(vkGetDisplayPlaneSupportedDisplaysKHR(
+              physical, 0u, &count, NULL) == RIN_VK_SUCCESS);
+    CHECK(count == 1u);
+    count = 1u;
+    CHECK(vkGetDisplayPlaneSupportedDisplaysKHR(
+              physical, 0u, &count, supported_displays) == RIN_VK_SUCCESS);
+    CHECK(count == 1u &&
+          supported_displays[0] == display_properties[0].display);
+    provider.supported_display_cookies[0] = UINT64_C(0xdead);
+    count = 1u;
+    CHECK(vkGetDisplayPlaneSupportedDisplaysKHR(
+              physical, 0u, &count, supported_displays) ==
+          RIN_VK_ERROR_OUT_OF_DATE_KHR);
+    CHECK(count == 0u);
+    provider.supported_display_cookies[0] = provider.display.display_cookie;
+
+    count = 0u;
     CHECK(vkGetDisplayModePropertiesKHR(physical,
               display_properties[0].display, &count, NULL) == RIN_VK_SUCCESS);
     CHECK(count == 2u);
@@ -326,6 +501,36 @@ int main(void) {
           RIN_VK_SUCCESS);
     CHECK(count == 2u && mode_properties[1].parameters.visibleRegion.width ==
           1280u && mode_properties[1].parameters.visibleRegion.height == 720u);
+    CHECK(vkGetDisplayPlaneCapabilitiesKHR(
+              physical, mode_properties[0].displayMode, 0u,
+              &plane_capabilities) == RIN_VK_SUCCESS);
+    CHECK(plane_capabilities.supportedAlpha ==
+              (RIN_VK_DISPLAY_PLANE_ALPHA_OPAQUE_BIT_KHR |
+               RIN_VK_DISPLAY_PLANE_ALPHA_GLOBAL_BIT_KHR) &&
+          plane_capabilities.minSrcExtent.width == 1u &&
+          plane_capabilities.maxSrcExtent.width == 4096u &&
+          plane_capabilities.minSrcPosition.x == 1 &&
+          plane_capabilities.maxSrcPosition.y == 4 &&
+          plane_capabilities.minDstPosition.x == -2 &&
+          plane_capabilities.maxDstPosition.y == 5 &&
+          plane_capabilities.maxDstExtent.height == 2160u);
+    provider.plane_capabilities.max_src_width = 0u;
+    CHECK(vkGetDisplayPlaneCapabilitiesKHR(
+              physical, mode_properties[0].displayMode, 0u,
+              &plane_capabilities) == RIN_VK_ERROR_DEVICE_LOST);
+    provider.plane_capabilities.max_src_width = 4096u;
+    provider.query_planes_result = RIN_VULKAN_WSI_PLATFORM_UNSUPPORTED;
+    count = 1u;
+    CHECK(vkGetPhysicalDeviceDisplayPlanePropertiesKHR(
+              physical, &count, plane_properties) ==
+          RIN_VK_ERROR_FEATURE_NOT_PRESENT);
+    provider.query_planes_result = RIN_VULKAN_WSI_PLATFORM_OK;
+    provider.query_plane_capabilities_result =
+        RIN_VULKAN_WSI_PLATFORM_UNSUPPORTED;
+    CHECK(vkGetDisplayPlaneCapabilitiesKHR(
+              physical, mode_properties[0].displayMode, 0u,
+              &plane_capabilities) == RIN_VK_ERROR_FEATURE_NOT_PRESENT);
+    provider.query_plane_capabilities_result = RIN_VULKAN_WSI_PLATFORM_OK;
 
     provider.modes[0].width = 1919u;
     count = 2u;
@@ -345,6 +550,7 @@ int main(void) {
         const char* const old_display_name = display_properties[0].displayName;
         provider.output_generation += 1u;
         provider.display.output_generation = provider.output_generation;
+        provider.planes[0].output_generation = provider.output_generation;
         provider.display.width = 1600u;
         provider.display.height = 900u;
         provider.modes[0].output_generation = provider.output_generation;
@@ -362,6 +568,12 @@ int main(void) {
               display_properties[0].physicalResolution.width == 1600u &&
               display_properties[0].physicalResolution.height == 900u &&
               strcmp(old_display_name, "RinOS primary") == 0);
+        count = 1u;
+        CHECK(vkGetPhysicalDeviceDisplayPlanePropertiesKHR(
+                  physical, &count, plane_properties) == RIN_VK_SUCCESS);
+        CHECK(count == 1u &&
+              plane_properties[0].currentDisplay ==
+                  display_properties[0].display);
         count = 2u;
         CHECK(vkGetDisplayModePropertiesKHR(
                   physical, old_display, &count, mode_properties) ==
@@ -379,6 +591,11 @@ int main(void) {
         CHECK(vkGetPhysicalDeviceDisplayPropertiesKHR(
                   physical, &count, display_properties) == RIN_VK_SUCCESS);
         CHECK(count == 0u);
+        count = 1u;
+        CHECK(vkGetPhysicalDeviceDisplayPlanePropertiesKHR(
+                  physical, &count, plane_properties) ==
+              RIN_VK_ERROR_OUT_OF_DATE_KHR);
+        CHECK(count == 0u);
         count = 2u;
         CHECK(vkGetDisplayModePropertiesKHR(
                   physical, display_properties[0].display, &count,
@@ -389,7 +606,8 @@ int main(void) {
 cleanup:
     if (instance) vkDestroyInstance(instance, NULL);
     if (wsi_bound &&
-        rin_gpu_vulkan_icd_unbind_wsi_platform(&wsi) != RIN_GPU_VULKAN_OK)
+        rin_gpu_vulkan_icd_unbind_wsi_platform_v2(&wsi) !=
+            RIN_GPU_VULKAN_OK)
         exit_code = 1;
     if (product_bound &&
         rin_gpu_vulkan_icd_unbind_product_platform(&software.platform) !=
