@@ -851,6 +851,15 @@ int main(void) {
         CHECK(memcmp(&capabilities, &(RinVkSurfaceCapabilitiesKHR){0},
                      sizeof(capabilities)) == 0);
         provider.surface_properties.min_image_count = 2u;
+        provider.surface_properties.max_image_count = 0u;
+        provider.surface_properties.min_image_count = 9u;
+        CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+                  physical, created_surface, &capabilities) ==
+              RIN_VK_ERROR_DEVICE_LOST);
+        CHECK(memcmp(&capabilities, &(RinVkSurfaceCapabilitiesKHR){0},
+                     sizeof(capabilities)) == 0);
+        provider.surface_properties.min_image_count = 2u;
+        provider.surface_properties.max_image_count = 3u;
         provider.surface_properties.formats[0].format =
             RIN_VK_FORMAT_D32_SFLOAT;
         count = 2u;

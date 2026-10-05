@@ -5928,7 +5928,7 @@ static int surface_properties_valid(
         !wsi_zero_u32_words(properties->reserved0, 2u) ||
         !wsi_zero_u32_words(properties->reserved, 4u) ||
         properties->min_image_count == 0u ||
-        properties->min_image_count > RIN_VK_MAX_MEMORIES ||
+        properties->min_image_count > RIN_VK_MAX_SWAPCHAIN_IMAGES ||
         (properties->max_image_count != 0u &&
          properties->max_image_count < properties->min_image_count) ||
         properties->min_image_extent_width == 0u ||
