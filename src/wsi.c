@@ -162,15 +162,30 @@ static uint64_t allocate_image_token(VulkanWsiState* state) {
 
 static int register_images(VulkanWsiState* state,
                            const RinGpuPresentationOutputV1* output,
-                           uint32_t image_count, uint64_t* tokens_out) {
+                           uint32_t image_count,
+                           const uint64_t* requested_tokens,
+                           uint64_t* tokens_out) {
     uint32_t registered = 0u;
     int result = RIN_GPU_PRESENTATION_OK;
     for (uint32_t index = 0u; index < image_count; ++index) {
         RinGpuPresentationImageV1 image;
-        uint64_t token = allocate_image_token(state);
+        uint64_t token = requested_tokens
+                             ? requested_tokens[index]
+                             : allocate_image_token(state);
         if (token == 0u) {
-            result = RIN_GPU_PRESENTATION_LIMIT;
+            result = requested_tokens ? RIN_GPU_PRESENTATION_INVALID_ARGUMENT
+                                      : RIN_GPU_PRESENTATION_LIMIT;
             goto fail;
+        }
+        if (token_in_use(state, token)) {
+            result = RIN_GPU_PRESENTATION_INVALID_ARGUMENT;
+            goto fail;
+        }
+        for (uint32_t prior = 0u; prior < index; ++prior) {
+            if (tokens_out[prior] == token) {
+                result = RIN_GPU_PRESENTATION_INVALID_ARGUMENT;
+                goto fail;
+            }
         }
         memset(&image, 0, sizeof(image));
         image.struct_size = sizeof(image);
@@ -233,9 +248,10 @@ int rin_gpu_vulkan_wsi_runtime_init(
     return RIN_GPU_VULKAN_WSI_OK;
 }
 
-int rin_gpu_vulkan_wsi_create_swapchain(
+static int create_swapchain(
     RinGpuVulkanWsiRuntime* runtime, const RinGpuPresentationOutputV1* output,
-    uint32_t image_count, uint32_t mode, uint32_t* surface_id_out) {
+    uint32_t image_count, uint32_t mode,
+    const uint64_t* requested_image_tokens, uint32_t* surface_id_out) {
     VulkanWsiState* state = wsi_state(runtime);
     VulkanWsiSurfaceSlot* surface = NULL;
     RinGpuPresentationStatusV1 status;
@@ -246,6 +262,18 @@ int rin_gpu_vulkan_wsi_create_swapchain(
         image_count > RIN_GPU_VULKAN_WSI_MAX_IMAGES ||
         !mode_valid_for_output(output, mode) || !surface_id_out)
         return RIN_GPU_VULKAN_WSI_INVALID_ARGUMENT;
+    if (requested_image_tokens) {
+        for (uint32_t index = 0u; index < image_count; ++index) {
+            if (requested_image_tokens[index] == 0u ||
+                token_in_use(state, requested_image_tokens[index]))
+                return RIN_GPU_VULKAN_WSI_INVALID_ARGUMENT;
+            for (uint32_t prior = 0u; prior < index; ++prior) {
+                if (requested_image_tokens[prior] ==
+                    requested_image_tokens[index])
+                    return RIN_GPU_VULKAN_WSI_INVALID_ARGUMENT;
+            }
+        }
+    }
     memset(&status, 0, sizeof(status));
     status.struct_size = sizeof(status);
     status.version = RIN_GPU_PRESENTATION_VERSION;
@@ -274,7 +302,8 @@ int rin_gpu_vulkan_wsi_create_swapchain(
     surface->image_count = image_count;
     surface->mode = mode;
     surface->output = *output;
-    result = register_images(state, output, image_count, surface->image_tokens);
+    result = register_images(state, output, image_count,
+                             requested_image_tokens, surface->image_tokens);
     if (result != RIN_GPU_PRESENTATION_OK) {
         (void)rin_gpu_presentation_remove_output(
             &state->presentation, output->display_id,
@@ -286,6 +315,25 @@ int rin_gpu_vulkan_wsi_create_swapchain(
     ++state->surface_count;
     *surface_id_out = surface->surface_id;
     return RIN_GPU_VULKAN_WSI_OK;
+}
+
+int rin_gpu_vulkan_wsi_create_swapchain(
+    RinGpuVulkanWsiRuntime* runtime, const RinGpuPresentationOutputV1* output,
+    uint32_t image_count, uint32_t mode, uint32_t* surface_id_out) {
+    return create_swapchain(runtime, output, image_count, mode, NULL,
+                            surface_id_out);
+}
+
+int rin_gpu_vulkan_wsi_create_swapchain_with_image_tokens(
+    RinGpuVulkanWsiRuntime* runtime, const RinGpuPresentationOutputV1* output,
+    uint32_t image_count, uint32_t mode, const uint64_t* image_tokens,
+    uint32_t* surface_id_out) {
+    if (!image_tokens) {
+        if (surface_id_out) *surface_id_out = 0u;
+        return RIN_GPU_VULKAN_WSI_INVALID_ARGUMENT;
+    }
+    return create_swapchain(runtime, output, image_count, mode, image_tokens,
+                            surface_id_out);
 }
 
 int rin_gpu_vulkan_wsi_resize_surface(
@@ -335,7 +383,7 @@ int rin_gpu_vulkan_wsi_resize_surface(
         surface->out_of_date = 1u;
         return map_presentation_result(result);
     }
-    result = register_images(state, &surface->output, image_count,
+    result = register_images(state, &surface->output, image_count, NULL,
                              surface->image_tokens);
     if (result != RIN_GPU_PRESENTATION_OK) {
         surface->out_of_date = 1u;

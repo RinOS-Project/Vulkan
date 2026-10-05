@@ -70,6 +70,14 @@ int rin_gpu_vulkan_wsi_runtime_init(
 int rin_gpu_vulkan_wsi_create_swapchain(
     RinGpuVulkanWsiRuntime* runtime, const RinGpuPresentationOutputV1* output,
     uint32_t image_count, uint32_t mode, uint32_t* surface_id_out);
+/* Register caller-owned image identities (for example, product allocation
+ * handles) without converting them into private synthetic tokens. The
+ * identities are opaque and are forwarded unchanged to the presentation
+ * backend for the lifetime of this swapchain. */
+int rin_gpu_vulkan_wsi_create_swapchain_with_image_tokens(
+    RinGpuVulkanWsiRuntime* runtime, const RinGpuPresentationOutputV1* output,
+    uint32_t image_count, uint32_t mode, const uint64_t* image_tokens,
+    uint32_t* surface_id_out);
 int rin_gpu_vulkan_wsi_resize_surface(
     RinGpuVulkanWsiRuntime* runtime, uint32_t surface_id,
     const RinGpuPresentationOutputV1* output, uint32_t image_count);
