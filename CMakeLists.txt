@@ -23,6 +23,7 @@ set(RINVULKAN_SOURCES
     src/icd.c
     src/profile.c
     src/runtime.c
+    src/platform/time.c
     src/software_platform.c
     src/sync2_scope.c
     src/wsi.c)
@@ -86,4 +87,12 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME rinvulkan-sync2-scope
         COMMAND rinvulkan-sync2-scope-test)
+    add_executable(rinvulkan-platform-time-test
+        tests/rinvulkan_platform_time_test.c
+        src/platform/time.c)
+    target_compile_features(rinvulkan-platform-time-test PRIVATE c_std_11)
+    target_include_directories(rinvulkan-platform-time-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME rinvulkan-platform-time
+        COMMAND rinvulkan-platform-time-test)
 endif()

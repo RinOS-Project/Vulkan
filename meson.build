@@ -11,6 +11,7 @@ rinvulkan_sources = files(
   'src/icd.c',
   'src/profile.c',
   'src/runtime.c',
+  'src/platform/time.c',
   'src/software_platform.c',
   'src/sync2_scope.c',
   'src/wsi.c',
@@ -55,3 +56,11 @@ rinvulkan_sync2_scope_test = executable(
   include_directories: include_directories('include', 'src'),
 )
 test('rinvulkan-sync2-scope', rinvulkan_sync2_scope_test)
+
+rinvulkan_platform_time_test = executable(
+  'rinvulkan-platform-time-test',
+  'tests/rinvulkan_platform_time_test.c',
+  'src/platform/time.c',
+  include_directories: include_directories('src'),
+)
+test('rinvulkan-platform-time', rinvulkan_platform_time_test)
