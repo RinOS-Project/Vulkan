@@ -86,6 +86,8 @@ static void reset_recording(RinGpuVulkanCommandBufferV1* buffer) {
     memset(buffer->copies, 0, sizeof(buffer->copies));
     buffer->transfer_op_count = 0u;
     memset(buffer->transfer_ops, 0, sizeof(buffer->transfer_ops));
+    memset(buffer->transfer_op_compute_phase, 0,
+           sizeof(buffer->transfer_op_compute_phase));
     buffer->descriptor_bind_recorded = 0u;
     buffer->descriptor_bind_first_set = 0u;
     buffer->descriptor_bind_set_count = 0u;

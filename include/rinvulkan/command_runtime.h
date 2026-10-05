@@ -16,6 +16,7 @@
 #define RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_3 3u
 #define RIN_GPU_VULKAN_COMPUTE_PACKET_VERSION 4u
 #define RIN_GPU_VULKAN_GRAPHICS_PACKET_VERSION 5u
+#define RIN_GPU_VULKAN_COMPUTE_PACKET_VERSION_2 6u
 #define RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS 16u
 #define RIN_GPU_VULKAN_COMPUTE_MAX_BINDINGS 64u
 #define RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS 8u
@@ -36,23 +37,29 @@
 #define RIN_GPU_VULKAN_BARRIER_STAGE_TRANSFER UINT64_C(0x0000000000000001)
 #define RIN_GPU_VULKAN_BARRIER_STAGE_HOST UINT64_C(0x0000000000000002)
 #define RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS UINT64_C(0x0000000000000004)
+#define RIN_GPU_VULKAN_BARRIER_STAGE_COMPUTE UINT64_C(0x0000000000000008)
 #define RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS \
     (RIN_GPU_VULKAN_BARRIER_STAGE_TRANSFER | \
      RIN_GPU_VULKAN_BARRIER_STAGE_HOST | \
-     RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS)
+     RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS | \
+     RIN_GPU_VULKAN_BARRIER_STAGE_COMPUTE)
 #define RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_READ UINT64_C(0x0000000000000001)
 #define RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_WRITE UINT64_C(0x0000000000000002)
 #define RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_READ UINT64_C(0x0000000000000004)
 #define RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_WRITE UINT64_C(0x0000000000000008)
 #define RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ UINT64_C(0x0000000000000010)
 #define RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_WRITE UINT64_C(0x0000000000000020)
+#define RIN_GPU_VULKAN_BARRIER_ACCESS_COMPUTE_READ UINT64_C(0x0000000000000040)
+#define RIN_GPU_VULKAN_BARRIER_ACCESS_COMPUTE_WRITE UINT64_C(0x0000000000000080)
 #define RIN_GPU_VULKAN_BARRIER_ACCESS_ALL \
     (RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_READ | \
      RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_WRITE | \
      RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_READ | \
      RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_WRITE | \
      RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ | \
-     RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_WRITE)
+     RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_WRITE | \
+     RIN_GPU_VULKAN_BARRIER_ACCESS_COMPUTE_READ | \
+     RIN_GPU_VULKAN_BARRIER_ACCESS_COMPUTE_WRITE)
 
 #define RIN_GPU_VULKAN_COMMAND_RESET_RELEASE_RESOURCES 0x00000001u
 
@@ -221,6 +228,30 @@ typedef struct RinGpuVulkanComputePacketV1 {
     uint8_t shader_ir[1];
 } RinGpuVulkanComputePacketV1;
 
+/* V2 carries ordered synchronization2 buffer/memory barriers around its
+ * single dispatch. barrier_after_dispatch_mask distinguishes the barriers
+ * recorded before and after that dispatch. */
+typedef struct RinGpuVulkanComputePacketV2 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint32_t queue_family_index;
+    uint32_t queue_index;
+    uint32_t product_queue_id;
+    uint32_t group_count_x;
+    uint32_t group_count_y;
+    uint32_t group_count_z;
+    uint32_t binding_count;
+    uint32_t shader_size_bytes;
+    uint32_t flags;
+    uint32_t reserved;
+    RinGpuVulkanComputeBindingV1
+        bindings[RIN_GPU_VULKAN_COMPUTE_MAX_BINDINGS];
+    uint32_t barrier_count;
+    uint32_t barrier_after_dispatch_mask;
+    RinGpuVulkanTransferOpV2 barriers[RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS];
+    uint8_t shader_ir[1];
+} RinGpuVulkanComputePacketV2;
+
 /* A bounded, API-neutral graphics submission. The trailing bytes contain a
  * validated vertex RSH1 module followed by a validated fragment RSH1 module.
  * Allocation handles and byte ranges identify the vertex source and one
@@ -300,6 +331,8 @@ struct RinGpuVulkanCommandBufferV1 {
     uint32_t transfer_op_count;
     RinGpuVulkanTransferOpV2
         transfer_ops[RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS];
+    uint32_t transfer_op_compute_phase[
+        RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS];
     uint32_t descriptor_bind_recorded;
     uint32_t descriptor_bind_first_set;
     uint32_t descriptor_bind_set_count;
@@ -444,6 +477,8 @@ static_assert(sizeof(RinGpuVulkanComputeBindingV1) == 40u,
               "RinVulkan compute binding ABI drift");
 static_assert(offsetof(RinGpuVulkanComputePacketV1, shader_ir) == 2608u,
               "RinVulkan compute packet ABI drift");
+static_assert(offsetof(RinGpuVulkanComputePacketV2, shader_ir) == 3320u,
+              "RinVulkan compute packet V2 ABI drift");
 static_assert(offsetof(RinGpuVulkanGraphicsPacketV1, shader_ir) % 8u == 0u,
               "RinVulkan graphics packet payload alignment drift");
 #else
@@ -455,6 +490,8 @@ _Static_assert(sizeof(RinGpuVulkanComputeBindingV1) == 40u,
                "RinVulkan compute binding ABI drift");
 _Static_assert(offsetof(RinGpuVulkanComputePacketV1, shader_ir) == 2608u,
                "RinVulkan compute packet ABI drift");
+_Static_assert(offsetof(RinGpuVulkanComputePacketV2, shader_ir) == 3320u,
+               "RinVulkan compute packet V2 ABI drift");
 _Static_assert(offsetof(RinGpuVulkanGraphicsPacketV1, shader_ir) % 8u == 0u,
                "RinVulkan graphics packet payload alignment drift");
 #endif
