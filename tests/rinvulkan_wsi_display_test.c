@@ -311,6 +311,7 @@ int main(void) {
     const char* unimplemented_display_extension =
         RIN_VK_KHR_DISPLAY_EXTENSION;
     RinVkInstance instance = NULL;
+    RinVkInstance foreign_instance = NULL;
     RinVkPhysicalDevice physical_devices[1];
     RinVkDisplayPropertiesKHR display_properties[1];
     RinVkDisplayModePropertiesKHR mode_properties[2];
@@ -581,6 +582,8 @@ int main(void) {
     {
         RinVkSurfaceKHR surface_pool[TEST_DISPLAY_SURFACE_CAPACITY];
         uint32_t surface_index;
+        CHECK(vkCreateInstance(&instance_create, NULL, &foreign_instance) ==
+              RIN_VK_SUCCESS);
         for (surface_index = 0u;
              surface_index < TEST_DISPLAY_SURFACE_CAPACITY; ++surface_index) {
             CHECK(vkCreateDisplayPlaneSurfaceKHR(
@@ -588,6 +591,7 @@ int main(void) {
                       &surface_pool[surface_index]) == RIN_VK_SUCCESS);
             CHECK(surface_pool[surface_index] != 0u);
         }
+        vkDestroySurfaceKHR(foreign_instance, surface_pool[0], NULL);
         created_surface = UINT64_C(0xfeed);
         CHECK(vkCreateDisplayPlaneSurfaceKHR(instance, &surface_create_info,
                   NULL, &created_surface) ==
@@ -601,6 +605,8 @@ int main(void) {
         CHECK(created_surface != 0u && created_surface != surface_pool[0]);
         vkDestroySurfaceKHR(instance, created_surface, NULL);
         created_surface = 0u;
+        vkDestroyInstance(foreign_instance, NULL);
+        foreign_instance = NULL;
     }
     CHECK(provider.present_call_count == 0u &&
           provider.display.current_mode_cookie == UINT64_C(0xabc2) &&
@@ -800,6 +806,7 @@ int main(void) {
     exit_code = 0;
 
 cleanup:
+    if (foreign_instance) vkDestroyInstance(foreign_instance, NULL);
     if (instance) vkDestroyInstance(instance, NULL);
     if (wsi_bound &&
         rin_gpu_vulkan_icd_unbind_wsi_platform_v2(&wsi) !=
