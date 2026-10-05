@@ -35,18 +35,24 @@
 
 #define RIN_GPU_VULKAN_BARRIER_STAGE_TRANSFER UINT64_C(0x0000000000000001)
 #define RIN_GPU_VULKAN_BARRIER_STAGE_HOST UINT64_C(0x0000000000000002)
+#define RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS UINT64_C(0x0000000000000004)
 #define RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS \
     (RIN_GPU_VULKAN_BARRIER_STAGE_TRANSFER | \
-     RIN_GPU_VULKAN_BARRIER_STAGE_HOST)
+     RIN_GPU_VULKAN_BARRIER_STAGE_HOST | \
+     RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS)
 #define RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_READ UINT64_C(0x0000000000000001)
 #define RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_WRITE UINT64_C(0x0000000000000002)
 #define RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_READ UINT64_C(0x0000000000000004)
 #define RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_WRITE UINT64_C(0x0000000000000008)
+#define RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ UINT64_C(0x0000000000000010)
+#define RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_WRITE UINT64_C(0x0000000000000020)
 #define RIN_GPU_VULKAN_BARRIER_ACCESS_ALL \
     (RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_READ | \
      RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_WRITE | \
      RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_READ | \
-     RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_WRITE)
+     RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_WRITE | \
+     RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ | \
+     RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_WRITE)
 
 #define RIN_GPU_VULKAN_COMMAND_RESET_RELEASE_RESOURCES 0x00000001u
 
@@ -238,6 +244,16 @@ typedef struct RinGpuVulkanGraphicsPacketV1 {
     uint64_t color_size_bytes;
     uint32_t width;
     uint32_t height;
+    float viewport_x;
+    float viewport_y;
+    float viewport_width;
+    float viewport_height;
+    float viewport_min_depth;
+    float viewport_max_depth;
+    int32_t scissor_x;
+    int32_t scissor_y;
+    uint32_t scissor_width;
+    uint32_t scissor_height;
     uint32_t vertex_count;
     uint32_t instance_count;
     uint32_t first_vertex;
@@ -300,6 +316,27 @@ struct RinGpuVulkanCommandBufferV1 {
     uint32_t compute_group_count_x;
     uint32_t compute_group_count_y;
     uint32_t compute_group_count_z;
+    uint32_t graphics_rendering_active;
+    uint32_t graphics_rendering_begin_count;
+    uint32_t graphics_rendering_end_count;
+    uint32_t graphics_draw_count;
+    uint32_t graphics_pipeline_bound;
+    uint32_t graphics_vertex_buffer_bound;
+    uint32_t graphics_color_layout;
+    uint32_t graphics_width;
+    uint32_t graphics_height;
+    uint64_t bound_graphics_pipeline;
+    uint64_t graphics_color_view;
+    uint64_t graphics_vertex_buffer;
+    uint64_t graphics_vertex_offset;
+    uint32_t graphics_vertex_count;
+    uint32_t graphics_instance_count;
+    uint32_t graphics_first_vertex;
+    uint32_t graphics_first_instance;
+    float graphics_clear_red;
+    float graphics_clear_green;
+    float graphics_clear_blue;
+    float graphics_clear_alpha;
     uint32_t barrier_count;
     uint32_t reserved_barrier;
     struct {

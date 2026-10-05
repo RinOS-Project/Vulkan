@@ -397,6 +397,24 @@ static int software_execute_graphics(
         packet->product_queue_id >= platform->queue_count ||
         packet->width == 0u || packet->height == 0u ||
         packet->width > 4096u || packet->height > 4096u ||
+        !finite_float(packet->viewport_x) ||
+        !finite_float(packet->viewport_y) ||
+        !finite_float(packet->viewport_width) ||
+        !finite_float(packet->viewport_height) ||
+        !finite_float(packet->viewport_min_depth) ||
+        !finite_float(packet->viewport_max_depth) ||
+        packet->viewport_width <= 0.0f || packet->viewport_height <= 0.0f ||
+        packet->viewport_min_depth < 0.0f ||
+        packet->viewport_min_depth > 1.0f ||
+        packet->viewport_max_depth < packet->viewport_min_depth ||
+        packet->viewport_max_depth > 1.0f || packet->scissor_x < 0 ||
+        packet->scissor_y < 0 || packet->scissor_width == 0u ||
+        packet->scissor_height == 0u ||
+        (uint32_t)packet->scissor_x > packet->width ||
+        (uint32_t)packet->scissor_y > packet->height ||
+        packet->scissor_width > packet->width - (uint32_t)packet->scissor_x ||
+        packet->scissor_height >
+            packet->height - (uint32_t)packet->scissor_y ||
         packet->vertex_count == 0u || packet->vertex_count > 65535u ||
         packet->instance_count != 1u || packet->first_instance != 0u ||
         packet->flags != 0u || packet->reserved != 0u ||
@@ -607,13 +625,18 @@ static int software_execute_graphics(
     raster.struct_size = sizeof(raster);
     raster.viewport.abi_version = RIN_GPU_ABI_VERSION;
     raster.viewport.struct_size = sizeof(raster.viewport);
-    raster.viewport.width = (float)packet->width;
-    raster.viewport.height = (float)packet->height;
-    raster.viewport.max_depth = 1.0f;
+    raster.viewport.x = packet->viewport_x;
+    raster.viewport.y = packet->viewport_y;
+    raster.viewport.width = packet->viewport_width;
+    raster.viewport.height = packet->viewport_height;
+    raster.viewport.min_depth = packet->viewport_min_depth;
+    raster.viewport.max_depth = packet->viewport_max_depth;
     raster.scissor.abi_version = RIN_GPU_ABI_VERSION;
     raster.scissor.struct_size = sizeof(raster.scissor);
-    raster.scissor.width = packet->width;
-    raster.scissor.height = packet->height;
+    raster.scissor.x = packet->scissor_x;
+    raster.scissor.y = packet->scissor_y;
+    raster.scissor.width = packet->scissor_width;
+    raster.scissor.height = packet->scissor_height;
     raster.scissor.enabled = 1u;
     result = rin_gpu_vulkan_graphics_runtime_set_raster_state(
         &graphics_runtime, command_list, &raster);
@@ -968,11 +991,15 @@ static int software_submit(void* context,
                              RIN_VK_IMAGE_LAYOUT_UNDEFINED &&
                          operation->source_width != RIN_VK_IMAGE_LAYOUT_GENERAL &&
                          operation->source_width !=
+                             RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
+                         operation->source_width !=
                              RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL &&
                          operation->source_width !=
                              RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) ||
                         (operation->source_height !=
                              RIN_VK_IMAGE_LAYOUT_GENERAL &&
+                         operation->source_height !=
+                             RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
                          operation->source_height !=
                              RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL &&
                          operation->source_height !=

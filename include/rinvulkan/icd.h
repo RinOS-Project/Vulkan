@@ -29,6 +29,8 @@
 
 #define RIN_VK_PIPELINE_BIND_POINT_GRAPHICS 0u
 #define RIN_VK_PIPELINE_BIND_POINT_COMPUTE 1u
+#define RIN_VK_SHADER_STAGE_VERTEX_BIT UINT32_C(0x00000001)
+#define RIN_VK_SHADER_STAGE_FRAGMENT_BIT UINT32_C(0x00000010)
 #define RIN_VK_SHADER_STAGE_COMPUTE_BIT UINT32_C(0x00000020)
 
 #define RIN_VK_STRUCTURE_TYPE_APPLICATION_INFO 0
@@ -44,9 +46,16 @@
 #define RIN_VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO 15
 #define RIN_VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO 17
 #define RIN_VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO 18
+#define RIN_VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO 19
+#define RIN_VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO 20
+#define RIN_VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO 22
+#define RIN_VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO 23
+#define RIN_VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO 24
+#define RIN_VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO 26
+#define RIN_VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO 28
 #define RIN_VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO 29
 #define RIN_VK_STRUCTURE_TYPE_EVENT_CREATE_INFO 10
-#define RIN_VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO 28
+#define RIN_VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO 11
 #define RIN_VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO 31
 #define RIN_VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO 32
 #define RIN_VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO 33
@@ -68,6 +77,9 @@
 #define RIN_VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO 1000207002
 #define RIN_VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 1000314000
 #define RIN_VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 1000314001
+#define RIN_VK_STRUCTURE_TYPE_RENDERING_INFO 1000044000
+#define RIN_VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO 1000044001
+#define RIN_VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO 1000044002
 #define RIN_VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 1000314002
 #define RIN_VK_STRUCTURE_TYPE_DEPENDENCY_INFO 1000314003
 #define RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO_2 1000314004
@@ -87,6 +99,8 @@
     "VK_KHR_timeline_semaphore"
 #define RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION \
     "VK_KHR_synchronization2"
+#define RIN_VK_KHR_DYNAMIC_RENDERING_EXTENSION \
+    "VK_KHR_dynamic_rendering"
 #define RIN_VK_EXT_DEBUG_UTILS_EXTENSION "VK_EXT_debug_utils"
 #define RIN_VK_DEBUG_UTILS_SPEC_VERSION 2u
 #define RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT 0x00000001u
@@ -119,6 +133,9 @@
 #define RIN_VK_OBJECT_TYPE_COMMAND_POOL 25
 #define RIN_VK_OBJECT_TYPE_DEBUG_UTILS_MESSENGER 1000128000
 #define RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT UINT64_C(0x0000000000001000)
+#define RIN_VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT UINT64_C(0x0000000000000004)
+#define RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT \
+    UINT64_C(0x0000000000000400)
 #define RIN_VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT \
     RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT
 #define RIN_VK_PIPELINE_STAGE_2_HOST_BIT UINT64_C(0x0000000000004000)
@@ -129,6 +146,8 @@
 #define RIN_VK_PIPELINE_STAGE_2_CLEAR_BIT UINT64_C(0x0000000800000000)
 #define RIN_VK_ACCESS_2_TRANSFER_READ_BIT UINT64_C(0x0000000000000800)
 #define RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT UINT64_C(0x0000000000001000)
+#define RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT UINT64_C(0x0000000000000002)
+#define RIN_VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT UINT64_C(0x0000000000000100)
 #define RIN_VK_ACCESS_2_HOST_READ_BIT UINT64_C(0x0000000000002000)
 #define RIN_VK_ACCESS_2_HOST_WRITE_BIT UINT64_C(0x0000000000004000)
 #define RIN_VK_ACCESS_2_MEMORY_READ_BIT UINT64_C(0x0000000000008000)
@@ -1169,6 +1188,184 @@ typedef struct RinVkComputePipelineCreateInfo {
     int32_t basePipelineIndex;
 } RinVkComputePipelineCreateInfo;
 
+typedef struct RinVkVertexInputBindingDescription {
+    uint32_t binding;
+    uint32_t stride;
+    uint32_t inputRate;
+} RinVkVertexInputBindingDescription;
+
+typedef struct RinVkVertexInputAttributeDescription {
+    uint32_t location;
+    uint32_t binding;
+    uint32_t format;
+    uint32_t offset;
+} RinVkVertexInputAttributeDescription;
+
+typedef struct RinVkPipelineVertexInputStateCreateInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    uint32_t vertexBindingDescriptionCount;
+    const RinVkVertexInputBindingDescription* pVertexBindingDescriptions;
+    uint32_t vertexAttributeDescriptionCount;
+    const RinVkVertexInputAttributeDescription* pVertexAttributeDescriptions;
+} RinVkPipelineVertexInputStateCreateInfo;
+
+typedef struct RinVkPipelineInputAssemblyStateCreateInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    uint32_t topology;
+    uint32_t primitiveRestartEnable;
+} RinVkPipelineInputAssemblyStateCreateInfo;
+
+typedef struct RinVkViewport {
+    float x;
+    float y;
+    float width;
+    float height;
+    float minDepth;
+    float maxDepth;
+} RinVkViewport;
+
+typedef struct RinVkOffset2D {
+    int32_t x;
+    int32_t y;
+} RinVkOffset2D;
+
+typedef struct RinVkExtent2D {
+    uint32_t width;
+    uint32_t height;
+} RinVkExtent2D;
+
+typedef struct RinVkRect2D {
+    RinVkOffset2D offset;
+    RinVkExtent2D extent;
+} RinVkRect2D;
+
+typedef struct RinVkPipelineViewportStateCreateInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    uint32_t viewportCount;
+    const RinVkViewport* pViewports;
+    uint32_t scissorCount;
+    const RinVkRect2D* pScissors;
+} RinVkPipelineViewportStateCreateInfo;
+
+typedef struct RinVkPipelineRasterizationStateCreateInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    uint32_t depthClampEnable;
+    uint32_t rasterizerDiscardEnable;
+    uint32_t polygonMode;
+    uint32_t cullMode;
+    uint32_t frontFace;
+    uint32_t depthBiasEnable;
+    float depthBiasConstantFactor;
+    float depthBiasClamp;
+    float depthBiasSlopeFactor;
+    float lineWidth;
+} RinVkPipelineRasterizationStateCreateInfo;
+
+typedef struct RinVkPipelineMultisampleStateCreateInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    uint32_t rasterizationSamples;
+    uint32_t sampleShadingEnable;
+    float minSampleShading;
+    const uint32_t* pSampleMask;
+    uint32_t alphaToCoverageEnable;
+    uint32_t alphaToOneEnable;
+} RinVkPipelineMultisampleStateCreateInfo;
+
+typedef struct RinVkPipelineColorBlendAttachmentState {
+    uint32_t blendEnable;
+    uint32_t srcColorBlendFactor;
+    uint32_t dstColorBlendFactor;
+    uint32_t colorBlendOp;
+    uint32_t srcAlphaBlendFactor;
+    uint32_t dstAlphaBlendFactor;
+    uint32_t alphaBlendOp;
+    uint32_t colorWriteMask;
+} RinVkPipelineColorBlendAttachmentState;
+
+typedef struct RinVkPipelineColorBlendStateCreateInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    uint32_t logicOpEnable;
+    uint32_t logicOp;
+    uint32_t attachmentCount;
+    const RinVkPipelineColorBlendAttachmentState* pAttachments;
+    float blendConstants[4];
+} RinVkPipelineColorBlendStateCreateInfo;
+
+typedef struct RinVkPipelineRenderingCreateInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t viewMask;
+    uint32_t colorAttachmentCount;
+    const int32_t* pColorAttachmentFormats;
+    int32_t depthAttachmentFormat;
+    int32_t stencilAttachmentFormat;
+} RinVkPipelineRenderingCreateInfo;
+
+typedef struct RinVkGraphicsPipelineCreateInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    uint32_t stageCount;
+    const RinVkPipelineShaderStageCreateInfo* pStages;
+    const RinVkPipelineVertexInputStateCreateInfo* pVertexInputState;
+    const RinVkPipelineInputAssemblyStateCreateInfo* pInputAssemblyState;
+    const void* pTessellationState;
+    const RinVkPipelineViewportStateCreateInfo* pViewportState;
+    const RinVkPipelineRasterizationStateCreateInfo* pRasterizationState;
+    const RinVkPipelineMultisampleStateCreateInfo* pMultisampleState;
+    const void* pDepthStencilState;
+    const RinVkPipelineColorBlendStateCreateInfo* pColorBlendState;
+    const void* pDynamicState;
+    RinVkPipelineLayout layout;
+    uint64_t renderPass;
+    uint32_t subpass;
+    RinVkPipeline basePipelineHandle;
+    int32_t basePipelineIndex;
+} RinVkGraphicsPipelineCreateInfo;
+
+typedef union RinVkClearValue {
+    RinVkClearColorValue color;
+    RinVkClearDepthStencilValue depthStencil;
+} RinVkClearValue;
+
+typedef struct RinVkRenderingAttachmentInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    RinVkImageView imageView;
+    uint32_t imageLayout;
+    uint32_t resolveMode;
+    RinVkImageView resolveImageView;
+    uint32_t resolveImageLayout;
+    uint32_t loadOp;
+    uint32_t storeOp;
+    RinVkClearValue clearValue;
+} RinVkRenderingAttachmentInfo;
+
+typedef struct RinVkRenderingInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    RinVkRect2D renderArea;
+    uint32_t layerCount;
+    uint32_t viewMask;
+    uint32_t colorAttachmentCount;
+    const RinVkRenderingAttachmentInfo* pColorAttachments;
+    const RinVkRenderingAttachmentInfo* pDepthAttachment;
+    const RinVkRenderingAttachmentInfo* pStencilAttachment;
+} RinVkRenderingInfo;
+
 typedef struct RinVkDescriptorBufferInfo {
     RinVkBuffer buffer;
     uint64_t offset;
@@ -1222,10 +1419,12 @@ typedef struct RinVkSamplerCreateInfo {
 #define RIN_VK_BUFFER_USAGE_TRANSFER_DST_BIT UINT32_C(0x00000002)
 #define RIN_VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT UINT32_C(0x00000010)
 #define RIN_VK_BUFFER_USAGE_STORAGE_BUFFER_BIT UINT32_C(0x00000020)
+#define RIN_VK_BUFFER_USAGE_VERTEX_BUFFER_BIT UINT32_C(0x00000080)
 #define RIN_VK_BUFFER_USAGE_KNOWN \
     (RIN_VK_BUFFER_USAGE_TRANSFER_SRC_BIT | RIN_VK_BUFFER_USAGE_TRANSFER_DST_BIT | \
      RIN_VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | \
-     RIN_VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)
+     RIN_VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | \
+     RIN_VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)
 #define RIN_VK_IMAGE_TYPE_2D 1u
 #define RIN_VK_FORMAT_R8G8B8A8_UNORM 37
 #define RIN_VK_FORMAT_D32_SFLOAT 126
@@ -1235,8 +1434,10 @@ typedef struct RinVkSamplerCreateInfo {
 #define RIN_VK_SAMPLE_COUNT_4_BIT 4u
 #define RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT UINT32_C(0x00000001)
 #define RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT UINT32_C(0x00000002)
+#define RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT UINT32_C(0x00000010)
 #define RIN_VK_IMAGE_USAGE_KNOWN \
-    (RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT | RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+    (RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT | RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT | \
+     RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
 #define RIN_VK_IMAGE_ASPECT_COLOR_BIT UINT32_C(0x00000001)
 #define RIN_VK_IMAGE_ASPECT_DEPTH_BIT UINT32_C(0x00000002)
 #define RIN_VK_IMAGE_VIEW_TYPE_2D 1u
@@ -1245,6 +1446,51 @@ typedef struct RinVkSamplerCreateInfo {
 #define RIN_VK_IMAGE_LAYOUT_UNDEFINED UINT32_C(0)
 #define RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL UINT32_C(6)
 #define RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL UINT32_C(7)
+#define RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL UINT32_C(2)
+#define RIN_VK_FORMAT_R32_SFLOAT 100u
+#define RIN_VK_FORMAT_R32G32_SFLOAT 103u
+#define RIN_VK_FORMAT_R32G32B32_SFLOAT 106u
+#define RIN_VK_FORMAT_R32G32B32A32_SFLOAT 109u
+#define RIN_VK_PRIMITIVE_TOPOLOGY_POINT_LIST 0u
+#define RIN_VK_PRIMITIVE_TOPOLOGY_LINE_LIST 1u
+#define RIN_VK_PRIMITIVE_TOPOLOGY_LINE_STRIP 2u
+#define RIN_VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST 3u
+#define RIN_VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP 4u
+#define RIN_VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN 5u
+#define RIN_VK_POLYGON_MODE_FILL 0u
+#define RIN_VK_CULL_MODE_NONE 0u
+#define RIN_VK_CULL_MODE_FRONT_BIT 1u
+#define RIN_VK_CULL_MODE_BACK_BIT 2u
+#define RIN_VK_FRONT_FACE_COUNTER_CLOCKWISE 0u
+#define RIN_VK_FRONT_FACE_CLOCKWISE 1u
+#define RIN_VK_VERTEX_INPUT_RATE_VERTEX 0u
+#define RIN_VK_SAMPLE_COUNT_1_BIT 1u
+#define RIN_VK_ATTACHMENT_LOAD_OP_CLEAR 1u
+#define RIN_VK_ATTACHMENT_STORE_OP_STORE 0u
+#define RIN_VK_BLEND_FACTOR_ZERO 0u
+#define RIN_VK_BLEND_FACTOR_ONE 1u
+#define RIN_VK_BLEND_FACTOR_SRC_COLOR 2u
+#define RIN_VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR 3u
+#define RIN_VK_BLEND_FACTOR_DST_COLOR 4u
+#define RIN_VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR 5u
+#define RIN_VK_BLEND_FACTOR_SRC_ALPHA 6u
+#define RIN_VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA 7u
+#define RIN_VK_BLEND_FACTOR_DST_ALPHA 8u
+#define RIN_VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA 9u
+#define RIN_VK_BLEND_FACTOR_CONSTANT_COLOR 10u
+#define RIN_VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR 11u
+#define RIN_VK_BLEND_FACTOR_CONSTANT_ALPHA 12u
+#define RIN_VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA 13u
+#define RIN_VK_BLEND_FACTOR_SRC_ALPHA_SATURATE 14u
+#define RIN_VK_BLEND_OP_ADD 0u
+#define RIN_VK_BLEND_OP_SUBTRACT 1u
+#define RIN_VK_BLEND_OP_REVERSE_SUBTRACT 2u
+#define RIN_VK_BLEND_OP_MIN 3u
+#define RIN_VK_BLEND_OP_MAX 4u
+#define RIN_VK_COLOR_COMPONENT_R_BIT 0x1u
+#define RIN_VK_COLOR_COMPONENT_G_BIT 0x2u
+#define RIN_VK_COLOR_COMPONENT_B_BIT 0x4u
+#define RIN_VK_COLOR_COMPONENT_A_BIT 0x8u
 #define RIN_VK_QUEUE_FAMILY_IGNORED UINT32_MAX
 #define RIN_VK_REMAINING_MIP_LEVELS UINT32_MAX
 #define RIN_VK_REMAINING_ARRAY_LAYERS UINT32_MAX
@@ -1958,6 +2204,12 @@ vkCreateComputePipelines(RinVkDevice device, RinVkPipelineCache pipeline_cache,
                          uint32_t create_info_count,
                          const RinVkComputePipelineCreateInfo* create_infos,
                          const void* allocator, RinVkPipeline* pipelines);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkCreateGraphicsPipelines(
+    RinVkDevice device, RinVkPipelineCache pipeline_cache,
+    uint32_t create_info_count,
+    const RinVkGraphicsPipelineCreateInfo* create_infos,
+    const void* allocator, RinVkPipeline* pipelines);
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkDestroyPipeline(RinVkDevice device, RinVkPipeline pipeline,
                   const void* allocator);
@@ -1994,6 +2246,24 @@ vkCmdBindDescriptorSets(RinVkCommandBuffer command_buffer,
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkCmdBindPipeline(RinVkCommandBuffer command_buffer,
                   uint32_t pipeline_bind_point, RinVkPipeline pipeline);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdBeginRendering(RinVkCommandBuffer command_buffer,
+                    const RinVkRenderingInfo* rendering_info);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdBeginRenderingKHR(RinVkCommandBuffer command_buffer,
+                       const RinVkRenderingInfo* rendering_info);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdEndRendering(RinVkCommandBuffer command_buffer);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdEndRenderingKHR(RinVkCommandBuffer command_buffer);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdBindVertexBuffers(RinVkCommandBuffer command_buffer,
+                       uint32_t first_binding, uint32_t binding_count,
+                       const RinVkBuffer* buffers, const uint64_t* offsets);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdDraw(RinVkCommandBuffer command_buffer, uint32_t vertex_count,
+          uint32_t instance_count, uint32_t first_vertex,
+          uint32_t first_instance);
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkCmdDispatch(RinVkCommandBuffer command_buffer, uint32_t group_count_x,
               uint32_t group_count_y, uint32_t group_count_z);

@@ -9,13 +9,19 @@ int rin_vk_sync2_stage_mask(uint64_t public_mask, uint64_t* runtime_mask_out) {
         RIN_VK_PIPELINE_STAGE_2_RESOLVE_BIT |
         RIN_VK_PIPELINE_STAGE_2_BLIT_BIT |
         RIN_VK_PIPELINE_STAGE_2_CLEAR_BIT;
+    const uint64_t graphics_stages =
+        RIN_VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+        RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
     const uint64_t known = transfer_stages |
+                           graphics_stages |
                            RIN_VK_PIPELINE_STAGE_2_HOST_BIT |
                            RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     uint64_t runtime_mask = 0u;
     if (!runtime_mask_out || (public_mask & ~known) != 0u) return 0;
     if ((public_mask & transfer_stages) != 0u)
         runtime_mask |= RIN_GPU_VULKAN_BARRIER_STAGE_TRANSFER;
+    if ((public_mask & graphics_stages) != 0u)
+        runtime_mask |= RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS;
     if ((public_mask & RIN_VK_PIPELINE_STAGE_2_HOST_BIT) != 0u)
         runtime_mask |= RIN_GPU_VULKAN_BARRIER_STAGE_HOST;
     if ((public_mask & RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) != 0u)
@@ -29,6 +35,7 @@ int rin_vk_sync2_legacy_wait_stage_mask(uint64_t public_mask,
     const uint32_t legacy_transfer = UINT32_C(0x00001000);
     const uint32_t legacy_host = UINT32_C(0x00004000);
     const uint32_t legacy_all_commands = UINT32_C(0x00010000);
+    const uint32_t legacy_graphics = UINT32_C(0x00000404);
     uint64_t runtime_mask;
     uint32_t legacy_mask = 0u;
 
@@ -42,6 +49,8 @@ int rin_vk_sync2_legacy_wait_stage_mask(uint64_t public_mask,
             legacy_mask |= legacy_transfer;
         if ((runtime_mask & RIN_GPU_VULKAN_BARRIER_STAGE_HOST) != 0u)
             legacy_mask |= legacy_host;
+        if ((runtime_mask & RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS) != 0u)
+            legacy_mask |= legacy_graphics;
     }
     *legacy_mask_out = legacy_mask;
     return 1;
@@ -59,6 +68,8 @@ int rin_vk_sync2_access_mask(uint64_t public_mask, uint64_t stage_mask,
     const uint64_t memory_write = RIN_VK_ACCESS_2_MEMORY_WRITE_BIT;
     const uint64_t known = RIN_VK_ACCESS_2_TRANSFER_READ_BIT |
                            RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT |
+                           RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT |
+                           RIN_VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
                            RIN_VK_ACCESS_2_HOST_READ_BIT |
                            RIN_VK_ACCESS_2_HOST_WRITE_BIT | memory_read |
                            memory_write;
@@ -66,6 +77,10 @@ int rin_vk_sync2_access_mask(uint64_t public_mask, uint64_t stage_mask,
     uint64_t runtime_stages;
     if (!runtime_mask_out || (public_mask & ~known) != 0u) return 0;
     if (!rin_vk_sync2_stage_mask(stage_mask, &runtime_stages)) return 0;
+    if ((public_mask & RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT) != 0u)
+        runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ;
+    if ((public_mask & RIN_VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT) != 0u)
+        runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_WRITE;
     if ((public_mask & (memory_read | memory_write)) != 0u &&
         runtime_stages == 0u)
         return 0;
@@ -82,12 +97,16 @@ int rin_vk_sync2_access_mask(uint64_t public_mask, uint64_t stage_mask,
             runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_READ;
         if ((runtime_stages & RIN_GPU_VULKAN_BARRIER_STAGE_HOST) != 0u)
             runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_READ;
+        if ((runtime_stages & RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS) != 0u)
+            runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ;
     }
     if ((public_mask & memory_write) != 0u) {
         if ((runtime_stages & RIN_GPU_VULKAN_BARRIER_STAGE_TRANSFER) != 0u)
             runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_WRITE;
         if ((runtime_stages & RIN_GPU_VULKAN_BARRIER_STAGE_HOST) != 0u)
             runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_WRITE;
+        if ((runtime_stages & RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS) != 0u)
+            runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_WRITE;
     }
     *runtime_mask_out = runtime_mask;
     return 1;
@@ -97,6 +116,8 @@ int rin_vk_sync2_access_stage_valid(uint64_t stage_mask,
                                     uint64_t access_mask) {
     const uint64_t transfer_access = RIN_VK_ACCESS_2_TRANSFER_READ_BIT |
                                      RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    const uint64_t graphics_read = RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT;
+    const uint64_t graphics_write = RIN_VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
     const uint64_t host_access = RIN_VK_ACCESS_2_HOST_READ_BIT |
                                  RIN_VK_ACCESS_2_HOST_WRITE_BIT;
     const uint64_t generic_access = RIN_VK_ACCESS_2_MEMORY_READ_BIT |
@@ -108,6 +129,14 @@ int rin_vk_sync2_access_stage_valid(uint64_t stage_mask,
         RIN_VK_PIPELINE_STAGE_2_BLIT_BIT |
         RIN_VK_PIPELINE_STAGE_2_CLEAR_BIT;
     const uint64_t all_commands = RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    if ((access_mask & graphics_read) != 0u &&
+        (stage_mask & (RIN_VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+                       all_commands)) == 0u)
+        return 0;
+    if ((access_mask & graphics_write) != 0u &&
+        (stage_mask & (RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+                       all_commands)) == 0u)
+        return 0;
     if ((access_mask & transfer_access) != 0u &&
         (stage_mask & (transfer_stages | all_commands)) == 0u)
         return 0;

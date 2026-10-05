@@ -3,7 +3,9 @@
 #include <rinvulkan/icd.h>
 #include <rinvulkan/command_runtime.h>
 #include <rinvulkan/descriptor_runtime.h>
+#include <rinvulkan/graphics.h>
 
+#include <float.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -76,6 +78,8 @@
 #define RIN_VK_EVENT_TAG UINT64_C(0x5245)
 #define RIN_VK_PIPELINE_CACHE_MAGIC UINT32_C(0x52494e43)
 #define RIN_VK_PIPELINE_CACHE_VERSION 1u
+#define RIN_VK_PIPELINE_KIND_COMPUTE 1u
+#define RIN_VK_PIPELINE_KIND_GRAPHICS 2u
 
 typedef struct RinVkBaseFeatureStructure {
     RinVkStructureType sType;
@@ -103,6 +107,7 @@ static void zero_vulkan13_properties(
 static void sync_lock(void);
 static void sync_unlock(void);
 static void yield_thread(void);
+static int finite_graphics_float(float value);
 
 struct RinVkPhysicalDevice_T {
     uintptr_t loader_magic;
@@ -141,6 +146,7 @@ struct RinVkDevice_T {
     volatile uint32_t descriptor_validation_error;
     uint32_t timeline_enabled;
     uint32_t synchronization2_enabled;
+    uint32_t dynamic_rendering_enabled;
     uint32_t queue_count;
     uint32_t reserved_queue;
     uint64_t next_submission_order;
@@ -252,14 +258,19 @@ typedef struct RinVkPipelineSlot {
     uint32_t state;
     uint32_t generation;
     struct RinVkDevice_T* owner;
+    uint32_t kind;
     uint32_t set_layout_count;
     uint32_t descriptor_count;
     uint32_t shader_size;
-    uint32_t reserved;
+    uint32_t fragment_shader_size;
     RinVkDescriptorSetLayout
         set_layouts[RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS];
     RinSpirvDescriptorV1 descriptors[RIN_SPIRV_MAX_RESOURCES];
+    RinGpuGraphicsPipelineBackendDescV1 graphics_backend;
+    RinVkViewport viewport;
+    RinVkRect2D scissor;
     uint8_t* shader_ir;
+    uint8_t* fragment_shader_ir;
 } RinVkPipelineSlot;
 
 typedef struct RinVkQueryValue {
@@ -360,6 +371,8 @@ typedef struct RinVkSubmissionSlot {
     RinGpuVulkanTransferPacketV3 routed_packet;
     RinGpuVulkanComputePacketV1* compute_packet;
     size_t compute_packet_size;
+    RinGpuVulkanGraphicsPacketV1* graphics_packet;
+    size_t graphics_packet_size;
     RinVkBufferOwnershipUpdate* compute_buffer_ownership_updates;
     uint32_t compute_buffer_ownership_update_count;
     RinVulkanProductResourceV1
@@ -795,10 +808,15 @@ static int synchronization2_extension_enabled(
     return extension_enabled(info, RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION);
 }
 
+static int dynamic_rendering_extension_enabled(
+        const RinVkDeviceCreateInfo* info) {
+    return extension_enabled(info, RIN_VK_KHR_DYNAMIC_RENDERING_EXTENSION);
+}
+
 static int device_extensions_valid(const RinVkDeviceCreateInfo* info) {
     uint32_t index;
     uint32_t prior;
-    if (!info || info->enabledExtensionCount > 2u) return 0;
+    if (!info || info->enabledExtensionCount > 3u) return 0;
     if (info->enabledExtensionCount == 0u)
         return info->ppEnabledExtensionNames == NULL;
     if (!info->ppEnabledExtensionNames) return 0;
@@ -806,7 +824,8 @@ static int device_extensions_valid(const RinVkDeviceCreateInfo* info) {
         const char* name = info->ppEnabledExtensionNames[index];
         if (!name ||
             (!name_equal(name, RIN_VK_KHR_TIMELINE_SEMAPHORE_EXTENSION) &&
-             !name_equal(name, RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION)))
+             !name_equal(name, RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION) &&
+             !name_equal(name, RIN_VK_KHR_DYNAMIC_RENDERING_EXTENSION)))
             return 0;
         for (prior = 0u; prior < index; ++prior) {
             if (name_equal(name, info->ppEnabledExtensionNames[prior]))
@@ -2107,6 +2126,7 @@ static RinVkSubmissionSlot* reserve_submission_slot(void) {
 static void clear_submission_slot(RinVkSubmissionSlot* slot) {
     if (!slot) return;
     free(slot->compute_packet);
+    free(slot->graphics_packet);
     free(slot->compute_buffer_ownership_updates);
     memset(slot, 0, sizeof(*slot));
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
@@ -2218,6 +2238,12 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
              offsetof(RinGpuVulkanComputePacketV1, shader_ir) ||
          slot->compute_packet_size != slot->compute_packet->struct_size))
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    if (slot->graphics_packet &&
+        (slot->graphics_packet_size <
+             offsetof(RinGpuVulkanGraphicsPacketV1, shader_ir) ||
+         slot->graphics_packet_size !=
+             slot->graphics_packet->struct_size))
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
     product = acquire_product();
     if (!product || !product_matches_device(product, slot->owner)) {
         if (product) release_product();
@@ -2226,9 +2252,11 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
     memset(&submission, 0, sizeof(submission));
     product_result = product->prepare_submission(
         product->context, slot->queue_id,
-        (uint64_t)(uintptr_t)(slot->compute_packet
-                                  ? (const void*)slot->compute_packet
-                                  : (const void*)&slot->routed_packet),
+        (uint64_t)(uintptr_t)(slot->graphics_packet
+                                  ? (const void*)slot->graphics_packet
+                                  : (slot->compute_packet
+                                         ? (const void*)slot->compute_packet
+                                         : (const void*)&slot->routed_packet)),
         &submission);
     if (product_result == RIN_VULKAN_PRODUCT_OK)
         product_result = product->submit(
@@ -2240,7 +2268,7 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
         return map_product_result(product_result);
     slot->sequence = submission.sequence;
     slot->completion_value = submission.completion_value;
-    if (slot->compute_packet) {
+    if (slot->compute_packet || slot->graphics_packet) {
         uint32_t index;
         for (index = 0u;
              index < slot->compute_buffer_ownership_update_count; ++index) {
@@ -2369,14 +2397,20 @@ static void clear_pipeline_cache_slot(RinVkPipelineCacheSlot* slot) {
 static void clear_pipeline_slot(RinVkPipelineSlot* slot) {
     if (!slot) return;
     free(slot->shader_ir);
+    free(slot->fragment_shader_ir);
     slot->owner = NULL;
+    slot->kind = 0u;
     slot->set_layout_count = 0u;
     slot->descriptor_count = 0u;
     slot->shader_size = 0u;
-    slot->reserved = 0u;
+    slot->fragment_shader_size = 0u;
     memset(slot->set_layouts, 0, sizeof(slot->set_layouts));
     memset(slot->descriptors, 0, sizeof(slot->descriptors));
+    memset(&slot->graphics_backend, 0, sizeof(slot->graphics_backend));
+    memset(&slot->viewport, 0, sizeof(slot->viewport));
+    memset(&slot->scissor, 0, sizeof(slot->scissor));
     slot->shader_ir = NULL;
+    slot->fragment_shader_ir = NULL;
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
 }
 
@@ -3735,9 +3769,9 @@ void RIN_VKAPI_CALL vkQueueInsertDebugUtilsLabelEXT(
 RinVkResult RIN_VKAPI_CALL vkEnumerateDeviceExtensionProperties(
         RinVkPhysicalDevice physical_device, const char* layer_name,
         uint32_t* property_count, RinVkExtensionProperties* properties) {
-    RinVkExtensionProperties extensions[2];
+    RinVkExtensionProperties extensions[3];
     uint32_t capacity;
-    uint32_t available = 2u;
+    uint32_t available = 3u;
     uint32_t count;
     uint32_t index;
     if (!property_count) return RIN_VK_ERROR_INITIALIZATION_FAILED;
@@ -3764,6 +3798,10 @@ RinVkResult RIN_VKAPI_CALL vkEnumerateDeviceExtensionProperties(
            RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION,
            sizeof(RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION));
     extensions[1].specVersion = 1u;
+    memcpy(extensions[2].extensionName,
+           RIN_VK_KHR_DYNAMIC_RENDERING_EXTENSION,
+           sizeof(RIN_VK_KHR_DYNAMIC_RENDERING_EXTENSION));
+    extensions[2].specVersion = 1u;
     for (index = 0u; index < count; ++index) properties[index] = extensions[index];
     return count < available ? RIN_VK_INCOMPLETE : RIN_VK_SUCCESS;
 }
@@ -4051,7 +4089,9 @@ void RIN_VKAPI_CALL vkGetPhysicalDeviceFeatures2(
         chain.vulkan13->synchronization2 =
             (profile.features & RIN_GPU_VK_ICD_FEATURES &
              RIN_GPU_VK_FEATURE_SYNCHRONIZATION_2) != 0u;
-        chain.vulkan13->dynamicRendering = 0u;
+        chain.vulkan13->dynamicRendering =
+            (profile.features & RIN_GPU_VK_ICD_FEATURES &
+             RIN_GPU_VK_FEATURE_DYNAMIC_RENDERING) != 0u;
         chain.vulkan13->maintenance4 = 0u;
     }
     if (chain.synchronization2) {
@@ -4243,6 +4283,9 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
     if ((chain_features & RIN_GPU_VK_FEATURE_SYNCHRONIZATION_2) != 0u &&
         !synchronization2_extension_enabled(create_info))
         return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
+    if ((chain_features & RIN_GPU_VK_FEATURE_DYNAMIC_RENDERING) != 0u &&
+        !dynamic_rendering_extension_enabled(create_info))
+        return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
     if (create_info->flags != 0u)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
     if (create_info->enabledLayerCount != 0u)
@@ -4391,6 +4434,8 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
         (chain_features & RIN_GPU_VK_FEATURE_TIMELINE_SEMAPHORE) != 0u;
     slot->synchronization2_enabled =
         (chain_features & RIN_GPU_VK_FEATURE_SYNCHRONIZATION_2) != 0u;
+    slot->dynamic_rendering_enabled =
+        (chain_features & RIN_GPU_VK_FEATURE_DYNAMIC_RENDERING) != 0u;
     slot->physical_profile = profile;
     if (rin_gpu_vulkan_descriptor_runtime_init(
             &slot->descriptor_runtime,
@@ -4519,6 +4564,7 @@ void RIN_VKAPI_CALL vkDestroyDevice(RinVkDevice device,
                      __ATOMIC_RELEASE);
     slot->timeline_enabled = 0u;
     slot->synchronization2_enabled = 0u;
+    slot->dynamic_rendering_enabled = 0u;
     memset(&slot->plan, 0, sizeof(slot->plan));
     memset(&slot->physical_profile, 0, sizeof(slot->physical_profile));
     memset(slot->queues, 0, sizeof(slot->queues));
@@ -5252,6 +5298,7 @@ done:
 
 static int image_layout_transfer_valid(uint32_t layout) {
     return layout == RIN_VK_IMAGE_LAYOUT_GENERAL ||
+           layout == RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL ||
            layout == RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL ||
            layout == RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 }
@@ -6510,6 +6557,228 @@ static int snapshot_submission_packet_v2(
     return 1;
 }
 
+static RinVkResult snapshot_graphics_submission(
+        struct RinVkDevice_T* device, uint32_t queue_family_index,
+        uint32_t queue_index, uint32_t product_queue_id,
+        RinGpuVulkanCommandBufferV1* const command_buffers[],
+        uint32_t command_buffer_count,
+        RinGpuVulkanGraphicsPacketV1** packet_out, size_t* packet_size_out,
+        RinVulkanProductResourceV1 resources[], uint32_t* resource_count_out,
+        RinVkBufferOwnershipUpdate** ownership_updates_out,
+        uint32_t* ownership_update_count_out) {
+    RinGpuVulkanCommandBufferV1* command;
+    RinVkPipelineSlot* pipeline;
+    RinVkImageViewSlot* view;
+    RinVkImageSlot* image;
+    RinVkBufferSlot* vertex_buffer = NULL;
+    RinVkBufferOwnershipUpdate* ownership_updates = NULL;
+    RinGpuVulkanGraphicsPacketV1* packet = NULL;
+    uint64_t pixel_bytes, color_offset, vertex_offset = 0u;
+    uint64_t vertex_size = 0u, required_vertex_bytes = 0u;
+    uint32_t resource_count = 0u;
+    RinVkResult result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+    size_t prefix = offsetof(RinGpuVulkanGraphicsPacketV1, shader_ir);
+    size_t packet_size;
+    if (packet_out) *packet_out = NULL;
+    if (packet_size_out) *packet_size_out = 0u;
+    if (resource_count_out) *resource_count_out = 0u;
+    if (ownership_updates_out) *ownership_updates_out = NULL;
+    if (ownership_update_count_out) *ownership_update_count_out = 0u;
+    if (!device || !command_buffers || command_buffer_count != 1u ||
+        !command_buffers[0] || !packet_out || !packet_size_out || !resources ||
+        !resource_count_out || !ownership_updates_out ||
+        !ownership_update_count_out)
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    command = command_buffers[0];
+    if (command->owner != (uintptr_t)device || !command->pool ||
+        command->pool->queue_family_index != queue_family_index ||
+        command->copy_count != 0u || command->transfer_op_count != 0u ||
+        command->barrier_count != 0u || command->query_command_count != 0u ||
+        command->event_command_count != 0u ||
+        command->compute_dispatch_count != 0u ||
+        command->compute_pipeline_bound != 0u ||
+        command->bound_compute_pipeline != 0u ||
+        command->descriptor_bind_recorded != 0u ||
+        command->graphics_rendering_active != 0u ||
+        command->graphics_rendering_begin_count != 1u ||
+        command->graphics_rendering_end_count != 1u ||
+        command->graphics_draw_count != 1u ||
+        command->graphics_pipeline_bound != 1u ||
+        command->bound_graphics_pipeline == 0u ||
+        command->graphics_color_layout != RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL ||
+        command->graphics_width == 0u || command->graphics_width > 4096u ||
+        command->graphics_height == 0u || command->graphics_height > 4096u ||
+        command->graphics_vertex_count == 0u || command->graphics_vertex_count > 65535u ||
+        command->graphics_instance_count != 1u || command->graphics_first_instance != 0u)
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    pipeline = pipeline_slot((RinVkDevice)(void*)device,
+                             command->bound_graphics_pipeline);
+    if (!pipeline || pipeline->kind != RIN_VK_PIPELINE_KIND_GRAPHICS ||
+        pipeline->shader_size == 0u || pipeline->fragment_shader_size == 0u ||
+        !pipeline->shader_ir || !pipeline->fragment_shader_ir ||
+        pipeline->graphics_backend.resource_count != 0u ||
+        pipeline->graphics_backend.color_format != RIN_GPU_FORMAT_RGBA8_UNORM ||
+        pipeline->graphics_backend.vertex_binding_count > 1u ||
+        pipeline->graphics_backend.vertex_input_count > RIN_GPU_MAX_VERTEX_ATTRIBUTES)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    view = image_view_slot((RinVkDevice)(void*)device,
+                           (RinVkImageView)command->graphics_color_view);
+    image = view ? view->image : NULL;
+    if (!image || image->owner != device || !image->memory ||
+        image->memory_generation != image->memory->generation ||
+        image->memory->owner != device || image->memory->product_allocation == 0u ||
+        image->format != RIN_VK_FORMAT_R8G8B8A8_UNORM ||
+        view->format != (uint32_t)image->format ||
+        view->aspect_mask != RIN_VK_IMAGE_ASPECT_COLOR_BIT ||
+        (image->usage & RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) == 0u ||
+        image->samples != RIN_VK_SAMPLE_COUNT_1_BIT ||
+        image->width != command->graphics_width || image->height != command->graphics_height ||
+        __atomic_load_n(&image->current_layout, __ATOMIC_ACQUIRE) != command->graphics_color_layout ||
+        image->ownership.transfer_pending != 0u ||
+        (image->ownership.owner_queue_family != RIN_VK_QUEUE_FAMILY_IGNORED &&
+         image->ownership.owner_queue_family != queue_family_index) ||
+        !finite_graphics_float(pipeline->viewport.x) ||
+        !finite_graphics_float(pipeline->viewport.y) ||
+        !finite_graphics_float(pipeline->viewport.width) ||
+        !finite_graphics_float(pipeline->viewport.height) ||
+        !finite_graphics_float(pipeline->viewport.minDepth) ||
+        !finite_graphics_float(pipeline->viewport.maxDepth) ||
+        pipeline->viewport.x + pipeline->viewport.width > image->width ||
+        pipeline->viewport.y + pipeline->viewport.height > image->height ||
+        pipeline->scissor.offset.x < 0 || pipeline->scissor.offset.y < 0 ||
+        (uint32_t)pipeline->scissor.offset.x > image->width ||
+        (uint32_t)pipeline->scissor.offset.y > image->height ||
+        pipeline->scissor.extent.width == 0u || pipeline->scissor.extent.height == 0u ||
+        pipeline->scissor.extent.width > image->width - (uint32_t)pipeline->scissor.offset.x ||
+        pipeline->scissor.extent.height > image->height - (uint32_t)pipeline->scissor.offset.y ||
+        (uint64_t)image->width * image->height > UINT64_MAX / 4u)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    pixel_bytes = (uint64_t)image->width * image->height * 4u;
+    color_offset = image->memory_offset;
+    if (color_offset > image->memory->requested_size ||
+        pixel_bytes > image->memory->requested_size - color_offset ||
+        image->memory_size < pixel_bytes)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    memset(resources, 0, sizeof(*resources) * RIN_VULKAN_PRODUCT_MAX_RESOURCES_PER_SUBMISSION);
+    if (!append_submission_resource(resources, &resource_count,
+            image->memory->product_allocation, RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE))
+        return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+
+    if (pipeline->graphics_backend.vertex_binding_count == 1u) {
+        const RinGpuVertexBufferLayoutV1* layout = &pipeline->graphics_backend.vertex_bindings[0];
+        RinVkBufferOwnershipRange* range;
+        uint32_t range_index;
+        uint64_t end_vertex;
+        uint64_t vertex_span;
+        if (command->graphics_vertex_buffer_bound != 1u ||
+            command->graphics_vertex_buffer == 0u || layout->binding != 0u || layout->stride == 0u ||
+            (uint64_t)command->graphics_first_vertex + command->graphics_vertex_count >
+                UINT64_MAX / layout->stride)
+            return RIN_VK_ERROR_INITIALIZATION_FAILED;
+        end_vertex = (uint64_t)command->graphics_first_vertex + command->graphics_vertex_count;
+        vertex_span = end_vertex * layout->stride;
+        vertex_buffer = buffer_slot((RinVkDevice)(void*)device,
+                                    (RinVkBuffer)command->graphics_vertex_buffer);
+        if (!vertex_buffer || vertex_buffer->owner != device || !vertex_buffer->memory ||
+            vertex_buffer->memory_generation != vertex_buffer->memory->generation ||
+            vertex_buffer->memory->owner != device ||
+            vertex_buffer->memory->product_allocation == 0u ||
+            (vertex_buffer->usage & RIN_VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) == 0u ||
+            command->graphics_vertex_offset >= vertex_buffer->size ||
+            vertex_span > vertex_buffer->size - command->graphics_vertex_offset ||
+            vertex_buffer->memory_offset > UINT64_MAX - command->graphics_vertex_offset)
+            return RIN_VK_ERROR_INITIALIZATION_FAILED;
+        vertex_offset = vertex_buffer->memory_offset + command->graphics_vertex_offset;
+        required_vertex_bytes = vertex_span;
+        vertex_size = vertex_buffer->size - command->graphics_vertex_offset;
+        if (vertex_size < required_vertex_bytes || vertex_offset > vertex_buffer->memory->requested_size ||
+            vertex_size > vertex_buffer->memory->requested_size - vertex_offset)
+            return RIN_VK_ERROR_INITIALIZATION_FAILED;
+        ownership_updates = (RinVkBufferOwnershipUpdate*)calloc(1u, sizeof(*ownership_updates));
+        if (!ownership_updates) return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+        ownership_updates[0].buffer = vertex_buffer;
+        ownership_updates[0].state = vertex_buffer->ownership;
+        if (!rin_vk_buffer_ownership_ensure_coverage(&ownership_updates[0].state,
+                command->graphics_vertex_offset,
+                command->graphics_vertex_offset + required_vertex_bytes,
+                RIN_VK_QUEUE_FAMILY_IGNORED, 1)) {
+            result = RIN_VK_ERROR_INITIALIZATION_FAILED; goto fail;
+        }
+        for (range_index = 0u; range_index < ownership_updates[0].state.range_count; ++range_index) {
+            range = &ownership_updates[0].state.ranges[range_index];
+            if (range->offset >= command->graphics_vertex_offset + required_vertex_bytes ||
+                range->offset + range->size <= command->graphics_vertex_offset) continue;
+            if (range->transfer_pending ||
+                (range->owner_queue_family != RIN_VK_QUEUE_FAMILY_IGNORED &&
+                 range->owner_queue_family != queue_family_index)) {
+                result = RIN_VK_ERROR_FEATURE_NOT_PRESENT; goto fail;
+            }
+            range->owner_queue_family = queue_family_index;
+        }
+        if (!append_submission_resource(resources, &resource_count,
+                vertex_buffer->memory->product_allocation,
+                RIN_VULKAN_PRODUCT_MEMORY_GPU_READ)) {
+            result = RIN_VK_ERROR_OUT_OF_HOST_MEMORY; goto fail;
+        }
+    } else if (command->graphics_vertex_buffer_bound != 0u ||
+               command->graphics_vertex_buffer != 0u ||
+               command->graphics_vertex_offset != 0u) {
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    }
+    if (pipeline->shader_size > UINT32_MAX - prefix ||
+        pipeline->fragment_shader_size > UINT32_MAX - prefix - pipeline->shader_size) {
+        result = RIN_VK_ERROR_OUT_OF_HOST_MEMORY; goto fail;
+    }
+    packet_size = prefix + pipeline->shader_size + pipeline->fragment_shader_size;
+    packet = (RinGpuVulkanGraphicsPacketV1*)calloc(1u, packet_size);
+    if (!packet) { result = RIN_VK_ERROR_OUT_OF_HOST_MEMORY; goto fail; }
+    packet->struct_size = (uint32_t)packet_size;
+    packet->version = RIN_GPU_VULKAN_GRAPHICS_PACKET_VERSION;
+    packet->queue_family_index = queue_family_index;
+    packet->queue_index = queue_index;
+    packet->product_queue_id = product_queue_id;
+    packet->vertex_shader_size_bytes = pipeline->shader_size;
+    packet->fragment_shader_size_bytes = pipeline->fragment_shader_size;
+    packet->vertex_binding = pipeline->graphics_backend.vertex_binding_count
+                                 ? pipeline->graphics_backend.vertex_bindings[0].binding : 0u;
+    if (vertex_buffer) {
+        packet->vertex_allocation_handle = vertex_buffer->memory->product_allocation;
+        packet->vertex_offset = vertex_offset;
+        packet->vertex_size_bytes = vertex_size;
+    }
+    packet->color_allocation_handle = image->memory->product_allocation;
+    packet->color_offset = color_offset;
+    packet->color_size_bytes = pixel_bytes;
+    packet->width = image->width; packet->height = image->height;
+    packet->viewport_x = pipeline->viewport.x; packet->viewport_y = pipeline->viewport.y;
+    packet->viewport_width = pipeline->viewport.width; packet->viewport_height = pipeline->viewport.height;
+    packet->viewport_min_depth = pipeline->viewport.minDepth;
+    packet->viewport_max_depth = pipeline->viewport.maxDepth;
+    packet->scissor_x = pipeline->scissor.offset.x; packet->scissor_y = pipeline->scissor.offset.y;
+    packet->scissor_width = pipeline->scissor.extent.width;
+    packet->scissor_height = pipeline->scissor.extent.height;
+    packet->vertex_count = command->graphics_vertex_count;
+    packet->instance_count = command->graphics_instance_count;
+    packet->first_vertex = command->graphics_first_vertex;
+    packet->first_instance = command->graphics_first_instance;
+    packet->clear_red = command->graphics_clear_red;
+    packet->clear_green = command->graphics_clear_green;
+    packet->clear_blue = command->graphics_clear_blue;
+    packet->clear_alpha = command->graphics_clear_alpha;
+    packet->pipeline = pipeline->graphics_backend;
+    memcpy(packet->shader_ir, pipeline->shader_ir, pipeline->shader_size);
+    memcpy(packet->shader_ir + pipeline->shader_size, pipeline->fragment_shader_ir,
+           pipeline->fragment_shader_size);
+    *packet_out = packet; *packet_size_out = packet_size;
+    *resource_count_out = resource_count;
+    *ownership_updates_out = ownership_updates;
+    *ownership_update_count_out = vertex_buffer ? 1u : 0u;
+    return RIN_VK_SUCCESS;
+fail:
+    free(packet); free(ownership_updates);
+    return result;
+}
+
 static RinVkResult snapshot_compute_submission(
         struct RinVkDevice_T* device, uint32_t queue_family_index,
         uint32_t queue_index, uint32_t product_queue_id,
@@ -6564,7 +6833,8 @@ static RinVkResult snapshot_compute_submission(
         return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
     pipeline = pipeline_slot((RinVkDevice)(void*)device,
                              command_buffer->dispatch_compute_pipeline);
-    if (!pipeline || pipeline->descriptor_count == 0u ||
+    if (!pipeline || pipeline->kind != RIN_VK_PIPELINE_KIND_COMPUTE ||
+        pipeline->descriptor_count == 0u ||
         pipeline->descriptor_count > RIN_GPU_VULKAN_COMPUTE_MAX_BINDINGS ||
         pipeline->set_layout_count == 0u ||
         pipeline->set_layout_count >
@@ -7210,6 +7480,10 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     size_t validation_compute_packet_size = 0u;
     RinVkBufferOwnershipUpdate* validation_compute_ownership_updates = NULL;
     uint32_t validation_compute_ownership_update_count = 0u;
+    RinGpuVulkanGraphicsPacketV1* validation_graphics_packet = NULL;
+    size_t validation_graphics_packet_size = 0u;
+    RinVkBufferOwnershipUpdate* validation_graphics_ownership_updates = NULL;
+    uint32_t validation_graphics_ownership_update_count = 0u;
     RinVulkanProductResourceV1
         resources[RIN_VULKAN_PRODUCT_MAX_RESOURCES_PER_SUBMISSION];
     RinGpuVulkanTransferPacketV2 validation_packet_v2;
@@ -7226,6 +7500,7 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     uint32_t pending_resource_use_count = 0u;
     uint32_t index;
     int compute_submission = 0;
+    int graphics_submission = 0;
     int sync_locked = 0;
     int waits_ready = 1;
     RinVkImageSlot*
@@ -7476,6 +7751,19 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
             command_buffers[index]->compute_pipeline_bound != 0u ||
             command_buffers[index]->dispatch_compute_pipeline != 0u)
             compute_submission = 1;
+    for (index = 0u; index < request.commandBufferCount; ++index)
+        if (command_buffers[index]->graphics_rendering_active != 0u ||
+            command_buffers[index]->graphics_rendering_begin_count != 0u ||
+            command_buffers[index]->graphics_rendering_end_count != 0u ||
+            command_buffers[index]->graphics_draw_count != 0u ||
+            command_buffers[index]->graphics_pipeline_bound != 0u ||
+            command_buffers[index]->bound_graphics_pipeline != 0u ||
+            command_buffers[index]->graphics_vertex_buffer_bound != 0u)
+            graphics_submission = 1;
+    if (compute_submission && graphics_submission) {
+        result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        goto done;
+    }
     if (compute_submission) {
         result = snapshot_compute_submission(
             device, queue_slot_value->queue_family_index,
@@ -7489,6 +7777,23 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         validation_compute_packet = NULL;
         free(validation_compute_ownership_updates);
         validation_compute_ownership_updates = NULL;
+        memset(&validation_packet_v2, 0, sizeof(validation_packet_v2));
+        validation_packet_v2.struct_size = sizeof(validation_packet_v2);
+        validation_packet_v2.version = RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_2;
+        resource_count = 0u;
+    } else if (graphics_submission) {
+        result = snapshot_graphics_submission(
+            device, queue_slot_value->queue_family_index,
+            queue_slot_value->family_queue_index, queue_slot_value->queue_index,
+            command_buffers, request.commandBufferCount,
+            &validation_graphics_packet, &validation_graphics_packet_size,
+            resources, &resource_count, &validation_graphics_ownership_updates,
+            &validation_graphics_ownership_update_count);
+        if (result != RIN_VK_SUCCESS) goto done;
+        free(validation_graphics_packet);
+        validation_graphics_packet = NULL;
+        free(validation_graphics_ownership_updates);
+        validation_graphics_ownership_updates = NULL;
         memset(&validation_packet_v2, 0, sizeof(validation_packet_v2));
         validation_packet_v2.struct_size = sizeof(validation_packet_v2);
         validation_packet_v2.version = RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_2;
@@ -7558,6 +7863,18 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
             clear_submission_slot(slot);
             goto done;
         }
+    } else if (graphics_submission) {
+        result = snapshot_graphics_submission(
+            device, queue_slot_value->queue_family_index,
+            queue_slot_value->family_queue_index, queue_slot_value->queue_index,
+            command_buffers, request.commandBufferCount, &slot->graphics_packet,
+            &slot->graphics_packet_size, slot->resources, &slot->resource_count,
+            &slot->compute_buffer_ownership_updates,
+            &slot->compute_buffer_ownership_update_count);
+        if (result != RIN_VK_SUCCESS) {
+            clear_submission_slot(slot);
+            goto done;
+        }
     } else if (!snapshot_submission_packet_v2(
                    device, queue_slot_value->queue_family_index,
                    command_buffers, request.commandBufferCount,
@@ -7574,7 +7891,7 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         result = RIN_VK_ERROR_INITIALIZATION_FAILED;
         goto done;
     }
-    if (!compute_submission) {
+    if (!compute_submission && !graphics_submission) {
         memset(&slot->routed_packet, 0, sizeof(slot->routed_packet));
         slot->routed_packet.struct_size = sizeof(slot->routed_packet);
         slot->routed_packet.version = RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_3;
@@ -7672,6 +7989,8 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
 done:
     free(validation_compute_packet);
     free(validation_compute_ownership_updates);
+    free(validation_graphics_packet);
+    free(validation_graphics_ownership_updates);
     if (sync_locked) sync_unlock();
     __atomic_store_n(&queue_slot_value->submit_lock, 0u, __ATOMIC_RELEASE);
     return result;
@@ -8634,17 +8953,176 @@ void RIN_VKAPI_CALL vkCmdBindPipeline(
         return;
     }
     owner_device = (RinVkDevice)(void*)owner_address;
-    if (pipeline_bind_point != RIN_VK_PIPELINE_BIND_POINT_COMPUTE ||
-        pipeline_handle == 0u || !device_slot(owner_device) ||
-        command->compute_dispatch_count != 0u ||
-        command->lifecycle != RIN_GPU_VULKAN_COMMAND_BUFFER_RECORDING ||
-        !pipeline_slot(owner_device, pipeline_handle)) {
+    RinVkPipelineSlot* pipeline = pipeline_slot(owner_device, pipeline_handle);
+    if (!device_slot(owner_device) || !pipeline ||
+        command->lifecycle != RIN_GPU_VULKAN_COMMAND_BUFFER_RECORDING) {
         rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime,
                                                      command);
         return;
     }
-    command->bound_compute_pipeline = pipeline_handle;
-    command->compute_pipeline_bound = 1u;
+    if (pipeline_bind_point == RIN_VK_PIPELINE_BIND_POINT_COMPUTE &&
+        pipeline->kind == RIN_VK_PIPELINE_KIND_COMPUTE &&
+        command->compute_dispatch_count == 0u &&
+        command->graphics_draw_count == 0u) {
+        command->bound_compute_pipeline = pipeline_handle;
+        command->compute_pipeline_bound = 1u;
+    } else if (pipeline_bind_point == RIN_VK_PIPELINE_BIND_POINT_GRAPHICS &&
+               pipeline->kind == RIN_VK_PIPELINE_KIND_GRAPHICS &&
+               command->graphics_draw_count == 0u &&
+               command->compute_dispatch_count == 0u) {
+        command->bound_graphics_pipeline = pipeline_handle;
+        command->graphics_pipeline_bound = 1u;
+    } else {
+        rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime,
+                                                     command);
+    }
+}
+
+void RIN_VKAPI_CALL vkCmdBeginRendering(
+        RinVkCommandBuffer command_buffer,
+        const RinVkRenderingInfo* rendering_info) {
+    RinGpuVulkanCommandBufferV1* command =
+        (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
+    struct RinVkDevice_T* owner = NULL;
+    const RinVkRenderingAttachmentInfo* attachment;
+    RinVkImageViewSlot* view;
+    RinVkImageSlot* image;
+    if (!rendering_info || !command_owner_device(command, &owner) ||
+        !owner->dynamic_rendering_enabled ||
+        command->lifecycle != RIN_GPU_VULKAN_COMMAND_BUFFER_RECORDING ||
+        command->graphics_rendering_active != 0u ||
+        command->graphics_rendering_begin_count != 0u ||
+        command->compute_dispatch_count != 0u ||
+        rendering_info->sType != RIN_VK_STRUCTURE_TYPE_RENDERING_INFO ||
+        rendering_info->pNext || rendering_info->flags != 0u ||
+        rendering_info->renderArea.offset.x != 0 ||
+        rendering_info->renderArea.offset.y != 0 ||
+        rendering_info->layerCount != 1u || rendering_info->viewMask != 0u ||
+        rendering_info->colorAttachmentCount != 1u ||
+        !rendering_info->pColorAttachments || rendering_info->pDepthAttachment ||
+        rendering_info->pStencilAttachment) {
+        rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime,
+                                                     command);
+        return;
+    }
+    attachment = &rendering_info->pColorAttachments[0];
+    view = image_view_slot((RinVkDevice)(void*)owner, attachment->imageView);
+    image = view ? view->image : NULL;
+    if (attachment->sType != RIN_VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO ||
+        attachment->pNext ||
+        attachment->imageLayout != RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL ||
+        attachment->resolveMode != 0u || attachment->resolveImageView != 0u ||
+        attachment->resolveImageLayout != RIN_VK_IMAGE_LAYOUT_UNDEFINED ||
+        attachment->loadOp != RIN_VK_ATTACHMENT_LOAD_OP_CLEAR ||
+        attachment->storeOp != RIN_VK_ATTACHMENT_STORE_OP_STORE ||
+        !view || !image || image->owner != owner || !image->memory ||
+        image->memory_generation != image->memory->generation ||
+        image->memory->owner != owner ||
+        (int32_t)view->format != image->format ||
+        view->aspect_mask != RIN_VK_IMAGE_ASPECT_COLOR_BIT ||
+        image->format != RIN_VK_FORMAT_R8G8B8A8_UNORM ||
+        (image->usage & RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) == 0u ||
+        image->samples != RIN_VK_SAMPLE_COUNT_1_BIT || image->width == 0u ||
+        image->height == 0u ||
+        rendering_info->renderArea.extent.width != image->width ||
+        rendering_info->renderArea.extent.height != image->height ||
+        __atomic_load_n(&image->current_layout, __ATOMIC_ACQUIRE) !=
+            RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL ||
+        image->ownership.transfer_pending != 0u ||
+        (image->ownership.owner_queue_family != RIN_VK_QUEUE_FAMILY_IGNORED &&
+         image->ownership.owner_queue_family != command->pool->queue_family_index)) {
+        rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime,
+                                                     command);
+        return;
+    }
+    command->graphics_rendering_active = 1u;
+    command->graphics_rendering_begin_count = 1u;
+    command->graphics_color_layout = attachment->imageLayout;
+    command->graphics_color_view = attachment->imageView;
+    command->graphics_width = image->width;
+    command->graphics_height = image->height;
+    command->graphics_clear_red = attachment->clearValue.color.float32[0];
+    command->graphics_clear_green = attachment->clearValue.color.float32[1];
+    command->graphics_clear_blue = attachment->clearValue.color.float32[2];
+    command->graphics_clear_alpha = attachment->clearValue.color.float32[3];
+}
+
+void RIN_VKAPI_CALL vkCmdBeginRenderingKHR(
+        RinVkCommandBuffer command_buffer,
+        const RinVkRenderingInfo* rendering_info) {
+    vkCmdBeginRendering(command_buffer, rendering_info);
+}
+
+void RIN_VKAPI_CALL vkCmdEndRendering(
+        RinVkCommandBuffer command_buffer) {
+    RinGpuVulkanCommandBufferV1* command =
+        (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
+    if (!command || command->lifecycle != RIN_GPU_VULKAN_COMMAND_BUFFER_RECORDING ||
+        command->graphics_rendering_active == 0u ||
+        command->graphics_rendering_end_count != 0u ||
+        command->graphics_draw_count != 1u ||
+        command->graphics_pipeline_bound == 0u ||
+        command->bound_graphics_pipeline == 0u) {
+        rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime,
+                                                     command);
+        return;
+    }
+    command->graphics_rendering_active = 0u;
+    command->graphics_rendering_end_count = 1u;
+}
+
+void RIN_VKAPI_CALL vkCmdEndRenderingKHR(
+        RinVkCommandBuffer command_buffer) {
+    vkCmdEndRendering(command_buffer);
+}
+
+void RIN_VKAPI_CALL vkCmdBindVertexBuffers(
+        RinVkCommandBuffer command_buffer, uint32_t first_binding,
+        uint32_t binding_count, const RinVkBuffer* buffers,
+        const uint64_t* offsets) {
+    RinGpuVulkanCommandBufferV1* command =
+        (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
+    struct RinVkDevice_T* owner;
+    RinVkBufferSlot* buffer;
+    if (!command_owner_device(command, &owner) ||
+        command->lifecycle != RIN_GPU_VULKAN_COMMAND_BUFFER_RECORDING ||
+        first_binding != 0u || binding_count != 1u || !buffers || !offsets ||
+        command->graphics_vertex_buffer_bound != 0u || buffers[0] == 0u ||
+        !(buffer = buffer_slot((RinVkDevice)(void*)owner, buffers[0])) ||
+        !buffer->memory || buffer->memory_generation != buffer->memory->generation ||
+        (buffer->usage & RIN_VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) == 0u ||
+        offsets[0] >= buffer->size) {
+        rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime,
+                                                     command);
+        return;
+    }
+    command->graphics_vertex_buffer_bound = 1u;
+    command->graphics_vertex_buffer = buffers[0];
+    command->graphics_vertex_offset = offsets[0];
+}
+
+void RIN_VKAPI_CALL vkCmdDraw(
+        RinVkCommandBuffer command_buffer, uint32_t vertex_count,
+        uint32_t instance_count, uint32_t first_vertex,
+        uint32_t first_instance) {
+    RinGpuVulkanCommandBufferV1* command =
+        (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
+    if (!command || command->lifecycle != RIN_GPU_VULKAN_COMMAND_BUFFER_RECORDING ||
+        command->graphics_rendering_active == 0u ||
+        command->graphics_draw_count != 0u ||
+        command->graphics_pipeline_bound == 0u ||
+        command->bound_graphics_pipeline == 0u || vertex_count == 0u ||
+        vertex_count > 65535u || instance_count != 1u || first_instance != 0u ||
+        command->compute_dispatch_count != 0u) {
+        rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime,
+                                                     command);
+        return;
+    }
+    command->graphics_draw_count = 1u;
+    command->graphics_vertex_count = vertex_count;
+    command->graphics_instance_count = instance_count;
+    command->graphics_first_vertex = first_vertex;
+    command->graphics_first_instance = first_instance;
 }
 
 void RIN_VKAPI_CALL vkCmdDispatch(
@@ -8702,6 +9180,90 @@ static void pipeline_cache_header(const struct RinVkDevice_T* device,
            sizeof(header->device_uuid));
     memcpy(header->driver_digest, device->physical_profile.driver_digest,
            sizeof(header->driver_digest));
+}
+
+static int map_graphics_topology(uint32_t value, uint32_t* out) {
+    if (!out) return 0;
+    switch (value) {
+        case RIN_VK_PRIMITIVE_TOPOLOGY_POINT_LIST:
+            *out = RIN_GPU_PRIMITIVE_POINT_LIST; return 1;
+        case RIN_VK_PRIMITIVE_TOPOLOGY_LINE_LIST:
+            *out = RIN_GPU_PRIMITIVE_LINE_LIST; return 1;
+        case RIN_VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:
+            *out = RIN_GPU_PRIMITIVE_LINE_STRIP; return 1;
+        case RIN_VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:
+            *out = RIN_GPU_PRIMITIVE_TRIANGLE_LIST; return 1;
+        case RIN_VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
+            *out = RIN_GPU_PRIMITIVE_TRIANGLE_STRIP; return 1;
+        case RIN_VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN:
+            *out = RIN_GPU_PRIMITIVE_TRIANGLE_FAN; return 1;
+        default: return 0;
+    }
+}
+
+static int map_graphics_blend_factor(uint32_t value, uint32_t* out) {
+    if (!out) return 0;
+    switch (value) {
+        case RIN_VK_BLEND_FACTOR_ZERO: *out = RIN_GPU_BLEND_ZERO; return 1;
+        case RIN_VK_BLEND_FACTOR_ONE: *out = RIN_GPU_BLEND_ONE; return 1;
+        case RIN_VK_BLEND_FACTOR_SRC_COLOR:
+            *out = RIN_GPU_BLEND_SOURCE_COLOR; return 1;
+        case RIN_VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR:
+            *out = RIN_GPU_BLEND_ONE_MINUS_SOURCE_COLOR; return 1;
+        case RIN_VK_BLEND_FACTOR_DST_COLOR:
+            *out = RIN_GPU_BLEND_DESTINATION_COLOR; return 1;
+        case RIN_VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR:
+            *out = RIN_GPU_BLEND_ONE_MINUS_DESTINATION_COLOR; return 1;
+        case RIN_VK_BLEND_FACTOR_SRC_ALPHA:
+            *out = RIN_GPU_BLEND_SOURCE_ALPHA; return 1;
+        case RIN_VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA:
+            *out = RIN_GPU_BLEND_ONE_MINUS_SOURCE_ALPHA; return 1;
+        case RIN_VK_BLEND_FACTOR_DST_ALPHA:
+            *out = RIN_GPU_BLEND_DESTINATION_ALPHA; return 1;
+        case RIN_VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA:
+            *out = RIN_GPU_BLEND_ONE_MINUS_DESTINATION_ALPHA; return 1;
+        case RIN_VK_BLEND_FACTOR_CONSTANT_COLOR:
+            *out = RIN_GPU_BLEND_CONSTANT_COLOR; return 1;
+        case RIN_VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR:
+            *out = RIN_GPU_BLEND_ONE_MINUS_CONSTANT_COLOR; return 1;
+        case RIN_VK_BLEND_FACTOR_CONSTANT_ALPHA:
+            *out = RIN_GPU_BLEND_CONSTANT_ALPHA; return 1;
+        case RIN_VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA:
+            *out = RIN_GPU_BLEND_ONE_MINUS_CONSTANT_ALPHA; return 1;
+        case RIN_VK_BLEND_FACTOR_SRC_ALPHA_SATURATE:
+            *out = RIN_GPU_BLEND_SOURCE_ALPHA_SATURATE; return 1;
+        default: return 0;
+    }
+}
+
+static int map_graphics_blend_operation(uint32_t value, uint32_t* out) {
+    if (!out) return 0;
+    switch (value) {
+        case RIN_VK_BLEND_OP_ADD: *out = RIN_GPU_BLEND_ADD; return 1;
+        case RIN_VK_BLEND_OP_SUBTRACT:
+            *out = RIN_GPU_BLEND_SUBTRACT; return 1;
+        case RIN_VK_BLEND_OP_REVERSE_SUBTRACT:
+            *out = RIN_GPU_BLEND_REVERSE_SUBTRACT; return 1;
+        case RIN_VK_BLEND_OP_MIN: *out = RIN_GPU_BLEND_MINIMUM; return 1;
+        case RIN_VK_BLEND_OP_MAX: *out = RIN_GPU_BLEND_MAXIMUM; return 1;
+        default: return 0;
+    }
+}
+
+static int map_graphics_vertex_format(uint32_t value, uint32_t* out) {
+    if (!out) return 0;
+    switch (value) {
+        case RIN_VK_FORMAT_R32_SFLOAT:
+        case RIN_VK_FORMAT_R32G32_SFLOAT:
+        case RIN_VK_FORMAT_R32G32B32_SFLOAT:
+        case RIN_VK_FORMAT_R32G32B32A32_SFLOAT:
+            *out = RIN_GPU_VERTEX_FLOAT32; return 1;
+        default: return 0;
+    }
+}
+
+static int finite_graphics_float(float value) {
+    return value == value && value >= -FLT_MAX && value <= FLT_MAX;
 }
 
 static int pipeline_cache_blob_valid(const struct RinVkDevice_T* device,
@@ -8797,6 +9359,273 @@ void RIN_VKAPI_CALL vkDestroyShaderModule(
     module = shader_module_slot(device, shader_module);
     if (module) clear_shader_module_slot(module);
     sync_unlock();
+}
+
+static RinVkResult create_graphics_pipeline_one(
+        RinVkDevice device, const RinVkGraphicsPipelineCreateInfo* info,
+        RinVkPipeline* pipeline_out) {
+    struct RinVkDevice_T* owner;
+    RinVkPipelineLayoutSlot* layout;
+    RinVkShaderModuleSlot* vertex_module;
+    RinVkShaderModuleSlot* fragment_module;
+    RinVkPipelineSlot* pipeline;
+    const RinVkPipelineRenderingCreateInfo* rendering;
+    const RinVkPipelineShaderStageCreateInfo* vertex_stage = NULL;
+    const RinVkPipelineShaderStageCreateInfo* fragment_stage = NULL;
+    RinGpuVulkanVertexInputBindingV1 binding;
+    RinGpuVulkanVertexInputAttributeV1 attributes[RIN_GPU_MAX_VERTEX_ATTRIBUTES];
+    RinGpuVulkanGraphicsStateV1 state;
+    RinGpuVulkanGraphicsPipelinePlanV1 plan;
+    RinSpirvTranslationInfoV1 vertex_translation;
+    RinSpirvTranslationInfoV1 fragment_translation;
+    uint32_t* vertex_spirv = NULL;
+    uint32_t* fragment_spirv = NULL;
+    uint8_t* vertex_ir = NULL;
+    uint8_t* fragment_ir = NULL;
+    size_t vertex_spirv_size = 0u, fragment_spirv_size = 0u;
+    size_t vertex_ir_size, fragment_ir_size;
+    uint32_t binding_count = 0u, attribute_count, index, slot_index = 0u;
+    int translated;
+    RinVkResult result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+
+    if (!info || !pipeline_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    *pipeline_out = 0u;
+    if (info->sType != RIN_VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO ||
+        info->flags != 0u || info->stageCount != 2u || !info->pStages ||
+        !info->pVertexInputState || !info->pInputAssemblyState ||
+        info->pTessellationState || !info->pViewportState ||
+        !info->pRasterizationState || !info->pMultisampleState ||
+        info->pDepthStencilState || !info->pColorBlendState ||
+        info->pDynamicState || info->renderPass != 0u || info->subpass != 0u ||
+        info->basePipelineHandle != 0u || info->basePipelineIndex != -1 ||
+        !info->pNext)
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    rendering = (const RinVkPipelineRenderingCreateInfo*)info->pNext;
+    if (rendering->sType != RIN_VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO ||
+        rendering->pNext || rendering->viewMask != 0u ||
+        rendering->colorAttachmentCount != 1u ||
+        !rendering->pColorAttachmentFormats ||
+        rendering->pColorAttachmentFormats[0] != RIN_VK_FORMAT_R8G8B8A8_UNORM ||
+        rendering->depthAttachmentFormat != 0 || rendering->stencilAttachmentFormat != 0)
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    for (index = 0u; index < info->stageCount; ++index) {
+        const RinVkPipelineShaderStageCreateInfo* stage = &info->pStages[index];
+        if (stage->sType != RIN_VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO ||
+            stage->pNext || stage->flags != 0u || !stage->pName ||
+            stage->pSpecializationInfo)
+            return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        if (stage->stage == RIN_VK_SHADER_STAGE_VERTEX_BIT && !vertex_stage)
+            vertex_stage = stage;
+        else if (stage->stage == RIN_VK_SHADER_STAGE_FRAGMENT_BIT && !fragment_stage)
+            fragment_stage = stage;
+        else
+            return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    }
+    if (!vertex_stage || !fragment_stage ||
+        info->pVertexInputState->sType != RIN_VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO ||
+        info->pVertexInputState->pNext || info->pVertexInputState->flags != 0u ||
+        info->pVertexInputState->vertexBindingDescriptionCount > 1u ||
+        (info->pVertexInputState->vertexBindingDescriptionCount &&
+         !info->pVertexInputState->pVertexBindingDescriptions) ||
+        info->pVertexInputState->vertexAttributeDescriptionCount > RIN_GPU_MAX_VERTEX_ATTRIBUTES ||
+        (info->pVertexInputState->vertexAttributeDescriptionCount &&
+         !info->pVertexInputState->pVertexAttributeDescriptions) ||
+        info->pInputAssemblyState->sType != RIN_VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO ||
+        info->pInputAssemblyState->pNext || info->pInputAssemblyState->flags != 0u ||
+        info->pInputAssemblyState->primitiveRestartEnable != 0u ||
+        info->pViewportState->sType != RIN_VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO ||
+        info->pViewportState->pNext || info->pViewportState->flags != 0u ||
+        info->pViewportState->viewportCount != 1u || !info->pViewportState->pViewports ||
+        info->pViewportState->scissorCount != 1u || !info->pViewportState->pScissors ||
+        info->pRasterizationState->sType != RIN_VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO ||
+        info->pRasterizationState->pNext || info->pRasterizationState->flags != 0u ||
+        info->pMultisampleState->sType != RIN_VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO ||
+        info->pMultisampleState->pNext || info->pMultisampleState->flags != 0u ||
+        info->pColorBlendState->sType != RIN_VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO ||
+        info->pColorBlendState->pNext || info->pColorBlendState->flags != 0u ||
+        info->pColorBlendState->logicOpEnable != 0u || info->pColorBlendState->logicOp != 0u ||
+        info->pColorBlendState->attachmentCount != 1u || !info->pColorBlendState->pAttachments)
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    {
+        const RinVkViewport* vp = info->pViewportState->pViewports;
+        const RinVkRect2D* sc = info->pViewportState->pScissors;
+        const RinVkPipelineRasterizationStateCreateInfo* rs = info->pRasterizationState;
+        const RinVkPipelineMultisampleStateCreateInfo* ms = info->pMultisampleState;
+        const RinVkPipelineColorBlendAttachmentState* bl = info->pColorBlendState->pAttachments;
+        uint32_t mapped_topology;
+        if (!finite_graphics_float(vp->x) || !finite_graphics_float(vp->y) ||
+            !finite_graphics_float(vp->width) || !finite_graphics_float(vp->height) ||
+            !finite_graphics_float(vp->minDepth) || !finite_graphics_float(vp->maxDepth) ||
+            vp->x < 0.0f || vp->y < 0.0f || vp->width <= 0.0f || vp->height <= 0.0f ||
+            vp->minDepth < 0.0f || vp->maxDepth < vp->minDepth || vp->maxDepth > 1.0f ||
+            sc->offset.x < 0 || sc->offset.y < 0 || !sc->extent.width || !sc->extent.height ||
+            rs->depthClampEnable || rs->rasterizerDiscardEnable ||
+            rs->polygonMode != RIN_VK_POLYGON_MODE_FILL ||
+            (rs->cullMode != RIN_VK_CULL_MODE_NONE && rs->cullMode != RIN_VK_CULL_MODE_FRONT_BIT &&
+             rs->cullMode != RIN_VK_CULL_MODE_BACK_BIT) || rs->frontFace > RIN_VK_FRONT_FACE_CLOCKWISE ||
+            rs->depthBiasEnable || rs->depthBiasConstantFactor != 0.0f || rs->depthBiasClamp != 0.0f ||
+            rs->depthBiasSlopeFactor != 0.0f || rs->lineWidth != 1.0f ||
+            ms->rasterizationSamples != RIN_VK_SAMPLE_COUNT_1_BIT || ms->sampleShadingEnable ||
+            ms->minSampleShading != 0.0f || ms->pSampleMask || ms->alphaToCoverageEnable ||
+            ms->alphaToOneEnable || bl->blendEnable > 1u || (bl->colorWriteMask & ~15u) ||
+            !map_graphics_topology(info->pInputAssemblyState->topology, &mapped_topology))
+            return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    }
+    memset(&binding, 0, sizeof(binding));
+    if (info->pVertexInputState->vertexBindingDescriptionCount == 1u) {
+        const RinVkVertexInputBindingDescription* b = info->pVertexInputState->pVertexBindingDescriptions;
+        if (b->binding != 0u || !b->stride || b->stride > RIN_GPU_MAX_VERTEX_STRIDE ||
+            b->inputRate != RIN_VK_VERTEX_INPUT_RATE_VERTEX)
+            return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        binding.binding = b->binding; binding.stride = b->stride; binding_count = 1u;
+    }
+    memset(attributes, 0, sizeof(attributes));
+    attribute_count = info->pVertexInputState->vertexAttributeDescriptionCount;
+    for (index = 0u; index < attribute_count; ++index) {
+        const RinVkVertexInputAttributeDescription* a = &info->pVertexInputState->pVertexAttributeDescriptions[index];
+        uint32_t prior;
+        if (a->binding != 0u || !map_graphics_vertex_format(a->format, &attributes[index].format) ||
+            a->offset > UINT32_MAX - 12u)
+            return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        for (prior = 0u; prior < index; ++prior)
+            if (info->pVertexInputState->pVertexAttributeDescriptions[prior].location == a->location)
+                return RIN_VK_ERROR_INITIALIZATION_FAILED;
+        attributes[index].location = a->location; attributes[index].binding = a->binding;
+        attributes[index].offset = a->offset;
+    }
+    sync_lock();
+    owner = device_slot(device);
+    layout = owner ? pipeline_layout_slot(device, info->layout) : NULL;
+    vertex_module = owner ? shader_module_slot(device, vertex_stage->module) : NULL;
+    fragment_module = owner ? shader_module_slot(device, fragment_stage->module) : NULL;
+    if (!owner || !owner->dynamic_rendering_enabled || !layout || layout->set_layout_count ||
+        !vertex_module || !fragment_module) {
+        sync_unlock(); return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    }
+    vertex_spirv_size = vertex_module->code_size; fragment_spirv_size = fragment_module->code_size;
+    vertex_spirv = (uint32_t*)malloc(vertex_spirv_size); fragment_spirv = (uint32_t*)malloc(fragment_spirv_size);
+    if (vertex_spirv) memcpy(vertex_spirv, vertex_module->code, vertex_spirv_size);
+    if (fragment_spirv) memcpy(fragment_spirv, fragment_module->code, fragment_spirv_size);
+    sync_unlock();
+    if (!vertex_spirv || !fragment_spirv) { result = RIN_VK_ERROR_OUT_OF_HOST_MEMORY; goto done; }
+    vertex_ir = (uint8_t*)malloc(RIN_SHADER_MAX_SOURCE_BYTES);
+    fragment_ir = (uint8_t*)malloc(RIN_SHADER_MAX_SOURCE_BYTES);
+    if (!vertex_ir || !fragment_ir) { result = RIN_VK_ERROR_OUT_OF_HOST_MEMORY; goto done; }
+    memset(&vertex_translation, 0, sizeof(vertex_translation));
+    translated = ringpu_vulkan_graphics_translate_shader(vertex_spirv, vertex_spirv_size / 4u,
+        RIN_SHADER_STAGE_VERTEX, NULL, 0u, vertex_ir, RIN_SHADER_MAX_SOURCE_BYTES, &vertex_translation);
+    if (translated != RIN_GPU_VULKAN_GRAPHICS_OK) {
+        result = translated == RIN_GPU_VULKAN_GRAPHICS_LIMIT ? RIN_VK_ERROR_OUT_OF_HOST_MEMORY : RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        goto done;
+    }
+    memset(&fragment_translation, 0, sizeof(fragment_translation));
+    translated = ringpu_vulkan_graphics_translate_shader(fragment_spirv, fragment_spirv_size / 4u,
+        RIN_SHADER_STAGE_FRAGMENT, NULL, 0u, fragment_ir, RIN_SHADER_MAX_SOURCE_BYTES, &fragment_translation);
+    if (translated != RIN_GPU_VULKAN_GRAPHICS_OK) {
+        result = translated == RIN_GPU_VULKAN_GRAPHICS_LIMIT ? RIN_VK_ERROR_OUT_OF_HOST_MEMORY : RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        goto done;
+    }
+    if (strcmp(vertex_stage->pName, vertex_translation.entry_name) ||
+        strcmp(fragment_stage->pName, fragment_translation.entry_name) ||
+        vertex_translation.descriptor_count || fragment_translation.descriptor_count ||
+        (!binding_count && (vertex_translation.input_count || attribute_count)))
+        goto done;
+    if (binding_count) for (index = 0u; index < vertex_translation.input_count; ++index) {
+        const RinSpirvIoV1* input = &vertex_translation.inputs[index];
+        const RinVkVertexInputAttributeDescription* a = NULL;
+        uint32_t ai;
+        for (ai = 0u; ai < attribute_count; ++ai)
+            if (info->pVertexInputState->pVertexAttributeDescriptions[ai].location == input->location) {
+                a = &info->pVertexInputState->pVertexAttributeDescriptions[ai]; break;
+            }
+        if (!a || !input->width || input->width > 4u || a->offset > binding.stride ||
+            input->width * 4u > binding.stride - a->offset) goto done;
+    }
+    memset(&state, 0, sizeof(state));
+    state.struct_size = sizeof(state); state.version = RIN_GPU_VULKAN_GRAPHICS_PROFILE_VERSION;
+    state.color_format = RIN_GPU_FORMAT_RGBA8_UNORM;
+    if (!map_graphics_topology(info->pInputAssemblyState->topology, &state.primitive_topology)) goto done;
+    state.blend_enabled = info->pColorBlendState->pAttachments[0].blendEnable;
+    state.color_write_mask = info->pColorBlendState->pAttachments[0].colorWriteMask;
+    state.position_output_location = 0u; state.render_pass_model = RIN_GPU_VULKAN_GRAPHICS_RENDER_PASS;
+    state.cull_mode = info->pRasterizationState->cullMode == RIN_VK_CULL_MODE_NONE ? RIN_GPU_CULL_NONE :
+        (info->pRasterizationState->cullMode == RIN_VK_CULL_MODE_FRONT_BIT ? RIN_GPU_CULL_FRONT : RIN_GPU_CULL_BACK);
+    state.front_face = info->pRasterizationState->frontFace == RIN_VK_FRONT_FACE_COUNTER_CLOCKWISE ?
+        RIN_GPU_FRONT_FACE_COUNTER_CLOCKWISE : RIN_GPU_FRONT_FACE_CLOCKWISE;
+    if (state.blend_enabled) {
+        const RinVkPipelineColorBlendAttachmentState* b = info->pColorBlendState->pAttachments;
+        if (!map_graphics_blend_factor(b->srcColorBlendFactor, &state.source_color_factor) ||
+            !map_graphics_blend_factor(b->dstColorBlendFactor, &state.destination_color_factor) ||
+            !map_graphics_blend_operation(b->colorBlendOp, &state.color_operation) ||
+            !map_graphics_blend_factor(b->srcAlphaBlendFactor, &state.source_alpha_factor) ||
+            !map_graphics_blend_factor(b->dstAlphaBlendFactor, &state.destination_alpha_factor) ||
+            !map_graphics_blend_operation(b->alphaBlendOp, &state.alpha_operation)) goto done;
+        state.blend_constant_red = info->pColorBlendState->blendConstants[0];
+        state.blend_constant_green = info->pColorBlendState->blendConstants[1];
+        state.blend_constant_blue = info->pColorBlendState->blendConstants[2];
+        state.blend_constant_alpha = info->pColorBlendState->blendConstants[3];
+        if (!finite_graphics_float(state.blend_constant_red) || !finite_graphics_float(state.blend_constant_green) ||
+            !finite_graphics_float(state.blend_constant_blue) || !finite_graphics_float(state.blend_constant_alpha)) {
+            result = RIN_VK_ERROR_INITIALIZATION_FAILED; goto done;
+        }
+    }
+    memset(&plan, 0, sizeof(plan));
+    if (ringpu_vulkan_graphics_build_pipeline(&vertex_translation, &fragment_translation, &state,
+            binding_count ? &binding : NULL, binding_count, attributes, attribute_count, &plan) !=
+            RIN_GPU_VULKAN_GRAPHICS_OK || plan.backend.resource_count || plan.backend.vertex_binding_count > 1u)
+        goto done;
+    vertex_ir_size = ((const RinShaderHeaderV1*)(const void*)vertex_ir)->total_size;
+    fragment_ir_size = ((const RinShaderHeaderV1*)(const void*)fragment_ir)->total_size;
+    if (vertex_ir_size < sizeof(RinShaderHeaderV1) || vertex_ir_size > RIN_SHADER_MAX_SOURCE_BYTES ||
+        fragment_ir_size < sizeof(RinShaderHeaderV1) || fragment_ir_size > RIN_SHADER_MAX_SOURCE_BYTES) goto done;
+    sync_lock();
+    owner = device_slot(device); layout = owner ? pipeline_layout_slot(device, info->layout) : NULL;
+    if (!owner || !owner->dynamic_rendering_enabled || !layout || layout->set_layout_count) {
+        sync_unlock(); result = RIN_VK_ERROR_INITIALIZATION_FAILED; goto done;
+    }
+    pipeline = reserve_pipeline_slot(owner, &slot_index);
+    if (!pipeline) { sync_unlock(); result = RIN_VK_ERROR_OUT_OF_HOST_MEMORY; goto done; }
+    pipeline->kind = RIN_VK_PIPELINE_KIND_GRAPHICS;
+    pipeline->shader_size = (uint32_t)vertex_ir_size;
+    pipeline->fragment_shader_size = (uint32_t)fragment_ir_size;
+    pipeline->graphics_backend = plan.backend;
+    pipeline->viewport = *info->pViewportState->pViewports;
+    pipeline->scissor = *info->pViewportState->pScissors;
+    pipeline->shader_ir = vertex_ir; pipeline->fragment_shader_ir = fragment_ir;
+    vertex_ir = NULL; fragment_ir = NULL;
+    __atomic_store_n(&pipeline->state, 1u, __ATOMIC_RELEASE);
+    *pipeline_out = resource_handle(RIN_VK_PIPELINE_TAG, slot_index, pipeline->generation);
+    sync_unlock(); result = RIN_VK_SUCCESS;
+done:
+    free(vertex_spirv); free(fragment_spirv); free(vertex_ir); free(fragment_ir);
+    return result;
+}
+
+RinVkResult RIN_VKAPI_CALL vkCreateGraphicsPipelines(
+        RinVkDevice device, RinVkPipelineCache pipeline_cache,
+        uint32_t create_info_count, const RinVkGraphicsPipelineCreateInfo* create_infos,
+        const void* allocator, RinVkPipeline* pipelines) {
+    struct RinVkDevice_T* owner = device_slot(device);
+    RinVkResult result = RIN_VK_SUCCESS;
+    uint32_t index;
+    (void)allocator;
+    if (!create_info_count || create_info_count > RIN_VK_MAX_PIPELINES || !create_infos || !pipelines)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    for (index = 0u; index < create_info_count; ++index) pipelines[index] = 0u;
+    if (!owner || (pipeline_cache && !pipeline_cache_slot(device, pipeline_cache)))
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    for (index = 0u; index < create_info_count; ++index) {
+        result = create_graphics_pipeline_one(device, &create_infos[index], &pipelines[index]);
+        if (result != RIN_VK_SUCCESS) break;
+    }
+    if (result != RIN_VK_SUCCESS) for (index = 0u; index < create_info_count; ++index) {
+        RinVkPipelineSlot* pipeline;
+        if (!pipelines[index]) continue;
+        sync_lock(); pipeline = pipeline_slot(device, pipelines[index]);
+        if (pipeline) clear_pipeline_slot(pipeline);
+        sync_unlock(); pipelines[index] = 0u;
+    }
+    return result;
 }
 
 static RinVkResult create_compute_pipeline_one(
@@ -8921,6 +9750,7 @@ static RinVkResult create_compute_pipeline_one(
     pipeline->set_layout_count = layout->set_layout_count;
     pipeline->descriptor_count = translation.descriptor_count;
     pipeline->shader_size = (uint32_t)shader_size;
+    pipeline->kind = RIN_VK_PIPELINE_KIND_COMPUTE;
     memcpy(pipeline->set_layouts, set_layouts,
            sizeof(set_layouts[0]) * layout->set_layout_count);
     memcpy(pipeline->descriptors, translation.descriptors,
@@ -9277,12 +10107,24 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
         return (RinVkVoidFunction)vkDestroyPipelineLayout;
     if (name_equal(name, "vkCreateComputePipelines"))
         return (RinVkVoidFunction)vkCreateComputePipelines;
+    if (name_equal(name, "vkCreateGraphicsPipelines"))
+        return (RinVkVoidFunction)vkCreateGraphicsPipelines;
     if (name_equal(name, "vkDestroyPipeline"))
         return (RinVkVoidFunction)vkDestroyPipeline;
     if (name_equal(name, "vkCmdBindDescriptorSets"))
         return (RinVkVoidFunction)vkCmdBindDescriptorSets;
     if (name_equal(name, "vkCmdBindPipeline"))
         return (RinVkVoidFunction)vkCmdBindPipeline;
+    if (name_equal(name, "vkCmdBindVertexBuffers"))
+        return (RinVkVoidFunction)vkCmdBindVertexBuffers;
+    if (name_equal(name, "vkCmdDraw"))
+        return (RinVkVoidFunction)vkCmdDraw;
+    if (device_value->dynamic_rendering_enabled &&
+        name_equal(name, "vkCmdBeginRenderingKHR"))
+        return (RinVkVoidFunction)vkCmdBeginRenderingKHR;
+    if (device_value->dynamic_rendering_enabled &&
+        name_equal(name, "vkCmdEndRenderingKHR"))
+        return (RinVkVoidFunction)vkCmdEndRenderingKHR;
     if (name_equal(name, "vkCmdDispatch"))
         return (RinVkVoidFunction)vkCmdDispatch;
     if (name_equal(name, "vkCreatePipelineCache"))

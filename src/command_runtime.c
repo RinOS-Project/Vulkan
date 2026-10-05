@@ -103,6 +103,27 @@ static void reset_recording(RinGpuVulkanCommandBufferV1* buffer) {
     buffer->compute_group_count_x = 0u;
     buffer->compute_group_count_y = 0u;
     buffer->compute_group_count_z = 0u;
+    buffer->graphics_rendering_active = 0u;
+    buffer->graphics_rendering_begin_count = 0u;
+    buffer->graphics_rendering_end_count = 0u;
+    buffer->graphics_draw_count = 0u;
+    buffer->graphics_pipeline_bound = 0u;
+    buffer->graphics_vertex_buffer_bound = 0u;
+    buffer->graphics_color_layout = 0u;
+    buffer->graphics_width = 0u;
+    buffer->graphics_height = 0u;
+    buffer->bound_graphics_pipeline = 0u;
+    buffer->graphics_color_view = 0u;
+    buffer->graphics_vertex_buffer = 0u;
+    buffer->graphics_vertex_offset = 0u;
+    buffer->graphics_vertex_count = 0u;
+    buffer->graphics_instance_count = 0u;
+    buffer->graphics_first_vertex = 0u;
+    buffer->graphics_first_instance = 0u;
+    buffer->graphics_clear_red = 0.0f;
+    buffer->graphics_clear_green = 0.0f;
+    buffer->graphics_clear_blue = 0.0f;
+    buffer->graphics_clear_alpha = 0.0f;
     buffer->barrier_count = 0u;
     buffer->reserved_barrier = 0u;
     memset(buffer->barriers, 0, sizeof(buffer->barriers));
@@ -564,11 +585,15 @@ int rin_gpu_vulkan_command_buffer_record_transfer_ops(
                             RIN_VK_IMAGE_LAYOUT_UNDEFINED &&
                         operation->source_width != RIN_VK_IMAGE_LAYOUT_GENERAL &&
                         operation->source_width !=
+                            RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
+                        operation->source_width !=
                             RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL &&
                         operation->source_width !=
                             RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) ||
                        (operation->source_height !=
                             RIN_VK_IMAGE_LAYOUT_GENERAL &&
+                        operation->source_height !=
+                            RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
                         operation->source_height !=
                             RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL &&
                         operation->source_height !=
