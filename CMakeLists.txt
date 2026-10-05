@@ -69,6 +69,13 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME rinvulkan-resource-thread
         COMMAND rinvulkan-resource-thread-test)
+    add_executable(rinvulkan-wsi-display-test
+        tests/rinvulkan_wsi_display_test.c)
+    target_compile_features(rinvulkan-wsi-display-test PRIVATE c_std_11)
+    target_link_libraries(rinvulkan-wsi-display-test PRIVATE
+        RinVulkan::RinVulkan)
+    add_test(NAME rinvulkan-wsi-display
+        COMMAND rinvulkan-wsi-display-test)
     add_executable(rinvulkan-buffer-ownership-test
         tests/rinvulkan_buffer_ownership_test.c
         src/buffer_ownership.c)

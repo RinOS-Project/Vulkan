@@ -41,6 +41,13 @@ rinvulkan_graphics_runtime_test = executable(
 )
 test('rinvulkan-graphics-runtime', rinvulkan_graphics_runtime_test)
 
+rinvulkan_wsi_display_test = executable(
+  'rinvulkan-wsi-display-test',
+  'tests/rinvulkan_wsi_display_test.c',
+  dependencies: rinvulkan_dep,
+)
+test('rinvulkan-wsi-display', rinvulkan_wsi_display_test)
+
 rinvulkan_buffer_ownership_test = executable(
   'rinvulkan-buffer-ownership-test',
   'tests/rinvulkan_buffer_ownership_test.c',

@@ -7,6 +7,7 @@
 
 #include <rinvulkan/platform.h>
 #include <rinvulkan/runtime.h>
+#include <rinvulkan/wsi_platform.h>
 
 #if defined(_WIN32) && !defined(_WIN64)
 #define RIN_VKAPI_CALL __stdcall
@@ -177,6 +178,10 @@
 #define RIN_VK_ERROR_INCOMPATIBLE_DRIVER (-9)
 #define RIN_VK_ERROR_TOO_MANY_OBJECTS (-10)
 #define RIN_VK_ERROR_UNKNOWN (-13)
+#define RIN_VK_SUBOPTIMAL_KHR 1000001003
+#define RIN_VK_ERROR_SURFACE_LOST_KHR (-1000000000)
+#define RIN_VK_ERROR_OUT_OF_DATE_KHR (-1000001004)
+#define RIN_VK_ERROR_INCOMPATIBLE_DISPLAY_KHR (-1000003001)
 #define RIN_VK_EVENT_RESET 0
 #define RIN_VK_EVENT_SET 3
 
@@ -2032,6 +2037,8 @@ int rin_gpu_vulkan_icd_bind_product_platform(
     RinVulkanProductPlatformV1* platform);
 int rin_gpu_vulkan_icd_unbind_product_platform(
     RinVulkanProductPlatformV1* platform);
+int rin_gpu_vulkan_icd_bind_wsi_platform(RinVulkanWsiPlatformV1* platform);
+int rin_gpu_vulkan_icd_unbind_wsi_platform(RinVulkanWsiPlatformV1* platform);
 /* Product completion is driven by the RinGPU service loop, not by a forged
  * synchronous Vulkan wait.  It retires only work reported complete by the
  * product runtime and leaves still-pending command buffers leased. */
@@ -2127,6 +2134,14 @@ RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkGetPhysicalDeviceMemoryProperties(
     RinVkPhysicalDevice physical_device,
     RinVkPhysicalDeviceMemoryProperties* properties);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkGetPhysicalDeviceDisplayPropertiesKHR(
+    RinVkPhysicalDevice physical_device, uint32_t* property_count,
+    RinVkDisplayPropertiesKHR* properties);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkGetDisplayModePropertiesKHR(
+    RinVkPhysicalDevice physical_device, RinVkDisplayKHR display,
+    uint32_t* property_count, RinVkDisplayModePropertiesKHR* properties);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkCreateDevice(RinVkPhysicalDevice physical_device,
                const RinVkDeviceCreateInfo* create_info,
