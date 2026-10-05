@@ -151,6 +151,7 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/include)
         target_link_libraries(rinvulkan-loader-validation-test PRIVATE
             Vulkan::Vulkan ${CMAKE_DL_LIBS})
+        add_dependencies(rinvulkan-loader-validation-test RinVulkanICD)
         if(MSVC)
             target_compile_options(rinvulkan-loader-validation-test PRIVATE
                 /W4)
