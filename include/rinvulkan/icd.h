@@ -1589,6 +1589,7 @@ typedef struct RinVkSamplerCreateInfo {
 #define RIN_VK_IMAGE_VIEW_TYPE_2D_ARRAY 5u
 #define RIN_VK_IMAGE_LAYOUT_GENERAL UINT32_C(1)
 #define RIN_VK_IMAGE_LAYOUT_UNDEFINED UINT32_C(0)
+#define RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR UINT32_C(1000001002)
 #define RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL UINT32_C(6)
 #define RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL UINT32_C(7)
 #define RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL UINT32_C(2)
@@ -2201,6 +2202,17 @@ RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkGetPhysicalDeviceSurfacePresentModesKHR(
     RinVkPhysicalDevice physical_device, RinVkSurfaceKHR surface,
     uint32_t* present_mode_count, RinVkPresentModeKHR* present_modes);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkCreateSwapchainKHR(RinVkDevice device,
+                     const RinVkSwapchainCreateInfoKHR* create_info,
+                     const void* allocator,
+                     RinVkSwapchainKHR* swapchain_out);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkDestroySwapchainKHR(RinVkDevice device, RinVkSwapchainKHR swapchain,
+                      const void* allocator);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkGetSwapchainImagesKHR(RinVkDevice device, RinVkSwapchainKHR swapchain,
+                        uint32_t* image_count, RinVkImage* images);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkGetPhysicalDeviceDisplayPlanePropertiesKHR(
     RinVkPhysicalDevice physical_device, uint32_t* property_count,

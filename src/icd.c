@@ -24,6 +24,8 @@
 #define RIN_VK_MAX_DISPLAYS 128u
 #define RIN_VK_MAX_DISPLAY_MODES 512u
 #define RIN_VK_MAX_DISPLAY_SURFACES 64u
+#define RIN_VK_MAX_SWAPCHAINS 32u
+#define RIN_VK_MAX_SWAPCHAIN_IMAGES 8u
 #define RIN_VK_MAX_FENCES 128u
 #define RIN_VK_MAX_SEMAPHORES 128u
 #define RIN_VK_MAX_SUBMISSIONS 64u
@@ -70,6 +72,7 @@
 #define RIN_VK_DISPLAY_TAG UINT64_C(0x5244)
 #define RIN_VK_DISPLAY_MODE_TAG UINT64_C(0x524f)
 #define RIN_VK_SURFACE_TAG UINT64_C(0x5259)
+#define RIN_VK_SWAPCHAIN_TAG UINT64_C(0x5257)
 #define RIN_VK_PIPELINE_CACHE_MAGIC UINT32_C(0x52494e43)
 #define RIN_VK_PIPELINE_CACHE_VERSION 1u
 #define RIN_VK_PIPELINE_KIND_COMPUTE 1u
@@ -102,6 +105,8 @@ static void sync_lock(void);
 static void sync_unlock(void);
 static void yield_thread(void);
 static int finite_graphics_float(float value);
+static int device_has_swapchains(const struct RinVkDevice_T* device);
+static int instance_has_swapchains(const struct RinVkInstance_T* instance);
 static int call_query_physical(
     RinGpuVulkanRuntimeV1* runtime, RinGpuVulkanHandle instance,
     RinGpuVulkanHandle physical,
@@ -139,6 +144,7 @@ struct RinVkDevice_T {
     uint32_t reserved;
     RinGpuVulkanHandle runtime_handle;
     RinGpuVulkanHandle owner_instance;
+    struct RinVkPhysicalDevice_T* physical_device;
     RinGpuVulkanDevicePlanV1 plan;
     RinGpuVulkanPhysicalDeviceV2 physical_profile;
     RinGpuVulkanDescriptorRuntimeV1 descriptor_runtime;
@@ -192,6 +198,7 @@ typedef struct RinVkImageSlot {
     uint32_t state;
     uint32_t generation;
     struct RinVkDevice_T* owner;
+    struct RinVkSwapchainSlot* swapchain_owner;
     RinVkMemorySlot* memory;
     uint32_t memory_generation;
     int32_t format;
@@ -243,7 +250,7 @@ typedef struct RinVkDisplaySurfaceSlot {
     uint32_t state;
     uint32_t generation;
     uint32_t active_queries;
-    uint32_t reserved0;
+    uint32_t swapchain_count;
     struct RinVkInstance_T* owner_instance;
     RinVkDisplaySlot* display;
     uint32_t display_generation;
@@ -258,6 +265,26 @@ typedef struct RinVkDisplaySurfaceSlot {
     uint64_t output_generation;
     uint64_t device_generation;
 } RinVkDisplaySurfaceSlot;
+
+typedef struct RinVkSwapchainSlot {
+    uint32_t state;
+    uint32_t generation;
+    struct RinVkDevice_T* owner;
+    RinVkDisplaySurfaceSlot* surface;
+    uint32_t surface_generation;
+    uint64_t output_generation;
+    uint64_t device_generation;
+    uint64_t mode_cookie;
+    uint32_t image_count;
+    uint32_t present_mode;
+    int32_t image_format;
+    int32_t image_color_space;
+    RinVkExtent2D image_extent;
+    uint32_t image_usage;
+    uint32_t retired;
+    RinVkImage images[RIN_VK_MAX_SWAPCHAIN_IMAGES];
+    RinVkDeviceMemory memories[RIN_VK_MAX_SWAPCHAIN_IMAGES];
+} RinVkSwapchainSlot;
 
 typedef struct RinVkImageViewSlot {
     uint32_t state;
@@ -478,6 +505,7 @@ static RinVkDisplaySlot g_displays[RIN_VK_MAX_DISPLAYS];
 static RinVkDisplayModeSlot g_display_modes[RIN_VK_MAX_DISPLAY_MODES];
 static RinVkDisplaySurfaceSlot
     g_display_surfaces[RIN_VK_MAX_DISPLAY_SURFACES];
+static RinVkSwapchainSlot g_swapchains[RIN_VK_MAX_SWAPCHAINS];
 static RinVkImageViewSlot g_image_views[RIN_VK_MAX_IMAGE_VIEWS];
 static RinVkSamplerSlot g_samplers[RIN_VK_MAX_SAMPLERS];
 static RinVkPipelineLayoutSlot g_pipeline_layouts[RIN_VK_MAX_PIPELINE_LAYOUTS];
@@ -495,6 +523,33 @@ static RinVkDebugUtilsObjectSlot
 static RinVkSubmissionSlot g_submissions[RIN_VK_MAX_SUBMISSIONS];
 static RinVkCommandResourceUseSlot
     g_command_resource_uses[RIN_GPU_VULKAN_COMMAND_MAX_BUFFERS];
+
+static int device_has_swapchains(const struct RinVkDevice_T* device) {
+    uint32_t index;
+    if (!device) return 0;
+    for (index = 0u; index < RIN_VK_MAX_SWAPCHAINS; ++index) {
+        const RinVkSwapchainSlot* swapchain = &g_swapchains[index];
+        const uint32_t state =
+            __atomic_load_n(&swapchain->state, __ATOMIC_ACQUIRE);
+        if ((state == 1u || state == 2u) && swapchain->owner == device)
+            return 1;
+    }
+    return 0;
+}
+
+static int instance_has_swapchains(const struct RinVkInstance_T* instance) {
+    uint32_t index;
+    if (!instance) return 0;
+    for (index = 0u; index < RIN_VK_MAX_SWAPCHAINS; ++index) {
+        const RinVkSwapchainSlot* swapchain = &g_swapchains[index];
+        const uint32_t state =
+            __atomic_load_n(&swapchain->state, __ATOMIC_ACQUIRE);
+        if ((state == 1u || state == 2u) && swapchain->surface &&
+            swapchain->surface->owner_instance == instance)
+            return 1;
+    }
+    return 0;
+}
 
 static RinVkCommandResourceUseSlot* command_resource_use_slot(
         RinGpuVulkanCommandBufferV1* command_buffer, int create) {
@@ -1275,7 +1330,8 @@ static void clear_display_mode_slot(RinVkDisplayModeSlot* slot) {
 static void clear_display_surface_slot(RinVkDisplaySurfaceSlot* slot) {
     uint32_t generation;
     if (!slot) return;
-    if (__atomic_load_n(&slot->active_queries, __ATOMIC_ACQUIRE) != 0u)
+    if (__atomic_load_n(&slot->active_queries, __ATOMIC_ACQUIRE) != 0u ||
+        __atomic_load_n(&slot->swapchain_count, __ATOMIC_ACQUIRE) != 0u)
         return;
     generation = slot->generation;
     memset(slot, 0, sizeof(*slot));
@@ -1449,6 +1505,23 @@ static RinVkImageSlot* image_slot(RinVkDevice device, RinVkImage handle) {
         generation == 0u)
         return NULL;
     slot = &g_images[index_field - 1u];
+    if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) != 1u ||
+        slot->generation != generation || slot->owner != owner)
+        return NULL;
+    return slot;
+}
+
+static RinVkSwapchainSlot* swapchain_slot(
+        RinVkDevice device, RinVkSwapchainKHR handle) {
+    struct RinVkDevice_T* owner = device_slot(device);
+    const uint32_t index_field = (uint32_t)(handle & UINT64_C(0xffff));
+    const uint32_t generation = (uint32_t)(handle >> 16u);
+    RinVkSwapchainSlot* slot;
+    if (!owner || (handle >> 48u) != RIN_VK_SWAPCHAIN_TAG ||
+        index_field == 0u || index_field > RIN_VK_MAX_SWAPCHAINS ||
+        generation == 0u)
+        return NULL;
+    slot = &g_swapchains[index_field - 1u];
     if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) != 1u ||
         slot->generation != generation || slot->owner != owner)
         return NULL;
@@ -1750,6 +1823,30 @@ static RinVkImageSlot* reserve_image_slot(uint32_t* index_out) {
             continue;
         }
         ++slot->generation;
+        *index_out = index;
+        return slot;
+    }
+    return NULL;
+}
+
+static RinVkSwapchainSlot* reserve_swapchain_slot(uint32_t* index_out) {
+    uint32_t index;
+    for (index = 0u; index < RIN_VK_MAX_SWAPCHAINS; ++index) {
+        RinVkSwapchainSlot* slot = &g_swapchains[index];
+        uint32_t expected = 0u;
+        uint32_t generation;
+        if (!__atomic_compare_exchange_n(&slot->state, &expected, 2u, 0,
+                                         __ATOMIC_ACQUIRE,
+                                         __ATOMIC_RELAXED))
+            continue;
+        generation = slot->generation;
+        if (generation == UINT32_MAX) {
+            __atomic_store_n(&slot->state, 3u, __ATOMIC_RELEASE);
+            continue;
+        }
+        memset(slot, 0, sizeof(*slot));
+        slot->generation = generation + 1u;
+        __atomic_store_n(&slot->state, 2u, __ATOMIC_RELEASE);
         *index_out = index;
         return slot;
     }
@@ -2726,6 +2823,7 @@ static int device_product_submissions_active(
 
 static void clear_image_slot(RinVkImageSlot* slot) {
     slot->owner = NULL;
+    slot->swapchain_owner = NULL;
     slot->memory = NULL;
     slot->memory_generation = 0u;
     slot->format = 0;
@@ -5036,7 +5134,8 @@ void RIN_VKAPI_CALL vkDestroySurfaceKHR(RinVkInstance instance_handle,
     sync_lock();
     if (__atomic_load_n(&surface->state, __ATOMIC_ACQUIRE) == 1u &&
         surface->generation == generation &&
-        surface->owner_instance == instance) {
+        surface->owner_instance == instance &&
+        __atomic_load_n(&surface->swapchain_count, __ATOMIC_ACQUIRE) == 0u) {
         __atomic_store_n(&surface->state, 2u, __ATOMIC_RELEASE);
         if (__atomic_load_n(&surface->active_queries, __ATOMIC_ACQUIRE) == 0u)
             clear_display_surface_slot(surface);
@@ -5431,7 +5530,7 @@ void RIN_VKAPI_CALL vkDestroyInstance(RinVkInstance instance,
     uint32_t expected = 1u;
     int result;
     (void)allocator;
-    if (!slot ||
+    if (!slot || instance_has_swapchains(slot) ||
         !__atomic_compare_exchange_n(&slot->state, &expected, 2u, 0,
                                      __ATOMIC_ACQUIRE,
                                      __ATOMIC_RELAXED))
@@ -5945,8 +6044,8 @@ RinVkResult RIN_VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
     capabilities_out->minImageCount = properties.min_image_count;
     capabilities_out->maxImageCount =
         properties.max_image_count == 0u ||
-                properties.max_image_count > RIN_VK_MAX_MEMORIES
-            ? RIN_VK_MAX_MEMORIES
+                properties.max_image_count > RIN_VK_MAX_SWAPCHAIN_IMAGES
+            ? RIN_VK_MAX_SWAPCHAIN_IMAGES
             : properties.max_image_count;
     capabilities_out->currentExtent.width =
         properties.current_extent_width;
@@ -6030,6 +6129,352 @@ RinVkResult RIN_VKAPI_CALL vkGetPhysicalDeviceSurfacePresentModesKHR(
     *present_mode_count = count;
     return count < properties.present_mode_count ? RIN_VK_INCOMPLETE
                                                  : RIN_VK_SUCCESS;
+}
+
+static void clear_swapchain_slot(RinVkSwapchainSlot* slot) {
+    uint32_t generation;
+    if (!slot) return;
+    generation = slot->generation;
+    memset(slot, 0, sizeof(*slot));
+    slot->generation = generation;
+    __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
+}
+
+static int swapchain_surface_current(const RinVkSwapchainSlot* swapchain) {
+    const RinVkDisplaySurfaceSlot* surface;
+    if (!swapchain || !swapchain->surface) return 0;
+    surface = swapchain->surface;
+    return __atomic_load_n(&surface->state, __ATOMIC_ACQUIRE) == 1u &&
+           surface->generation == swapchain->surface_generation &&
+           surface->display && surface->mode &&
+           __atomic_load_n(&surface->display->state, __ATOMIC_ACQUIRE) == 1u &&
+           __atomic_load_n(&surface->mode->state, __ATOMIC_ACQUIRE) == 1u &&
+           surface->display_generation == surface->display->generation &&
+           surface->mode_generation == surface->mode->generation &&
+           surface->output_generation == swapchain->output_generation &&
+           surface->device_generation == swapchain->device_generation &&
+           surface->display->output_generation == swapchain->output_generation &&
+           surface->mode->output_generation == swapchain->output_generation &&
+           surface->display->device_generation == swapchain->device_generation;
+}
+
+static int surface_supports_format(
+        const RinVulkanWsiSurfacePropertiesV4* properties,
+        int32_t format, int32_t color_space) {
+    uint32_t index;
+    for (index = 0u; index < properties->format_count; ++index)
+        if (properties->formats[index].format == format &&
+            properties->formats[index].color_space == color_space)
+            return 1;
+    return 0;
+}
+
+static int surface_supports_present_mode(
+        const RinVulkanWsiSurfacePropertiesV4* properties, uint32_t mode) {
+    uint32_t index;
+    for (index = 0u; index < properties->present_mode_count; ++index)
+        if (properties->present_modes[index] == (int32_t)mode) return 1;
+    return 0;
+}
+
+static RinVkResult swapchain_create_image(
+        struct RinVkDevice_T* device, RinVkSwapchainSlot* swapchain,
+        uint32_t image_index) {
+    RinVkImageCreateInfo image_info;
+    RinVkMemoryRequirements requirements;
+    RinVkMemoryAllocateInfo allocation_info;
+    RinVkImage image = 0u;
+    RinVkDeviceMemory memory = 0u;
+    uint32_t memory_type = UINT32_MAX;
+    uint32_t index;
+    RinVkResult result;
+
+    memset(&image_info, 0, sizeof(image_info));
+    image_info.sType = RIN_VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = RIN_VK_IMAGE_TYPE_2D;
+    image_info.format = swapchain->image_format;
+    image_info.extent.width = swapchain->image_extent.width;
+    image_info.extent.height = swapchain->image_extent.height;
+    image_info.extent.depth = 1u;
+    image_info.mipLevels = 1u;
+    image_info.arrayLayers = 1u;
+    image_info.samples = RIN_VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = RIN_VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = swapchain->image_usage;
+    image_info.sharingMode = RIN_VK_SHARING_MODE_EXCLUSIVE;
+    result = vkCreateImage((RinVkDevice)device, &image_info, NULL, &image);
+    if (result != RIN_VK_SUCCESS) return result;
+    swapchain->images[image_index] = image;
+    ++swapchain->image_count;
+    vkGetImageMemoryRequirements((RinVkDevice)device, image, &requirements);
+    for (index = 0u; index < device->physical_profile.memory_type_count;
+         ++index) {
+        if ((requirements.memoryTypeBits & (UINT32_C(1) << index)) != 0u &&
+            (device->physical_profile.memory_types[index].property_flags &
+             RIN_GPU_VK_MEMORY_DEVICE_LOCAL) != 0u) {
+            memory_type = index;
+            break;
+        }
+    }
+    if (memory_type == UINT32_MAX) {
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    }
+    memset(&allocation_info, 0, sizeof(allocation_info));
+    allocation_info.sType = RIN_VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocation_info.allocationSize = requirements.size;
+    allocation_info.memoryTypeIndex = memory_type;
+    result = vkAllocateMemory((RinVkDevice)device, &allocation_info, NULL,
+                              &memory);
+    if (result != RIN_VK_SUCCESS) return result;
+    swapchain->memories[image_index] = memory;
+    result = vkBindImageMemory((RinVkDevice)device, image, memory, 0u);
+    if (result != RIN_VK_SUCCESS) return result;
+    {
+        RinVkImageSlot* record = image_slot((RinVkDevice)device, image);
+        if (!record)
+            return RIN_VK_ERROR_DEVICE_LOST;
+        record->swapchain_owner = swapchain;
+    }
+    return RIN_VK_SUCCESS;
+}
+
+static int swapchain_destroy_images(RinVkDevice device,
+                                    RinVkSwapchainSlot* swapchain) {
+    uint32_t index;
+    for (index = 0u; index < swapchain->image_count; ++index) {
+        RinVkImageSlot* image = image_slot(device, swapchain->images[index]);
+        if (image && image_has_views(image)) return 0;
+    }
+    for (index = 0u; index < swapchain->image_count; ++index) {
+        RinVkImageSlot* image = image_slot(device, swapchain->images[index]);
+        if (image) {
+            image->swapchain_owner = NULL;
+            vkDestroyImage(device, swapchain->images[index], NULL);
+            if (image_slot(device, swapchain->images[index])) return 0;
+            swapchain->images[index] = 0u;
+        }
+        if (swapchain->memories[index] != 0u) {
+            vkFreeMemory(device, swapchain->memories[index], NULL);
+            if (memory_slot(device, swapchain->memories[index])) return 0;
+            swapchain->memories[index] = 0u;
+        }
+    }
+    swapchain->image_count = 0u;
+    return 1;
+}
+
+RinVkResult RIN_VKAPI_CALL vkCreateSwapchainKHR(
+        RinVkDevice device_handle,
+        const RinVkSwapchainCreateInfoKHR* create_info,
+        const void* allocator, RinVkSwapchainKHR* swapchain_out) {
+    struct RinVkDevice_T* device = device_slot(device_handle);
+    RinVulkanWsiSurfacePropertiesV4 properties;
+    RinGpuVulkanPhysicalDeviceV2 profile;
+    RinVkSurfaceQueryLease lease;
+    RinVkSwapchainSlot* swapchain = NULL;
+    RinVkSwapchainSlot* old_swapchain = NULL;
+    uint32_t slot_index = 0u;
+    uint32_t index;
+    uint32_t supported_queue = 0u;
+    RinVkResult result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+    int surface_counted = 0;
+    (void)allocator;
+
+    if (!swapchain_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    *swapchain_out = 0u;
+    memset(&lease, 0, sizeof(lease));
+    if (!device || !create_info ||
+        create_info->sType != RIN_VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR ||
+        create_info->pNext || create_info->flags != 0u ||
+        create_info->minImageCount == 0u ||
+        create_info->minImageCount > RIN_VK_MAX_SWAPCHAIN_IMAGES ||
+        create_info->imageArrayLayers != 1u || create_info->imageUsage == 0u ||
+        (create_info->imageUsage & ~RIN_VK_IMAGE_USAGE_KNOWN) != 0u ||
+        create_info->imageSharingMode != RIN_VK_SHARING_MODE_EXCLUSIVE ||
+        create_info->queueFamilyIndexCount != 0u ||
+        create_info->pQueueFamilyIndices || create_info->clipped > 1u ||
+        create_info->presentMode > RIN_VK_PRESENT_MODE_FIFO_RELAXED_KHR)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+
+    result = begin_surface_query((RinVkPhysicalDevice)device->physical_device,
+                                 create_info->surface, &profile, &lease);
+    if (result != RIN_VK_SUCCESS) return result;
+    if (lease.device_generation != device->physical_profile.device_epoch ||
+        lease.device_generation != device->plan.device_epoch) {
+        result = RIN_VK_ERROR_DEVICE_LOST;
+        goto done;
+    }
+    result = query_surface_properties_v4(
+        (RinVkPhysicalDevice)device->physical_device, create_info->surface,
+        &properties);
+    if (result != RIN_VK_SUCCESS) goto done;
+    if (create_info->minImageCount < properties.min_image_count ||
+        (properties.max_image_count != 0u &&
+         create_info->minImageCount > properties.max_image_count) ||
+        (properties.supported_usage_flags & create_info->imageUsage) !=
+            create_info->imageUsage ||
+        create_info->imageExtent.width == 0u ||
+        create_info->imageExtent.height == 0u ||
+        create_info->imageExtent.width < properties.min_image_extent_width ||
+        create_info->imageExtent.width > properties.max_image_extent_width ||
+        create_info->imageExtent.height < properties.min_image_extent_height ||
+        create_info->imageExtent.height > properties.max_image_extent_height ||
+        (properties.current_extent_width != UINT32_MAX &&
+         (create_info->imageExtent.width != properties.current_extent_width ||
+          create_info->imageExtent.height != properties.current_extent_height)) ||
+        create_info->preTransform != properties.current_transform ||
+        (properties.supported_transforms & create_info->preTransform) == 0u ||
+        create_info->preTransform != RIN_VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR ||
+        create_info->compositeAlpha == 0u ||
+        (create_info->compositeAlpha &
+         (create_info->compositeAlpha - 1u)) != 0u ||
+        (properties.supported_composite_alpha & create_info->compositeAlpha) ==
+            0u ||
+        !surface_supports_format(&properties, create_info->imageFormat,
+                                 create_info->imageColorSpace) ||
+        !surface_supports_present_mode(&properties,
+                                       create_info->presentMode)) {
+        result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        goto done;
+    }
+    for (index = 0u; index < device->queue_count; ++index) {
+        struct RinVkQueue_T* queue = &device->queues[index];
+        uint32_t supported = 0u;
+        result = vkGetPhysicalDeviceSurfaceSupportKHR(
+            (RinVkPhysicalDevice)device->physical_device,
+            queue->queue_family_index, create_info->surface, &supported);
+        if (result != RIN_VK_SUCCESS) goto done;
+        if (supported) supported_queue = 1u;
+    }
+    if (!supported_queue) {
+        result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        goto done;
+    }
+    if (create_info->oldSwapchain != 0u) {
+        old_swapchain = swapchain_slot(device_handle,
+                                       create_info->oldSwapchain);
+        if (!old_swapchain || old_swapchain->surface != lease.surface ||
+            old_swapchain->surface_generation != lease.surface_generation) {
+            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+            goto done;
+        }
+    }
+    swapchain = reserve_swapchain_slot(&slot_index);
+    if (!swapchain) {
+        result = RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+        goto done;
+    }
+    swapchain->owner = device;
+    swapchain->surface = lease.surface;
+    swapchain->surface_generation = lease.surface_generation;
+    swapchain->output_generation = lease.output_generation;
+    swapchain->device_generation = lease.device_generation;
+    swapchain->mode_cookie = lease.mode_cookie;
+    swapchain->present_mode = create_info->presentMode;
+    swapchain->image_format = create_info->imageFormat;
+    swapchain->image_color_space = create_info->imageColorSpace;
+    swapchain->image_extent = create_info->imageExtent;
+    swapchain->image_usage = create_info->imageUsage;
+    for (index = 0u; index < create_info->minImageCount; ++index) {
+        result = swapchain_create_image(device, swapchain, index);
+        if (result != RIN_VK_SUCCESS) goto rollback;
+    }
+    sync_lock();
+    if (__atomic_load_n(&lease.surface->state, __ATOMIC_ACQUIRE) != 1u ||
+        lease.surface->generation != lease.surface_generation ||
+        lease.surface->swapchain_count == UINT32_MAX) {
+        sync_unlock();
+        result = RIN_VK_ERROR_OUT_OF_DATE_KHR;
+        goto rollback;
+    }
+    __atomic_add_fetch(&lease.surface->swapchain_count, 1u, __ATOMIC_RELEASE);
+    surface_counted = 1;
+    sync_unlock();
+    result = end_surface_query(&lease);
+    memset(&lease, 0, sizeof(lease));
+    if (result != RIN_VK_SUCCESS) goto rollback;
+    __atomic_store_n(&swapchain->state, 1u, __ATOMIC_RELEASE);
+    if (old_swapchain)
+        __atomic_store_n(&old_swapchain->retired, 1u, __ATOMIC_RELEASE);
+    *swapchain_out = resource_handle(RIN_VK_SWAPCHAIN_TAG, slot_index,
+                                     swapchain->generation);
+    return RIN_VK_SUCCESS;
+
+rollback:
+    if (surface_counted && swapchain && swapchain->surface) {
+        RinVkDisplaySurfaceSlot* surface = swapchain->surface;
+        __atomic_sub_fetch(&surface->swapchain_count, 1u, __ATOMIC_RELEASE);
+        surface_counted = 0;
+        if (__atomic_load_n(&surface->state, __ATOMIC_ACQUIRE) == 2u &&
+            __atomic_load_n(&surface->active_queries, __ATOMIC_ACQUIRE) == 0u)
+            clear_display_surface_slot(surface);
+    }
+    if (swapchain) {
+        /* Failed destruction leaves backing allocations tracked by the device;
+         * device cleanup retries them through the product allocation owner. */
+        (void)swapchain_destroy_images(device_handle, swapchain);
+        clear_swapchain_slot(swapchain);
+    }
+done:
+    if (lease.surface) {
+        const RinVkResult lease_result = end_surface_query(&lease);
+        memset(&lease, 0, sizeof(lease));
+        if (result == RIN_VK_SUCCESS) result = lease_result;
+    }
+    if (surface_counted && swapchain) {
+        __atomic_sub_fetch(&swapchain->surface->swapchain_count, 1u,
+                           __ATOMIC_RELEASE);
+        if (__atomic_load_n(&swapchain->surface->state, __ATOMIC_ACQUIRE) ==
+                2u &&
+            __atomic_load_n(&swapchain->surface->active_queries,
+                            __ATOMIC_ACQUIRE) == 0u)
+            clear_display_surface_slot(swapchain->surface);
+    }
+    return result;
+}
+
+void RIN_VKAPI_CALL vkDestroySwapchainKHR(
+        RinVkDevice device, RinVkSwapchainKHR swapchain_handle,
+        const void* allocator) {
+    RinVkSwapchainSlot* swapchain = swapchain_slot(device, swapchain_handle);
+    RinVkDisplaySurfaceSlot* surface;
+    (void)allocator;
+    if (!swapchain || !swapchain_destroy_images(device, swapchain)) return;
+    surface = swapchain->surface;
+    clear_swapchain_slot(swapchain);
+    if (surface &&
+        __atomic_sub_fetch(&surface->swapchain_count, 1u, __ATOMIC_RELEASE) ==
+            0u &&
+        __atomic_load_n(&surface->state, __ATOMIC_ACQUIRE) == 2u &&
+        __atomic_load_n(&surface->active_queries, __ATOMIC_ACQUIRE) == 0u)
+        clear_display_surface_slot(surface);
+}
+
+RinVkResult RIN_VKAPI_CALL vkGetSwapchainImagesKHR(
+        RinVkDevice device, RinVkSwapchainKHR swapchain_handle,
+        uint32_t* image_count, RinVkImage* images) {
+    RinVkSwapchainSlot* swapchain;
+    uint32_t capacity;
+    uint32_t count;
+    uint32_t index;
+    if (!image_count) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    capacity = *image_count;
+    *image_count = 0u;
+    if (capacity != 0u && !images)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    swapchain = swapchain_slot(device, swapchain_handle);
+    if (!swapchain) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    if (!swapchain_surface_current(swapchain))
+        return RIN_VK_ERROR_OUT_OF_DATE_KHR;
+    if (!images) {
+        *image_count = swapchain->image_count;
+        return RIN_VK_SUCCESS;
+    }
+    count = capacity < swapchain->image_count ? capacity : swapchain->image_count;
+    for (index = 0u; index < count; ++index)
+        images[index] = swapchain->images[index];
+    *image_count = count;
+    return count < swapchain->image_count ? RIN_VK_INCOMPLETE : RIN_VK_SUCCESS;
 }
 
 void RIN_VKAPI_CALL vkGetPhysicalDeviceFeatures(
@@ -6383,6 +6828,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
     memset(&slot->physical_profile, 0, sizeof(slot->physical_profile));
     slot->runtime_handle = 0u;
     slot->owner_instance = instance->runtime_handle;
+    slot->physical_device = physical;
     result = call_create_device(runtime, instance->runtime_handle,
                                 physical->runtime_handle, &request,
                                 &slot->runtime_handle, &slot->plan);
@@ -6391,6 +6837,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
         memset(&slot->physical_profile, 0, sizeof(slot->physical_profile));
         slot->runtime_handle = 0u;
         slot->owner_instance = 0u;
+        slot->physical_device = NULL;
         __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
         return result == RIN_GPU_VULKAN_UNSUPPORTED
                    ? RIN_VK_ERROR_FEATURE_NOT_PRESENT
@@ -6421,6 +6868,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
         memset(&slot->physical_profile, 0, sizeof(slot->physical_profile));
         slot->runtime_handle = 0u;
         slot->owner_instance = 0u;
+        slot->physical_device = NULL;
         __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
     }
@@ -6449,6 +6897,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
         memset(&slot->physical_profile, 0, sizeof(slot->physical_profile));
         slot->runtime_handle = 0u;
         slot->owner_instance = 0u;
+        slot->physical_device = NULL;
         slot->loader_magic = 0u;
         __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
         return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
@@ -6494,7 +6943,8 @@ void RIN_VKAPI_CALL vkDestroyDevice(RinVkDevice device,
     uint32_t expected = 1u;
     int result;
     (void)allocator;
-    if (!slot || maintain_device_submissions(slot) != RIN_VK_SUCCESS ||
+    if (!slot || device_has_swapchains(slot) ||
+        maintain_device_submissions(slot) != RIN_VK_SUCCESS ||
         device_submission_slots_active(slot) ||
         !__atomic_compare_exchange_n(&slot->state, &expected, 2u, 0,
                                      __ATOMIC_ACQUIRE,
@@ -6570,6 +7020,7 @@ void RIN_VKAPI_CALL vkDestroyDevice(RinVkDevice device,
     slot->reserved_queue = 0u;
     slot->runtime_handle = 0u;
     slot->owner_instance = 0u;
+    slot->physical_device = NULL;
     slot->loader_magic = 0u;
     slot->reserved = 0u;
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
@@ -10377,7 +10828,7 @@ void RIN_VKAPI_CALL vkDestroyImage(RinVkDevice device, RinVkImage handle,
                                    const void* allocator) {
     RinVkImageSlot* image = image_slot(device, handle);
     (void)allocator;
-    if (!image || image_has_views(image)) return;
+    if (!image || image->swapchain_owner || image_has_views(image)) return;
     if (image->memory &&
         __atomic_load_n(&image->memory->state, __ATOMIC_ACQUIRE) == 1u &&
         image->memory->generation == image->memory_generation &&
@@ -10404,7 +10855,7 @@ RinVkResult RIN_VKAPI_CALL vkBindImageMemory(
         RinVkDeviceMemory memory_handle, uint64_t memory_offset) {
     RinVkImageSlot* image = image_slot(device, image_handle);
     RinVkMemorySlot* memory = memory_slot(device, memory_handle);
-    if (!image || !memory || image->memory ||
+    if (!image || image->swapchain_owner || !memory || image->memory ||
         (memory_offset & (RIN_VK_RESOURCE_ALIGNMENT - 1u)) != 0u ||
         memory_offset > memory->requested_size ||
         image->memory_size > memory->requested_size - memory_offset ||

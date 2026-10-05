@@ -427,6 +427,14 @@ int main(void) {
     RinVkDisplaySurfaceCreateInfoKHR surface_create_info;
     RinVkSurfaceKHR created_surface = 0u;
     RinVkSurfaceKHR stale_output_surface = 0u;
+    RinVkDevice device = NULL;
+    RinVkDeviceQueueCreateInfo device_queue_info;
+    RinVkDeviceCreateInfo device_create_info;
+    RinVkSwapchainCreateInfoKHR swapchain_create_info;
+    RinVkSwapchainKHR swapchain = 0u;
+    RinVkImage swapchain_images[2];
+    RinVkImageViewCreateInfo image_view_info;
+    RinVkImageView swapchain_image_view = 0u;
     uint32_t surface_supported = UINT32_MAX;
     RinVkDisplayPlanePropertiesKHR plane_properties[1];
     RinVkDisplayPlaneCapabilitiesKHR plane_capabilities;
@@ -793,7 +801,7 @@ int main(void) {
         provider.surface_properties.max_image_count = 0u;
         CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
                   physical, created_surface, &capabilities) == RIN_VK_SUCCESS);
-        CHECK(capabilities.maxImageCount == 64u);
+        CHECK(capabilities.maxImageCount == 8u);
         provider.surface_properties.max_image_count = 3u;
         count = 0u;
         CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(
@@ -1125,12 +1133,122 @@ int main(void) {
         CHECK(vkCreateDisplayPlaneSurfaceKHR(instance, &surface_create_info,
                   NULL, &created_surface) == RIN_VK_SUCCESS);
         CHECK(created_surface != 0u && created_surface != live_surfaces[0]);
+        {
+            const float queue_priority = 1.0f;
+            uint32_t image_count = 0u;
+            uint32_t recycle_index;
+
+            memset(&device_queue_info, 0, sizeof(device_queue_info));
+            device_queue_info.sType =
+                RIN_VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+            device_queue_info.queueFamilyIndex = 0u;
+            device_queue_info.queueCount = 1u;
+            device_queue_info.pQueuePriorities = &queue_priority;
+            memset(&device_create_info, 0, sizeof(device_create_info));
+            device_create_info.sType = RIN_VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+            device_create_info.queueCreateInfoCount = 1u;
+            device_create_info.pQueueCreateInfos = &device_queue_info;
+            CHECK(vkCreateDevice(physical, &device_create_info, NULL,
+                                 &device) == RIN_VK_SUCCESS);
+            CHECK(vkGetDeviceProcAddr(device, "vkCreateSwapchainKHR") == NULL);
+
+            memset(&swapchain_create_info, 0, sizeof(swapchain_create_info));
+            swapchain_create_info.sType =
+                RIN_VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+            swapchain_create_info.surface = created_surface;
+            swapchain_create_info.minImageCount = 2u;
+            swapchain_create_info.imageFormat = RIN_VK_FORMAT_D32_SFLOAT;
+            swapchain_create_info.imageColorSpace =
+                RIN_VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+            swapchain_create_info.imageExtent.width = 1280u;
+            swapchain_create_info.imageExtent.height = 720u;
+            swapchain_create_info.imageArrayLayers = 1u;
+            swapchain_create_info.imageUsage =
+                RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+            swapchain_create_info.imageSharingMode =
+                RIN_VK_SHARING_MODE_EXCLUSIVE;
+            swapchain_create_info.preTransform =
+                RIN_VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+            swapchain_create_info.compositeAlpha =
+                RIN_VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+            swapchain_create_info.presentMode = RIN_VK_PRESENT_MODE_FIFO_KHR;
+            swapchain_create_info.clipped = 1u;
+            swapchain = UINT64_C(0xfeed);
+            CHECK(vkCreateSwapchainKHR(device, &swapchain_create_info, NULL,
+                                       &swapchain) ==
+                  RIN_VK_ERROR_INITIALIZATION_FAILED);
+            CHECK(swapchain == 0u);
+
+            swapchain_create_info.imageFormat =
+                RIN_VK_FORMAT_R8G8B8A8_UNORM;
+            CHECK(vkCreateSwapchainKHR(device, &swapchain_create_info, NULL,
+                                       &swapchain) == RIN_VK_SUCCESS);
+            CHECK(swapchain != 0u);
+            CHECK(vkGetSwapchainImagesKHR(device, swapchain, &image_count,
+                                          NULL) == RIN_VK_SUCCESS);
+            CHECK(image_count == 2u);
+            image_count = 1u;
+            CHECK(vkGetSwapchainImagesKHR(device, swapchain, &image_count,
+                                          swapchain_images) ==
+                  RIN_VK_INCOMPLETE);
+            CHECK(image_count == 1u && swapchain_images[0] != 0u);
+            image_count = 2u;
+            CHECK(vkGetSwapchainImagesKHR(device, swapchain, &image_count,
+                                          swapchain_images) == RIN_VK_SUCCESS);
+            CHECK(image_count == 2u && swapchain_images[0] != 0u &&
+                  swapchain_images[1] != 0u &&
+                  swapchain_images[0] != swapchain_images[1]);
+
+            memset(&image_view_info, 0, sizeof(image_view_info));
+            image_view_info.sType =
+                RIN_VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            image_view_info.image = swapchain_images[0];
+            image_view_info.viewType = RIN_VK_IMAGE_VIEW_TYPE_2D;
+            image_view_info.format = RIN_VK_FORMAT_R8G8B8A8_UNORM;
+            image_view_info.subresourceRange.aspectMask =
+                RIN_VK_IMAGE_ASPECT_COLOR_BIT;
+            image_view_info.subresourceRange.levelCount = 1u;
+            image_view_info.subresourceRange.layerCount = 1u;
+            CHECK(vkCreateImageView(device, &image_view_info, NULL,
+                                    &swapchain_image_view) == RIN_VK_SUCCESS);
+            vkDestroyImage(device, swapchain_images[0], NULL);
+            vkDestroySwapchainKHR(device, swapchain, NULL);
+            image_count = 2u;
+            CHECK(vkGetSwapchainImagesKHR(device, swapchain, &image_count,
+                                          swapchain_images) == RIN_VK_SUCCESS);
+            CHECK(image_count == 2u && swapchain_images[0] != 0u);
+            vkDestroyImageView(device, swapchain_image_view, NULL);
+            swapchain_image_view = 0u;
+            vkDestroySwapchainKHR(device, swapchain, NULL);
+            swapchain = 0u;
+            for (recycle_index = 0u; recycle_index < 2u; ++recycle_index) {
+                CHECK(vkCreateSwapchainKHR(device, &swapchain_create_info,
+                                          NULL, &swapchain) ==
+                      RIN_VK_SUCCESS);
+                image_count = 2u;
+                CHECK(vkGetSwapchainImagesKHR(device, swapchain, &image_count,
+                                              swapchain_images) ==
+                      RIN_VK_SUCCESS);
+                CHECK(image_count == 2u && swapchain_images[0] != 0u &&
+                      swapchain_images[1] != 0u);
+                vkDestroySwapchainKHR(device, swapchain, NULL);
+                swapchain = 0u;
+            }
+            vkDestroyDevice(device, NULL);
+            device = NULL;
+        }
         vkDestroySurfaceKHR(instance, created_surface, NULL);
         created_surface = 0u;
     }
     exit_code = 0;
 
 cleanup:
+    if (swapchain_image_view && device)
+        vkDestroyImageView(device, swapchain_image_view, NULL);
+    if (swapchain && device) vkDestroySwapchainKHR(device, swapchain, NULL);
+    if (device) vkDestroyDevice(device, NULL);
+    if (created_surface && instance)
+        vkDestroySurfaceKHR(instance, created_surface, NULL);
     if (foreign_instance) vkDestroyInstance(foreign_instance, NULL);
     if (instance) vkDestroyInstance(instance, NULL);
     if (wsi_bound &&
