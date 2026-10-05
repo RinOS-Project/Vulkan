@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#define TEST_DISPLAY_SURFACE_CAPACITY 64u
+
 typedef struct TestWsiProvider {
     uint64_t output_generation;
     uint64_t device_generation;
@@ -16,6 +18,7 @@ typedef struct TestWsiProvider {
     uint32_t mode_count;
     uint32_t plane_count;
     uint32_t supported_display_count;
+    uint32_t present_call_count;
     RinVulkanWsiDisplayV1 display;
     RinVulkanWsiModeV1 modes[RIN_VULKAN_WSI_MAX_MODES];
     RinVulkanWsiDisplayPlaneV2 planes[RIN_VULKAN_WSI_MAX_PLANES];
@@ -271,8 +274,9 @@ static int query_plane_capabilities(
 static int present_unsupported(
     void* context, const RinVulkanWsiPresentRequestV1* request,
     uint64_t* present_token_out) {
-    (void)context;
     (void)request;
+    if (context)
+        ++((TestWsiProvider*)context)->present_call_count;
     if (present_token_out) *present_token_out = 0u;
     return RIN_VULKAN_WSI_PLATFORM_UNSUPPORTED;
 }
@@ -556,6 +560,9 @@ int main(void) {
     CHECK(vkCreateDisplayPlaneSurfaceKHR(instance, &surface_create_info, NULL,
               &created_surface) == RIN_VK_SUCCESS);
     CHECK(created_surface != 0u);
+    CHECK(provider.present_call_count == 0u &&
+          provider.display.current_mode_cookie == UINT64_C(0xabc2) &&
+          provider.output_generation == 11u);
     {
         const RinVkSurfaceKHR stale_surface = created_surface;
         vkDestroySurfaceKHR(instance, created_surface, NULL);
@@ -567,6 +574,33 @@ int main(void) {
         vkDestroySurfaceKHR(instance, created_surface, NULL);
         created_surface = 0u;
     }
+    {
+        RinVkSurfaceKHR surface_pool[TEST_DISPLAY_SURFACE_CAPACITY];
+        uint32_t surface_index;
+        for (surface_index = 0u;
+             surface_index < TEST_DISPLAY_SURFACE_CAPACITY; ++surface_index) {
+            CHECK(vkCreateDisplayPlaneSurfaceKHR(
+                      instance, &surface_create_info, NULL,
+                      &surface_pool[surface_index]) == RIN_VK_SUCCESS);
+            CHECK(surface_pool[surface_index] != 0u);
+        }
+        created_surface = UINT64_C(0xfeed);
+        CHECK(vkCreateDisplayPlaneSurfaceKHR(instance, &surface_create_info,
+                  NULL, &created_surface) ==
+              RIN_VK_ERROR_OUT_OF_HOST_MEMORY);
+        CHECK(created_surface == 0u);
+        for (surface_index = 0u;
+             surface_index < TEST_DISPLAY_SURFACE_CAPACITY; ++surface_index)
+            vkDestroySurfaceKHR(instance, surface_pool[surface_index], NULL);
+        CHECK(vkCreateDisplayPlaneSurfaceKHR(instance, &surface_create_info,
+                  NULL, &created_surface) == RIN_VK_SUCCESS);
+        CHECK(created_surface != 0u && created_surface != surface_pool[0]);
+        vkDestroySurfaceKHR(instance, created_surface, NULL);
+        created_surface = 0u;
+    }
+    CHECK(provider.present_call_count == 0u &&
+          provider.display.current_mode_cookie == UINT64_C(0xabc2) &&
+          provider.output_generation == 11u);
     surface_create_info.planeStackIndex = 1u;
     created_surface = UINT64_C(0xfeed);
     CHECK(vkCreateDisplayPlaneSurfaceKHR(instance, &surface_create_info, NULL,
