@@ -195,6 +195,8 @@ int main(void) {
     TestWsiProvider provider;
     RinVkApplicationInfo application;
     RinVkInstanceCreateInfo instance_create;
+    const char* unimplemented_display_extension =
+        RIN_VK_KHR_DISPLAY_EXTENSION;
     RinVkInstance instance = NULL;
     RinVkPhysicalDevice physical_devices[1];
     RinVkDisplayPropertiesKHR display_properties[1];
@@ -259,6 +261,14 @@ int main(void) {
     memset(&instance_create, 0, sizeof(instance_create));
     instance_create.sType = RIN_VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     instance_create.pApplicationInfo = &application;
+    instance_create.enabledExtensionCount = 1u;
+    instance_create.ppEnabledExtensionNames =
+        &unimplemented_display_extension;
+    CHECK(vkCreateInstance(&instance_create, NULL, &instance) ==
+          RIN_VK_ERROR_EXTENSION_NOT_PRESENT);
+    CHECK(instance == NULL);
+    instance_create.enabledExtensionCount = 0u;
+    instance_create.ppEnabledExtensionNames = NULL;
     CHECK(vkCreateInstance(&instance_create, NULL, &instance) ==
           RIN_VK_SUCCESS);
     CHECK(rin_gpu_vulkan_icd_unbind_wsi_platform(&wsi) ==
