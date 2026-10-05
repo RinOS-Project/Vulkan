@@ -427,6 +427,9 @@ int main(void) {
     CHECK(vkGetInstanceProcAddr(instance, "vkCreateDisplayModeKHR") == NULL);
     CHECK(vk_icdGetPhysicalDeviceProcAddr(
               instance, "vkCreateDisplayModeKHR") == NULL);
+    CHECK(vkGetInstanceProcAddr(
+              instance, "vkCreateDisplayPlaneSurfaceKHR") == NULL);
+    CHECK(vkGetInstanceProcAddr(instance, "vkDestroySurfaceKHR") == NULL);
 
     count = 0u;
     CHECK(vkEnumeratePhysicalDevices(instance, &count, NULL) == RIN_VK_SUCCESS);
