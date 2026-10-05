@@ -351,6 +351,10 @@ int main(void) {
         provider.modes[0].width = provider.display.width;
         provider.modes[0].height = provider.display.height;
         provider.modes[1].output_generation = provider.output_generation;
+        count = 2u;
+        CHECK(vkGetDisplayModePropertiesKHR(
+                  physical, old_display, &count, mode_properties) ==
+              RIN_VK_ERROR_OUT_OF_DATE_KHR);
         count = 1u;
         CHECK(vkGetPhysicalDeviceDisplayPropertiesKHR(
                   physical, &count, display_properties) == RIN_VK_SUCCESS);
