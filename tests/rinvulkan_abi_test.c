@@ -11,6 +11,12 @@ _Static_assert(sizeof(RinVkDisplayModeParametersKHR) == 12u,
                "VkDisplayModeParametersKHR ABI drift");
 _Static_assert(sizeof(RinVkDisplayPlaneCapabilitiesKHR) == 68u,
                "VkDisplayPlaneCapabilitiesKHR ABI drift");
+_Static_assert(offsetof(RinVulkanWsiPlatformV3, query_surface_support) ==
+                   sizeof(RinVulkanWsiPlatformV2),
+               "Vulkan WSI V3 callback prefix drift");
+_Static_assert(sizeof(RinVulkanWsiPlatformV3) ==
+                   (sizeof(void*) == 8u ? 184u : 144u),
+               "Vulkan WSI V3 ABI drift");
 
 #if UINTPTR_MAX == UINT64_MAX
 _Static_assert(sizeof(RinVkDisplayPropertiesKHR) == 48u,

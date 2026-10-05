@@ -7,6 +7,7 @@
 
 #define RIN_VULKAN_WSI_PLATFORM_VERSION 1u
 #define RIN_VULKAN_WSI_PLATFORM_V2_VERSION 2u
+#define RIN_VULKAN_WSI_PLATFORM_V3_VERSION 3u
 #define RIN_VULKAN_WSI_MAX_DISPLAYS 16u
 #define RIN_VULKAN_WSI_MAX_MODES 64u
 #define RIN_VULKAN_WSI_MAX_PLANES 16u
@@ -156,6 +157,11 @@ typedef int (*RinVulkanWsiQueryPlaneCapabilitiesV2Fn)(
     void* context, uint64_t device_generation, uint64_t display_cookie,
     uint64_t output_generation, uint64_t mode_cookie, uint32_t plane_index,
     RinVulkanWsiPlaneCapabilitiesV2* capabilities_out);
+typedef int (*RinVulkanWsiQuerySurfaceSupportV3Fn)(
+    void* context, uint64_t device_generation, uint64_t display_cookie,
+    uint64_t output_generation, uint64_t mode_cookie, uint32_t plane_index,
+    uint32_t queue_family_index, uint32_t queue_flags, uint32_t queue_count,
+    uint32_t* supported_out);
 
 /* This is an OS-Core adapter, not another common backend operation table.
  * The RinGPU command and resource contracts remain authoritative; this
@@ -195,6 +201,28 @@ typedef struct RinVulkanWsiPlatformV2 {
     uint64_t reserved_v2[4];
 } RinVulkanWsiPlatformV2;
 
+/* V3 preserves the complete V2 prefix and adds an explicit query for whether
+ * a concrete queue family can present to a generation-bound display plane.
+ * A callback must derive the answer from the OS-Core output/queue routing; it
+ * must not infer support merely from the presence of present callbacks. */
+typedef struct RinVulkanWsiPlatformV3 {
+    uint32_t struct_size;
+    uint32_t version;
+    void* context;
+    RinVulkanWsiQueryDisplaysFn query_displays;
+    RinVulkanWsiQueryModesFn query_modes;
+    RinVulkanWsiPresentFn present;
+    RinVulkanWsiPollPresentFn poll_present;
+    RinVulkanWsiCancelPresentFn cancel_present;
+    uint64_t reserved[4];
+    RinVulkanWsiQueryPlanesV2Fn query_planes;
+    RinVulkanWsiQueryPlaneDisplaysV2Fn query_plane_supported_displays;
+    RinVulkanWsiQueryPlaneCapabilitiesV2Fn query_plane_capabilities;
+    uint64_t reserved_v2[4];
+    RinVulkanWsiQuerySurfaceSupportV3Fn query_surface_support;
+    uint64_t reserved_v3[4];
+} RinVulkanWsiPlatformV3;
+
 #if defined(__cplusplus)
 static_assert(sizeof(RinVulkanWsiDisplayPlaneV2) == 64u,
               "Vulkan WSI plane ABI drift");
@@ -217,6 +245,12 @@ static_assert(offsetof(RinVulkanWsiPlatformV2, query_planes) ==
 static_assert(sizeof(RinVulkanWsiPlatformV2) ==
                   (sizeof(void*) == 8u ? 144u : 108u),
               "Vulkan WSI platform V2 ABI drift");
+static_assert(offsetof(RinVulkanWsiPlatformV3, query_surface_support) ==
+                  sizeof(RinVulkanWsiPlatformV2),
+              "Vulkan WSI V3 callback prefix drift");
+static_assert(sizeof(RinVulkanWsiPlatformV3) ==
+                  (sizeof(void*) == 8u ? 184u : 144u),
+              "Vulkan WSI platform V3 ABI drift");
 #else
 _Static_assert(sizeof(RinVulkanWsiDisplayPlaneV2) == 64u,
                "Vulkan WSI plane ABI drift");
@@ -239,6 +273,12 @@ _Static_assert(offsetof(RinVulkanWsiPlatformV2, query_planes) ==
 _Static_assert(sizeof(RinVulkanWsiPlatformV2) ==
                    (sizeof(void*) == 8u ? 144u : 108u),
                "Vulkan WSI platform V2 ABI drift");
+_Static_assert(offsetof(RinVulkanWsiPlatformV3, query_surface_support) ==
+                   sizeof(RinVulkanWsiPlatformV2),
+               "Vulkan WSI V3 callback prefix drift");
+_Static_assert(sizeof(RinVulkanWsiPlatformV3) ==
+                   (sizeof(void*) == 8u ? 184u : 144u),
+               "Vulkan WSI platform V3 ABI drift");
 #endif
 
 #endif /* RINVULKAN_PUBLIC_WSI_PLATFORM_H */

@@ -2051,6 +2051,10 @@ int rin_gpu_vulkan_icd_bind_wsi_platform_v2(
     RinVulkanWsiPlatformV2* platform);
 int rin_gpu_vulkan_icd_unbind_wsi_platform_v2(
     RinVulkanWsiPlatformV2* platform);
+int rin_gpu_vulkan_icd_bind_wsi_platform_v3(
+    RinVulkanWsiPlatformV3* platform);
+int rin_gpu_vulkan_icd_unbind_wsi_platform_v3(
+    RinVulkanWsiPlatformV3* platform);
 /* Product completion is driven by the RinGPU service loop, not by a forged
  * synchronous Vulkan wait.  It retires only work reported complete by the
  * product runtime and leaves still-pending command buffers leased. */
@@ -2166,6 +2170,10 @@ vkCreateDisplayPlaneSurfaceKHR(
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkDestroySurfaceKHR(RinVkInstance instance, RinVkSurfaceKHR surface,
                     const void* allocator);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkGetPhysicalDeviceSurfaceSupportKHR(
+    RinVkPhysicalDevice physical_device, uint32_t queue_family_index,
+    RinVkSurfaceKHR surface, uint32_t* supported_out);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkGetPhysicalDeviceDisplayPlanePropertiesKHR(
     RinVkPhysicalDevice physical_device, uint32_t* property_count,
