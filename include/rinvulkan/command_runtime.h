@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <ringpu/compatibility.h>
+
 #define RIN_GPU_VULKAN_COMMAND_MAX_POOLS 64u
 #define RIN_GPU_VULKAN_COMMAND_MAX_BUFFERS 128u
 #define RIN_GPU_VULKAN_COMMAND_MAX_COPIES 4u
@@ -13,6 +15,7 @@
 #define RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_2 2u
 #define RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_3 3u
 #define RIN_GPU_VULKAN_COMPUTE_PACKET_VERSION 4u
+#define RIN_GPU_VULKAN_GRAPHICS_PACKET_VERSION 5u
 #define RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS 16u
 #define RIN_GPU_VULKAN_COMPUTE_MAX_BINDINGS 64u
 #define RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS 8u
@@ -212,6 +215,44 @@ typedef struct RinGpuVulkanComputePacketV1 {
     uint8_t shader_ir[1];
 } RinGpuVulkanComputePacketV1;
 
+/* A bounded, API-neutral graphics submission. The trailing bytes contain a
+ * validated vertex RSH1 module followed by a validated fragment RSH1 module.
+ * Allocation handles and byte ranges identify the vertex source and one
+ * RGBA8 color target; product resources separately lease those allocations
+ * through completion. V1 carries one full-target clear/store pass and one
+ * non-indexed draw, with no shader descriptors or depth attachment. */
+typedef struct RinGpuVulkanGraphicsPacketV1 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint32_t queue_family_index;
+    uint32_t queue_index;
+    uint32_t product_queue_id;
+    uint32_t vertex_shader_size_bytes;
+    uint32_t fragment_shader_size_bytes;
+    uint32_t vertex_binding;
+    uint64_t vertex_allocation_handle;
+    uint64_t vertex_offset;
+    uint64_t vertex_size_bytes;
+    uint64_t color_allocation_handle;
+    uint64_t color_offset;
+    uint64_t color_size_bytes;
+    uint32_t width;
+    uint32_t height;
+    uint32_t vertex_count;
+    uint32_t instance_count;
+    uint32_t first_vertex;
+    uint32_t first_instance;
+    uint32_t flags;
+    uint32_t reserved;
+    float clear_red;
+    float clear_green;
+    float clear_blue;
+    float clear_alpha;
+    RinGpuGraphicsPipelineBackendDescV1 pipeline;
+    uint64_t payload_alignment;
+    uint8_t shader_ir[1];
+} RinGpuVulkanGraphicsPacketV1;
+
 typedef struct RinGpuVulkanQueryCommandV1 {
     uint64_t query_pool;
     uint32_t query;
@@ -366,6 +407,8 @@ static_assert(sizeof(RinGpuVulkanComputeBindingV1) == 40u,
               "RinVulkan compute binding ABI drift");
 static_assert(offsetof(RinGpuVulkanComputePacketV1, shader_ir) == 2608u,
               "RinVulkan compute packet ABI drift");
+static_assert(offsetof(RinGpuVulkanGraphicsPacketV1, shader_ir) % 8u == 0u,
+              "RinVulkan graphics packet payload alignment drift");
 #else
 _Static_assert(sizeof(RinGpuVulkanTransferOpV2) == 88u,
                "RinVulkan transfer operation ABI drift");
@@ -375,6 +418,8 @@ _Static_assert(sizeof(RinGpuVulkanComputeBindingV1) == 40u,
                "RinVulkan compute binding ABI drift");
 _Static_assert(offsetof(RinGpuVulkanComputePacketV1, shader_ir) == 2608u,
                "RinVulkan compute packet ABI drift");
+_Static_assert(offsetof(RinGpuVulkanGraphicsPacketV1, shader_ir) % 8u == 0u,
+               "RinVulkan graphics packet payload alignment drift");
 #endif
 
 #endif

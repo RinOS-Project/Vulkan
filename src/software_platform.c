@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 
 #include <rinvulkan/software_platform.h>
+#include <rinvulkan/graphics_runtime.h>
 #include <rinvulkan/icd.h>
 #include <ringpu/runtime.h>
 #include <ringpu/spirv_frontend.h>
@@ -98,6 +99,15 @@ static int resource_has_access(const RinVulkanProductResourceV1* resources,
             return 1;
     }
     return 0;
+}
+
+static int finite_float(float value) {
+    union {
+        float value;
+        uint32_t bits;
+    } cast;
+    cast.value = value;
+    return ((cast.bits >> 23u) & 0xffu) != 0xffu;
 }
 
 static int software_execute_compute(
@@ -345,6 +355,328 @@ done:
                       : RIN_VULKAN_PRODUCT_BACKEND_FAILED);
 }
 
+static int software_execute_graphics(
+    RinGpuVulkanSoftwarePlatformV1* platform,
+    const RinGpuVulkanGraphicsPacketV1* packet,
+    const RinVulkanProductResourceV1* resources, uint32_t resource_count) {
+    RinGpuRuntimeDescV1 runtime_desc;
+    RinGpuVulkanGraphicsRuntimeV1 graphics_runtime;
+    RinGpuVulkanGraphicsPipelinePlanV1 pipeline_plan;
+    RinGpuVulkanSoftwareAllocationV1* vertex_allocation = NULL;
+    RinGpuVulkanSoftwareAllocationV1* color_allocation;
+    RinGpuImageDescV1 image_desc;
+    RinGpuBufferDescV1 vertex_desc;
+    RinGpuRenderPassDescV1 render_pass;
+    RinGpuImageTransitionV1 transition;
+    RinGpuRasterStateV1 raster;
+    RinGpuDrawVerticesV2 draw;
+    RinGpuImageReadbackV1 readback;
+    RinGpuHandle image = 0u;
+    RinGpuHandle vertex_buffer = 0u;
+    RinGpuHandle pipeline_handle = 0u;
+    RinGpuHandle command_list = 0u;
+    RinGpuHandle fence = 0u;
+    const size_t packet_prefix =
+        offsetof(RinGpuVulkanGraphicsPacketV1, shader_ir);
+    const uint8_t* fragment_shader;
+    uint64_t pixel_bytes;
+    uint64_t required_vertex_bytes = 0u;
+    uint64_t total_allocation_bytes;
+    uint32_t expected_resources;
+    uint32_t resource_index;
+    RinShaderInfoV1 vertex_info;
+    RinShaderInfoV1 fragment_info;
+    int runtime_initialized = 0;
+    int result = RIN_VULKAN_PRODUCT_PROTOCOL;
+
+    memset(&graphics_runtime, 0, sizeof(graphics_runtime));
+    if (!platform || !packet || packet->struct_size < packet_prefix ||
+        packet->version != RIN_GPU_VULKAN_GRAPHICS_PACKET_VERSION ||
+        packet->queue_family_index >= RIN_GPU_VULKAN_MAX_QUEUE_FAMILIES ||
+        packet->queue_index >= RIN_VULKAN_PRODUCT_MAX_QUEUES ||
+        packet->product_queue_id >= platform->queue_count ||
+        packet->width == 0u || packet->height == 0u ||
+        packet->width > 4096u || packet->height > 4096u ||
+        packet->vertex_count == 0u || packet->vertex_count > 65535u ||
+        packet->instance_count != 1u || packet->first_instance != 0u ||
+        packet->flags != 0u || packet->reserved != 0u ||
+        packet->vertex_shader_size_bytes == 0u ||
+        packet->fragment_shader_size_bytes == 0u ||
+        packet->vertex_shader_size_bytes > RIN_SHADER_MAX_SOURCE_BYTES ||
+        packet->fragment_shader_size_bytes > RIN_SHADER_MAX_SOURCE_BYTES ||
+        packet->vertex_shader_size_bytes >
+            UINT32_MAX - packet_prefix - packet->fragment_shader_size_bytes ||
+        packet->struct_size != packet_prefix +
+            packet->vertex_shader_size_bytes +
+            packet->fragment_shader_size_bytes ||
+        packet->pipeline.color_format != RIN_GPU_FORMAT_RGBA8_UNORM ||
+        packet->pipeline.resource_count != 0u ||
+        packet->pipeline.vertex_binding_count > 1u ||
+        packet->pipeline.vertex_input_count > RIN_GPU_MAX_VERTEX_ATTRIBUTES ||
+        packet->pipeline.varying_count > RIN_GPU_MAX_VARYINGS ||
+        packet->pipeline.reserved != 0u ||
+        packet->payload_alignment != 0u ||
+        !finite_float(packet->clear_red) ||
+        !finite_float(packet->clear_green) ||
+        !finite_float(packet->clear_blue) ||
+        !finite_float(packet->clear_alpha))
+        return RIN_VULKAN_PRODUCT_PROTOCOL;
+    fragment_shader = packet->shader_ir + packet->vertex_shader_size_bytes;
+    if (ringpu_shader_validate(packet->shader_ir,
+                               packet->vertex_shader_size_bytes,
+                               &vertex_info) != RIN_SHADER_OK ||
+        ringpu_shader_validate(fragment_shader,
+                               packet->fragment_shader_size_bytes,
+                               &fragment_info) != RIN_SHADER_OK ||
+        vertex_info.stage != RIN_SHADER_STAGE_VERTEX ||
+        fragment_info.stage != RIN_SHADER_STAGE_FRAGMENT ||
+        vertex_info.resource_count != 0u ||
+        fragment_info.resource_count != 0u)
+        return RIN_VULKAN_PRODUCT_PROTOCOL;
+
+    color_allocation = allocation_by_handle(
+        platform, packet->color_allocation_handle);
+    if (!color_allocation || packet->color_size_bytes == 0u)
+        return RIN_VULKAN_PRODUCT_PROTOCOL;
+    pixel_bytes = (uint64_t)packet->width * packet->height * 4u;
+    if (packet->color_offset > color_allocation->size_bytes ||
+        packet->color_size_bytes > color_allocation->size_bytes -
+                                       packet->color_offset ||
+        packet->color_size_bytes < pixel_bytes)
+        return RIN_VULKAN_PRODUCT_PROTOCOL;
+
+    if (packet->pipeline.vertex_binding_count == 1u) {
+        const RinGpuVertexBufferLayoutV1* layout =
+            &packet->pipeline.vertex_bindings[0];
+        if (layout->binding != packet->vertex_binding ||
+            layout->stride == 0u ||
+            (uint64_t)packet->first_vertex + packet->vertex_count >
+                UINT64_MAX / layout->stride)
+            return RIN_VULKAN_PRODUCT_PROTOCOL;
+        required_vertex_bytes =
+            ((uint64_t)packet->first_vertex + packet->vertex_count) *
+            layout->stride;
+        vertex_allocation = allocation_by_handle(
+            platform, packet->vertex_allocation_handle);
+        if (!vertex_allocation || packet->vertex_size_bytes == 0u ||
+            packet->vertex_offset > vertex_allocation->size_bytes ||
+            packet->vertex_size_bytes > vertex_allocation->size_bytes -
+                                            packet->vertex_offset ||
+            packet->vertex_size_bytes < required_vertex_bytes)
+            return RIN_VULKAN_PRODUCT_PROTOCOL;
+    } else if (packet->vertex_allocation_handle != 0u ||
+               packet->vertex_offset != 0u ||
+               packet->vertex_size_bytes != 0u ||
+               packet->vertex_binding != 0u ||
+               packet->pipeline.vertex_input_count != 0u) {
+        return RIN_VULKAN_PRODUCT_PROTOCOL;
+    }
+
+    expected_resources = vertex_allocation &&
+                         vertex_allocation->handle != color_allocation->handle
+                             ? 2u : 1u;
+    if (resource_count != expected_resources ||
+        (resource_count != 0u && !resources) ||
+        !resource_has_access(resources, resource_count,
+                             packet->color_allocation_handle,
+                             RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE) ||
+        (vertex_allocation &&
+         !resource_has_access(resources, resource_count,
+                              packet->vertex_allocation_handle,
+                              RIN_VULKAN_PRODUCT_MEMORY_GPU_READ)))
+        return RIN_VULKAN_PRODUCT_PROTOCOL;
+    for (resource_index = 0u; resource_index < resource_count;
+         ++resource_index) {
+        uint64_t handle = resources[resource_index].allocation_handle;
+        if (resources[resource_index].reserved != 0u ||
+            (handle != packet->color_allocation_handle &&
+             (!vertex_allocation ||
+              handle != packet->vertex_allocation_handle)) ||
+            !allocation_by_handle(platform, handle))
+            return RIN_VULKAN_PRODUCT_PROTOCOL;
+    }
+    if (pixel_bytes > UINT64_MAX - packet->vertex_size_bytes)
+        return RIN_VULKAN_PRODUCT_PROTOCOL;
+    total_allocation_bytes = pixel_bytes + packet->vertex_size_bytes;
+
+    memset(&runtime_desc, 0, sizeof(runtime_desc));
+    runtime_desc.struct_size = sizeof(runtime_desc);
+    runtime_desc.version = RIN_GPU_RUNTIME_VERSION;
+    runtime_desc.device_generation = 1u;
+    runtime_desc.handle_secret = UINT64_C(0x564b475241504849);
+    runtime_desc.max_buffer_size = total_allocation_bytes < UINT64_C(1048576)
+                                       ? UINT64_C(1048576)
+                                       : total_allocation_bytes;
+    runtime_desc.max_image_size = pixel_bytes;
+    runtime_desc.max_total_allocation_size =
+        total_allocation_bytes < UINT64_C(4194304)
+            ? UINT64_C(4194304) : total_allocation_bytes;
+    runtime_desc.max_image_dimension = 4096u;
+    runtime_desc.max_image_layers = 1u;
+    runtime_desc.max_image_mip_levels = 1u;
+    runtime_desc.max_image_sample_count = 1u;
+    runtime_desc.flags = RIN_GPU_RUNTIME_FLAG_HEADLESS;
+    runtime_desc.adapter.abi_version = RIN_GPU_ABI_VERSION;
+    runtime_desc.adapter.struct_size = sizeof(runtime_desc.adapter);
+    runtime_desc.adapter.queue_capabilities =
+        RIN_GPU_QUEUE_GRAPHICS | RIN_GPU_QUEUE_COPY | RIN_GPU_QUEUE_COMPUTE;
+    memcpy(runtime_desc.adapter.name, "RinVulkan software graphics", 28u);
+    result = rin_gpu_vulkan_graphics_runtime_init(
+        &graphics_runtime, &runtime_desc,
+        RIN_GPU_QUEUE_GRAPHICS | RIN_GPU_QUEUE_COPY | RIN_GPU_QUEUE_COMPUTE);
+    if (result != RIN_GPU_OK) goto done;
+    runtime_initialized = 1;
+
+    memset(&pipeline_plan, 0, sizeof(pipeline_plan));
+    pipeline_plan.struct_size = sizeof(pipeline_plan);
+    pipeline_plan.version = RIN_GPU_VULKAN_GRAPHICS_PROFILE_VERSION;
+    pipeline_plan.backend = packet->pipeline;
+    result = rin_gpu_vulkan_graphics_runtime_create_graphics_pipeline(
+        &graphics_runtime, &pipeline_plan, packet->shader_ir,
+        packet->vertex_shader_size_bytes, fragment_shader,
+        packet->fragment_shader_size_bytes, &pipeline_handle);
+    if (result != RIN_GPU_OK) goto done;
+
+    memset(&image_desc, 0, sizeof(image_desc));
+    image_desc.abi_version = RIN_GPU_ABI_VERSION;
+    image_desc.struct_size = sizeof(image_desc);
+    image_desc.dimension = RIN_GPU_IMAGE_DIMENSION_2D;
+    image_desc.format = RIN_GPU_FORMAT_RGBA8_UNORM;
+    image_desc.width = packet->width;
+    image_desc.height = packet->height;
+    image_desc.depth = 1u;
+    image_desc.array_layers = 1u;
+    image_desc.mip_levels = 1u;
+    image_desc.sample_count = 1u;
+    image_desc.usage = RIN_GPU_IMAGE_COLOR_TARGET |
+                       RIN_GPU_IMAGE_COPY_SOURCE;
+    image_desc.flags = RIN_GPU_IMAGE_CPU_READABLE;
+    result = rin_gpu_vulkan_graphics_runtime_create_image(
+        &graphics_runtime, &image_desc, &image);
+    if (result != RIN_GPU_OK) goto done;
+
+    if (vertex_allocation) {
+        memset(&vertex_desc, 0, sizeof(vertex_desc));
+        vertex_desc.abi_version = RIN_GPU_ABI_VERSION;
+        vertex_desc.struct_size = sizeof(vertex_desc);
+        vertex_desc.size_bytes = packet->vertex_size_bytes;
+        vertex_desc.usage = RIN_GPU_BUFFER_VERTEX |
+                            RIN_GPU_BUFFER_COPY_DESTINATION;
+        vertex_desc.flags = RIN_GPU_BUFFER_CPU_VISIBLE;
+        result = rin_gpu_vulkan_graphics_runtime_create_buffer(
+            &graphics_runtime, &vertex_desc, &vertex_buffer);
+        if (result != RIN_GPU_OK) goto done;
+        result = rin_gpu_vulkan_graphics_runtime_upload_buffer(
+            &graphics_runtime, vertex_buffer, 0u,
+            vertex_allocation->bytes + packet->vertex_offset,
+            packet->vertex_size_bytes);
+        if (result != RIN_GPU_OK) goto done;
+    }
+
+    result = rin_gpu_vulkan_graphics_runtime_create_command_list(
+        &graphics_runtime, &command_list);
+    if (result != RIN_GPU_OK) goto done;
+    memset(&transition, 0, sizeof(transition));
+    transition.abi_version = RIN_GPU_ABI_VERSION;
+    transition.struct_size = sizeof(transition);
+    transition.mip_level_count = 1u;
+    transition.array_layer_count = 1u;
+    transition.before_state = RIN_GPU_IMAGE_STATE_UNDEFINED;
+    transition.after_state = RIN_GPU_IMAGE_STATE_COLOR_TARGET;
+    result = ringpu_runtime_command_transition_image(
+        graphics_runtime.runtime, command_list, image, &transition);
+    if (result != RIN_GPU_OK) goto done;
+
+    memset(&render_pass, 0, sizeof(render_pass));
+    render_pass.abi_version = RIN_GPU_ABI_VERSION;
+    render_pass.struct_size = sizeof(render_pass);
+    render_pass.color_target = image;
+    render_pass.load_op = RIN_GPU_RENDER_CLEAR;
+    render_pass.store_op = RIN_GPU_RENDER_STORE;
+    render_pass.clear_red = packet->clear_red;
+    render_pass.clear_green = packet->clear_green;
+    render_pass.clear_blue = packet->clear_blue;
+    render_pass.clear_alpha = packet->clear_alpha;
+    render_pass.color_write_mask = RIN_GPU_COLOR_WRITE_ALL;
+    result = rin_gpu_vulkan_graphics_runtime_begin_render_pass(
+        &graphics_runtime, command_list, &render_pass);
+    if (result != RIN_GPU_OK) goto done;
+
+    memset(&raster, 0, sizeof(raster));
+    raster.abi_version = RIN_GPU_ABI_VERSION;
+    raster.struct_size = sizeof(raster);
+    raster.viewport.abi_version = RIN_GPU_ABI_VERSION;
+    raster.viewport.struct_size = sizeof(raster.viewport);
+    raster.viewport.width = (float)packet->width;
+    raster.viewport.height = (float)packet->height;
+    raster.viewport.max_depth = 1.0f;
+    raster.scissor.abi_version = RIN_GPU_ABI_VERSION;
+    raster.scissor.struct_size = sizeof(raster.scissor);
+    raster.scissor.width = packet->width;
+    raster.scissor.height = packet->height;
+    raster.scissor.enabled = 1u;
+    result = rin_gpu_vulkan_graphics_runtime_set_raster_state(
+        &graphics_runtime, command_list, &raster);
+    if (result != RIN_GPU_OK) goto done;
+
+    memset(&draw, 0, sizeof(draw));
+    draw.abi_version = RIN_GPU_ABI_VERSION;
+    draw.struct_size = sizeof(draw);
+    draw.pipeline = pipeline_handle;
+    draw.color_target = image;
+    draw.vertex_count = packet->vertex_count;
+    draw.instance_count = packet->instance_count;
+    draw.first_vertex = packet->first_vertex;
+    draw.first_instance = packet->first_instance;
+    if (vertex_buffer != 0u) {
+        draw.binding_count = 1u;
+        draw.vertex_buffers[0].binding = packet->vertex_binding;
+        draw.vertex_buffers[0].buffer = vertex_buffer;
+    }
+    result = rin_gpu_vulkan_graphics_runtime_draw_vertices(
+        &graphics_runtime, command_list, &draw);
+    if (result != RIN_GPU_OK) goto done;
+    result = rin_gpu_vulkan_graphics_runtime_end_render_pass(
+        &graphics_runtime, command_list);
+    if (result != RIN_GPU_OK) goto done;
+    transition.before_state = RIN_GPU_IMAGE_STATE_COLOR_TARGET;
+    transition.after_state = RIN_GPU_IMAGE_STATE_COPY_SOURCE;
+    result = ringpu_runtime_command_transition_image(
+        graphics_runtime.runtime, command_list, image, &transition);
+    if (result != RIN_GPU_OK) goto done;
+    result = rin_gpu_vulkan_graphics_runtime_close_command_list(
+        &graphics_runtime, command_list);
+    if (result != RIN_GPU_OK) goto done;
+    result = ringpu_runtime_create_fence(graphics_runtime.runtime, 0u, &fence);
+    if (result != RIN_GPU_OK) goto done;
+    result = rin_gpu_vulkan_graphics_runtime_submit(
+        &graphics_runtime, command_list, fence, 1u);
+    if (result != RIN_GPU_OK) goto done;
+    result = rin_gpu_vulkan_graphics_runtime_wait_fence(
+        &graphics_runtime, fence, 1u, UINT64_MAX);
+    if (result != RIN_GPU_OK) goto done;
+
+    memset(&readback, 0, sizeof(readback));
+    readback.abi_version = RIN_GPU_ABI_VERSION;
+    readback.struct_size = sizeof(readback);
+    readback.width = packet->width;
+    readback.height = packet->height;
+    readback.depth = 1u;
+    result = rin_gpu_vulkan_graphics_runtime_readback_image(
+        &graphics_runtime, image, &readback,
+        color_allocation->bytes + packet->color_offset, pixel_bytes);
+    if (result == RIN_GPU_OK) result = RIN_VULKAN_PRODUCT_OK;
+
+done:
+    if (runtime_initialized)
+        (void)rin_gpu_vulkan_graphics_runtime_shutdown(&graphics_runtime);
+    return result == RIN_VULKAN_PRODUCT_OK
+               ? RIN_VULKAN_PRODUCT_OK
+               : (result == RIN_VULKAN_PRODUCT_PROTOCOL
+                      ? RIN_VULKAN_PRODUCT_PROTOCOL
+                      : RIN_VULKAN_PRODUCT_BACKEND_FAILED);
+}
+
 static int software_get_status(void* context,
                                RinVulkanProductStatusV1* status_out) {
     RinGpuVulkanSoftwarePlatformV1* platform = software_context(context);
@@ -441,12 +773,14 @@ static int software_submit(void* context,
     const RinGpuVulkanTransferPacketV2* packet_v2;
     const RinGpuVulkanTransferPacketV3* packet_v3;
     const RinGpuVulkanComputePacketV1* compute_packet;
+    const RinGpuVulkanGraphicsPacketV1* graphics_packet;
     RinGpuVulkanTransferPacketV2 routed_operations;
     RinVulkanProductReportV1* report;
     uint32_t copy_index;
     uint32_t operation_index;
     uint32_t next_tail;
     int compute_result;
+    int graphics_result;
     if (!platform || !submission || submission->struct_size != sizeof(*submission) ||
         submission->version != RIN_VULKAN_PRODUCT_PLATFORM_VERSION ||
         submission->flags != 0u || submission->queue_id >= platform->queue_count ||
@@ -475,6 +809,16 @@ static int software_submit(void* context,
         compute_result = software_execute_compute(
             platform, compute_packet, resources, resource_count);
         if (compute_result != RIN_VULKAN_PRODUCT_OK) return compute_result;
+    } else if (packet->version == RIN_GPU_VULKAN_GRAPHICS_PACKET_VERSION) {
+        graphics_packet = (const RinGpuVulkanGraphicsPacketV1*)(uintptr_t)
+            submission->command_cookie;
+        if (graphics_packet->struct_size <
+                offsetof(RinGpuVulkanGraphicsPacketV1, shader_ir) ||
+            graphics_packet->product_queue_id != submission->queue_id)
+            return RIN_VULKAN_PRODUCT_PROTOCOL;
+        graphics_result = software_execute_graphics(
+            platform, graphics_packet, resources, resource_count);
+        if (graphics_result != RIN_VULKAN_PRODUCT_OK) return graphics_result;
     } else if (packet->struct_size < sizeof(uint32_t) * 4u ||
                packet->reserved != 0u) {
         return RIN_VULKAN_PRODUCT_PROTOCOL;
