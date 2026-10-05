@@ -489,6 +489,50 @@ int rin_gpu_vulkan_descriptor_set_matches_layout(
     return runtime->sets[set_index].layout == layout;
 }
 
+int rin_gpu_vulkan_descriptor_set_get_write(
+        const RinGpuVulkanDescriptorRuntimeV1* runtime,
+        RinGpuVulkanDescriptorHandleV1 set, uint32_t requested_set,
+        uint32_t binding, uint32_t array_element,
+        RinGpuVulkanDescriptorWriteV1* write_out) {
+    uint32_t set_index;
+    uint32_t set_generation;
+    uint32_t layout_index;
+    uint32_t layout_generation;
+    uint32_t write_index;
+    int found = 0;
+    if (!write_out || !runtime_valid(runtime) ||
+        !decode_handle(set, RIN_GPU_VULKAN_DESCRIPTOR_SET_TAG,
+                       runtime->handle_secret,
+                       RIN_GPU_VULKAN_DESCRIPTOR_MAX_SETS, &set_index,
+                       &set_generation) || runtime->sets[set_index].state == 0u ||
+        runtime->sets[set_index].generation != set_generation ||
+        !decode_handle(runtime->sets[set_index].layout,
+                       RIN_GPU_VULKAN_DESCRIPTOR_LAYOUT_TAG,
+                       runtime->handle_secret,
+                       RIN_GPU_VULKAN_DESCRIPTOR_MAX_LAYOUTS, &layout_index,
+                       &layout_generation) || runtime->layouts[layout_index].state == 0u ||
+        runtime->layouts[layout_index].generation != layout_generation)
+        return RIN_GPU_VULKAN_GRAPHICS_INVALID_ARGUMENT;
+    memset(write_out, 0, sizeof(*write_out));
+    for (write_index = 0u;
+         write_index < runtime->sets[set_index].write_count; ++write_index) {
+        const RinGpuVulkanDescriptorWriteV1* candidate =
+            &runtime->sets[set_index].writes[write_index];
+        if (candidate->set != requested_set ||
+            candidate->binding != binding ||
+            candidate->array_element != array_element)
+            continue;
+        if (found) {
+            memset(write_out, 0, sizeof(*write_out));
+            return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
+        }
+        *write_out = *candidate;
+        found = 1;
+    }
+    return found ? RIN_GPU_VULKAN_GRAPHICS_OK
+                 : RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
+}
+
 int rin_gpu_vulkan_descriptor_set_update(
         RinGpuVulkanDescriptorRuntimeV1* runtime,
         RinGpuVulkanDescriptorHandleV1 set,

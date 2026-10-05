@@ -247,8 +247,18 @@ struct RinGpuVulkanCommandBufferV1 {
     uint32_t descriptor_bind_first_set;
     uint32_t descriptor_bind_set_count;
     uint32_t descriptor_dynamic_offset_count;
+    uint32_t descriptor_bind_point;
+    uint32_t compute_pipeline_bound;
     uint64_t descriptor_sets[RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS];
+    uint64_t descriptor_set_layouts[
+        RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS];
     uint32_t descriptor_dynamic_offsets[RIN_GPU_VULKAN_COMMAND_MAX_DYNAMIC_OFFSETS];
+    uint64_t bound_compute_pipeline;
+    uint64_t dispatch_compute_pipeline;
+    uint32_t compute_dispatch_count;
+    uint32_t compute_group_count_x;
+    uint32_t compute_group_count_y;
+    uint32_t compute_group_count_z;
     uint32_t barrier_count;
     uint32_t reserved_barrier;
     struct {

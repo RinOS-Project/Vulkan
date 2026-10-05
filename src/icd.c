@@ -42,6 +42,7 @@
 #define RIN_VK_MAX_SAMPLERS 128u
 #define RIN_VK_MAX_PIPELINE_LAYOUTS 64u
 #define RIN_VK_MAX_PIPELINE_CACHES 32u
+#define RIN_VK_MAX_PIPELINES 64u
 #define RIN_VK_MAX_SHADER_MODULES 64u
 #define RIN_VK_MAX_QUERY_POOLS 32u
 #define RIN_VK_MAX_EVENTS 128u
@@ -69,6 +70,7 @@
 #define RIN_VK_SAMPLER_TAG UINT64_C(0x5254)
 #define RIN_VK_PIPELINE_LAYOUT_TAG UINT64_C(0x5250)
 #define RIN_VK_PIPELINE_CACHE_TAG UINT64_C(0x5243)
+#define RIN_VK_PIPELINE_TAG UINT64_C(0x5258)
 #define RIN_VK_SHADER_MODULE_TAG UINT64_C(0x5248)
 #define RIN_VK_QUERY_POOL_TAG UINT64_C(0x5251)
 #define RIN_VK_EVENT_TAG UINT64_C(0x5245)
@@ -246,6 +248,20 @@ typedef struct RinVkShaderModuleSlot {
     uint32_t* code;
 } RinVkShaderModuleSlot;
 
+typedef struct RinVkPipelineSlot {
+    uint32_t state;
+    uint32_t generation;
+    struct RinVkDevice_T* owner;
+    uint32_t set_layout_count;
+    uint32_t descriptor_count;
+    uint32_t shader_size;
+    uint32_t reserved;
+    RinVkDescriptorSetLayout
+        set_layouts[RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS];
+    RinSpirvDescriptorV1 descriptors[RIN_SPIRV_MAX_RESOURCES];
+    uint8_t* shader_ir;
+} RinVkPipelineSlot;
+
 typedef struct RinVkQueryValue {
     uint64_t values[9];
     uint64_t availability;
@@ -316,6 +332,10 @@ typedef struct RinVkDebugUtilsObjectSlot {
     void* tag;
 } RinVkDebugUtilsObjectSlot;
 
+typedef struct RinVkBufferOwnershipUpdate RinVkBufferOwnershipUpdate;
+
+typedef struct RinVkBufferOwnershipUpdate RinVkBufferOwnershipUpdate;
+
 typedef struct RinVkSubmissionSlot {
     uint32_t state;
     uint32_t command_buffer_count;
@@ -338,6 +358,10 @@ typedef struct RinVkSubmissionSlot {
         command_buffers[RIN_VK_MAX_SUBMIT_COMMAND_BUFFERS];
     RinGpuVulkanTransferPacketV2 extended_packet;
     RinGpuVulkanTransferPacketV3 routed_packet;
+    RinGpuVulkanComputePacketV1* compute_packet;
+    size_t compute_packet_size;
+    RinVkBufferOwnershipUpdate* compute_buffer_ownership_updates;
+    uint32_t compute_buffer_ownership_update_count;
     RinVulkanProductResourceV1
         resources[RIN_VULKAN_PRODUCT_MAX_RESOURCES_PER_SUBMISSION];
 } RinVkSubmissionSlot;
@@ -367,6 +391,11 @@ typedef struct RinVkCommandResourceUseSlot {
     RinVkCommandResourceUse uses[RIN_VK_MAX_COMMAND_RESOURCE_USES];
 } RinVkCommandResourceUseSlot;
 
+struct RinVkBufferOwnershipUpdate {
+    RinVkBufferSlot* buffer;
+    RinVkBufferOwnershipState state;
+};
+
 static uintptr_t g_runtime_binding;
 static uint32_t g_active_calls;
 static uintptr_t g_product_binding;
@@ -381,6 +410,7 @@ static RinVkImageViewSlot g_image_views[RIN_VK_MAX_IMAGE_VIEWS];
 static RinVkSamplerSlot g_samplers[RIN_VK_MAX_SAMPLERS];
 static RinVkPipelineLayoutSlot g_pipeline_layouts[RIN_VK_MAX_PIPELINE_LAYOUTS];
 static RinVkPipelineCacheSlot g_pipeline_caches[RIN_VK_MAX_PIPELINE_CACHES];
+static RinVkPipelineSlot g_pipelines[RIN_VK_MAX_PIPELINES];
 static RinVkShaderModuleSlot g_shader_modules[RIN_VK_MAX_SHADER_MODULES];
 static RinVkQueryPoolSlot g_query_pools[RIN_VK_MAX_QUERY_POOLS];
 static RinVkEventSlot g_events[RIN_VK_MAX_EVENTS];
@@ -1089,6 +1119,23 @@ static RinVkPipelineCacheSlot* pipeline_cache_slot(
     return slot;
 }
 
+static RinVkPipelineSlot* pipeline_slot(RinVkDevice device,
+                                       RinVkPipeline handle) {
+    struct RinVkDevice_T* owner = device_slot(device);
+    uint32_t index_field = (uint32_t)(handle & UINT64_C(0xffff));
+    uint32_t generation = (uint32_t)(handle >> 16u);
+    RinVkPipelineSlot* slot;
+    if (!owner || (handle >> 48u) != RIN_VK_PIPELINE_TAG ||
+        index_field == 0u || index_field > RIN_VK_MAX_PIPELINES ||
+        generation == 0u)
+        return NULL;
+    slot = &g_pipelines[index_field - 1u];
+    if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) != 1u ||
+        slot->generation != generation || slot->owner != owner)
+        return NULL;
+    return slot;
+}
+
 static RinVkShaderModuleSlot* shader_module_slot(
         RinVkDevice device, RinVkShaderModule handle) {
     struct RinVkDevice_T* owner = device_slot(device);
@@ -1414,6 +1461,32 @@ static RinVkShaderModuleSlot* reserve_shader_module_slot(
     uint32_t index;
     for (index = 0u; index < RIN_VK_MAX_SHADER_MODULES; ++index) {
         RinVkShaderModuleSlot* slot = &g_shader_modules[index];
+        uint32_t expected = 0u;
+        uint32_t generation;
+        if (!__atomic_compare_exchange_n(&slot->state, &expected, 2u, 0,
+                                         __ATOMIC_ACQUIRE,
+                                         __ATOMIC_RELAXED))
+            continue;
+        generation = slot->generation;
+        if (generation == UINT32_MAX) {
+            __atomic_store_n(&slot->state, 3u, __ATOMIC_RELEASE);
+            continue;
+        }
+        memset(slot, 0, sizeof(*slot));
+        slot->generation = generation + 1u;
+        slot->owner = owner;
+        __atomic_store_n(&slot->state, 2u, __ATOMIC_RELEASE);
+        *index_out = index;
+        return slot;
+    }
+    return NULL;
+}
+
+static RinVkPipelineSlot* reserve_pipeline_slot(
+        struct RinVkDevice_T* owner, uint32_t* index_out) {
+    uint32_t index;
+    for (index = 0u; index < RIN_VK_MAX_PIPELINES; ++index) {
+        RinVkPipelineSlot* slot = &g_pipelines[index];
         uint32_t expected = 0u;
         uint32_t generation;
         if (!__atomic_compare_exchange_n(&slot->state, &expected, 2u, 0,
@@ -2032,6 +2105,9 @@ static RinVkSubmissionSlot* reserve_submission_slot(void) {
 }
 
 static void clear_submission_slot(RinVkSubmissionSlot* slot) {
+    if (!slot) return;
+    free(slot->compute_packet);
+    free(slot->compute_buffer_ownership_updates);
     memset(slot, 0, sizeof(*slot));
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
 }
@@ -2137,6 +2213,11 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
     int product_result;
     if (!slot || !slot->owner || !submission_waits_satisfied(slot))
         return RIN_VK_NOT_READY;
+    if (slot->compute_packet &&
+        (slot->compute_packet_size <
+             offsetof(RinGpuVulkanComputePacketV1, shader_ir) ||
+         slot->compute_packet_size != slot->compute_packet->struct_size))
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
     product = acquire_product();
     if (!product || !product_matches_device(product, slot->owner)) {
         if (product) release_product();
@@ -2145,7 +2226,10 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
     memset(&submission, 0, sizeof(submission));
     product_result = product->prepare_submission(
         product->context, slot->queue_id,
-        (uint64_t)(uintptr_t)&slot->routed_packet, &submission);
+        (uint64_t)(uintptr_t)(slot->compute_packet
+                                  ? (const void*)slot->compute_packet
+                                  : (const void*)&slot->routed_packet),
+        &submission);
     if (product_result == RIN_VULKAN_PRODUCT_OK)
         product_result = product->submit(
             product->context, &submission,
@@ -2156,6 +2240,15 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
         return map_product_result(product_result);
     slot->sequence = submission.sequence;
     slot->completion_value = submission.completion_value;
+    if (slot->compute_packet) {
+        uint32_t index;
+        for (index = 0u;
+             index < slot->compute_buffer_ownership_update_count; ++index) {
+            RinVkBufferOwnershipUpdate* update =
+                &slot->compute_buffer_ownership_updates[index];
+            if (update->buffer) update->buffer->ownership = update->state;
+        }
+    }
     consume_submission_waits(slot);
     __atomic_store_n(&slot->state, RIN_VK_SUBMISSION_ACTIVE,
                      __ATOMIC_RELEASE);
@@ -2273,6 +2366,20 @@ static void clear_pipeline_cache_slot(RinVkPipelineCacheSlot* slot) {
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
 }
 
+static void clear_pipeline_slot(RinVkPipelineSlot* slot) {
+    if (!slot) return;
+    free(slot->shader_ir);
+    slot->owner = NULL;
+    slot->set_layout_count = 0u;
+    slot->descriptor_count = 0u;
+    slot->shader_size = 0u;
+    slot->reserved = 0u;
+    memset(slot->set_layouts, 0, sizeof(slot->set_layouts));
+    memset(slot->descriptors, 0, sizeof(slot->descriptors));
+    slot->shader_ir = NULL;
+    __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
+}
+
 static void clear_shader_module_slot(RinVkShaderModuleSlot* slot) {
     if (!slot) return;
     free(slot->code);
@@ -2291,6 +2398,19 @@ static void cleanup_device_shader_modules(struct RinVkDevice_T* device) {
         if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) == 1u &&
             slot->owner == device)
             clear_shader_module_slot(slot);
+    }
+    sync_unlock();
+}
+
+static void cleanup_device_pipelines(struct RinVkDevice_T* device) {
+    uint32_t index;
+    if (!device) return;
+    sync_lock();
+    for (index = 0u; index < RIN_VK_MAX_PIPELINES; ++index) {
+        RinVkPipelineSlot* slot = &g_pipelines[index];
+        if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) == 1u &&
+            slot->owner == device)
+            clear_pipeline_slot(slot);
     }
     sync_unlock();
 }
@@ -4381,6 +4501,7 @@ void RIN_VKAPI_CALL vkDestroyDevice(RinVkDevice device,
     (void)rin_gpu_vulkan_command_owner_cleanup(
         &g_command_runtime, (uintptr_t)slot);
     cleanup_device_sync_objects(slot);
+    cleanup_device_pipelines(slot);
     cleanup_device_shader_modules(slot);
     (void)rin_gpu_vulkan_descriptor_runtime_shutdown(
         &slot->descriptor_runtime);
@@ -6320,6 +6441,10 @@ static int snapshot_submission_packet_v2(
         uint32_t operation_index;
         if (!buffer || buffer->owner != (uintptr_t)device || !buffer->pool ||
             buffer->pool->queue_family_index != queue_family_index ||
+            buffer->descriptor_bind_recorded != 0u ||
+            buffer->compute_pipeline_bound != 0u ||
+            buffer->compute_dispatch_count != 0u ||
+            buffer->dispatch_compute_pipeline != 0u ||
             buffer->copy_count > RIN_GPU_VULKAN_COMMAND_MAX_COPIES ||
             buffer->transfer_op_count > RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS ||
             buffer->copy_count > RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS ||
@@ -6383,6 +6508,229 @@ static int snapshot_submission_packet_v2(
     }
     *resource_count_out = resource_count;
     return 1;
+}
+
+static RinVkResult snapshot_compute_submission(
+        struct RinVkDevice_T* device, uint32_t queue_family_index,
+        uint32_t queue_index, uint32_t product_queue_id,
+        RinGpuVulkanCommandBufferV1* const command_buffers[],
+        uint32_t command_buffer_count,
+        RinGpuVulkanComputePacketV1** packet_out, size_t* packet_size_out,
+        RinVulkanProductResourceV1 resources[], uint32_t* resource_count_out,
+        RinVkBufferOwnershipUpdate** ownership_updates_out,
+        uint32_t* ownership_update_count_out) {
+    RinGpuVulkanCommandBufferV1* command_buffer;
+    RinVkPipelineSlot* pipeline;
+    RinGpuVulkanComputePacketV1* packet = NULL;
+    RinVkBufferOwnershipUpdate* ownership_updates = NULL;
+    uint8_t resource_indices[RIN_SHADER_MAX_RESOURCES] = {0};
+    uint32_t resource_count = 0u;
+    uint32_t index;
+    RinVkResult result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+    size_t packet_prefix = offsetof(RinGpuVulkanComputePacketV1, shader_ir);
+    size_t packet_size;
+    if (packet_out) *packet_out = NULL;
+    if (packet_size_out) *packet_size_out = 0u;
+    if (resource_count_out) *resource_count_out = 0u;
+    if (ownership_updates_out) *ownership_updates_out = NULL;
+    if (ownership_update_count_out) *ownership_update_count_out = 0u;
+    if (!device || !command_buffers || command_buffer_count != 1u ||
+        !packet_out || !packet_size_out || !resources ||
+        !resource_count_out || !ownership_updates_out ||
+        !ownership_update_count_out || !command_buffers[0])
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    command_buffer = command_buffers[0];
+    if (command_buffer->owner != (uintptr_t)device || !command_buffer->pool ||
+        command_buffer->pool->queue_family_index != queue_family_index ||
+        command_buffer->copy_count != 0u ||
+        command_buffer->transfer_op_count != 0u ||
+        command_buffer->barrier_count != 0u ||
+        command_buffer->query_command_count != 0u ||
+        command_buffer->event_command_count != 0u ||
+        command_buffer->compute_dispatch_count != 1u ||
+        command_buffer->bound_compute_pipeline == 0u ||
+        command_buffer->compute_pipeline_bound == 0u ||
+        command_buffer->dispatch_compute_pipeline !=
+            command_buffer->bound_compute_pipeline ||
+        command_buffer->descriptor_bind_recorded == 0u ||
+        command_buffer->descriptor_bind_point !=
+            RIN_VK_PIPELINE_BIND_POINT_COMPUTE ||
+        command_buffer->descriptor_bind_first_set != 0u ||
+        command_buffer->descriptor_bind_set_count != 1u ||
+        command_buffer->descriptor_dynamic_offset_count != 0u ||
+        command_buffer->compute_group_count_x > 65535u ||
+        command_buffer->compute_group_count_y > 65535u ||
+        command_buffer->compute_group_count_z > 65535u)
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    pipeline = pipeline_slot((RinVkDevice)(void*)device,
+                             command_buffer->dispatch_compute_pipeline);
+    if (!pipeline || pipeline->descriptor_count == 0u ||
+        pipeline->descriptor_count > RIN_GPU_VULKAN_COMPUTE_MAX_BINDINGS ||
+        pipeline->set_layout_count == 0u ||
+        pipeline->set_layout_count >
+            RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS ||
+        command_buffer->descriptor_set_layouts[0] !=
+            pipeline->set_layouts[0])
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    if (rin_gpu_vulkan_descriptor_set_matches_layout(
+            &device->descriptor_runtime,
+            (RinGpuVulkanDescriptorHandleV1)
+                command_buffer->descriptor_sets[0],
+            (RinGpuVulkanDescriptorHandleV1)pipeline->set_layouts[0]) != 1)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    if (pipeline->shader_size == 0u ||
+        pipeline->shader_size > UINT32_MAX - packet_prefix)
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    packet_size = packet_prefix + pipeline->shader_size;
+    packet = (RinGpuVulkanComputePacketV1*)calloc(1u, packet_size);
+    ownership_updates = (RinVkBufferOwnershipUpdate*)calloc(
+        pipeline->descriptor_count, sizeof(*ownership_updates));
+    if (!packet || !ownership_updates) {
+        free(packet);
+        free(ownership_updates);
+        return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+    packet->struct_size = (uint32_t)packet_size;
+    packet->version = RIN_GPU_VULKAN_COMPUTE_PACKET_VERSION;
+    packet->queue_family_index = queue_family_index;
+    packet->queue_index = queue_index;
+    packet->product_queue_id = product_queue_id;
+    packet->group_count_x = command_buffer->compute_group_count_x;
+    packet->group_count_y = command_buffer->compute_group_count_y;
+    packet->group_count_z = command_buffer->compute_group_count_z;
+    packet->binding_count = pipeline->descriptor_count;
+    packet->shader_size_bytes = pipeline->shader_size;
+    memcpy(packet->shader_ir, pipeline->shader_ir, pipeline->shader_size);
+    memset(resources, 0, sizeof(*resources) *
+                           RIN_VULKAN_PRODUCT_MAX_RESOURCES_PER_SUBMISSION);
+
+    for (index = 0u; index < pipeline->descriptor_count; ++index) {
+        const RinSpirvDescriptorV1* descriptor = &pipeline->descriptors[index];
+        RinGpuVulkanDescriptorWriteV1 write;
+        RinVkBufferSlot* buffer;
+        RinVkBufferOwnershipUpdate* ownership_update =
+            &ownership_updates[index];
+        RinGpuVulkanComputeBindingV1* binding = &packet->bindings[index];
+        uint64_t resource_offset;
+        uint64_t resource_end;
+        uint64_t address;
+        uint32_t required_access = 0u;
+        uint32_t owner_index;
+        int graphics_result;
+        if (descriptor->set != 0u ||
+            descriptor->resource_kind != RIN_SHADER_RESOURCE_STORAGE_BUFFER ||
+            descriptor->resource_index >= pipeline->descriptor_count ||
+            resource_indices[descriptor->resource_index] != 0u) {
+            result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+            goto fail;
+        }
+        graphics_result = rin_gpu_vulkan_descriptor_set_get_write(
+            &device->descriptor_runtime,
+            (RinGpuVulkanDescriptorHandleV1)
+                command_buffer->descriptor_sets[0],
+            descriptor->set, descriptor->binding, 0u, &write);
+        if (graphics_result != RIN_GPU_VULKAN_GRAPHICS_OK ||
+            write.set != descriptor->set ||
+            write.binding != descriptor->binding || write.array_element != 0u ||
+            write.resource_index != descriptor->resource_index ||
+            write.descriptor_type != RIN_GPU_VULKAN_DESCRIPTOR_STORAGE_BUFFER ||
+            write.resource == 0u || write.size_bytes == 0u ||
+            write.flags != 0u || write.reserved != 0u ||
+            write.mip_level != 0u || write.array_layer != 0u ||
+            write.access == 0u ||
+            (write.access & ~(RIN_GPU_RESOURCE_READ |
+                              RIN_GPU_RESOURCE_WRITE)) != 0u) {
+            result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+            goto fail;
+        }
+        buffer = buffer_slot((RinVkDevice)(void*)device,
+                             (RinVkBuffer)write.resource);
+        if (!buffer || buffer->owner != device || !buffer->memory ||
+            buffer->memory_generation != buffer->memory->generation ||
+            buffer->memory->owner != device ||
+            buffer->memory->product_allocation == 0u ||
+            (write.descriptor_type == RIN_GPU_VULKAN_DESCRIPTOR_STORAGE_BUFFER
+                 ? (buffer->usage & RIN_VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) == 0u
+                 : (buffer->usage & RIN_VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT) == 0u) ||
+            !checked_buffer_address(buffer, write.offset, write.size_bytes,
+                                    &address) ||
+            buffer->memory_offset > UINT64_MAX - write.offset) {
+            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+            goto fail;
+        }
+        resource_offset = buffer->memory_offset + write.offset;
+        if (resource_offset > buffer->memory->requested_size ||
+            write.size_bytes > buffer->memory->requested_size - resource_offset ||
+            resource_offset > UINT64_MAX - write.size_bytes) {
+            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+            goto fail;
+        }
+        resource_end = write.offset + write.size_bytes;
+        ownership_update->buffer = buffer;
+        ownership_update->state = buffer->ownership;
+        if (!rin_vk_buffer_ownership_ensure_coverage(
+                &ownership_update->state, write.offset, resource_end,
+                RIN_VK_QUEUE_FAMILY_IGNORED, 1)) {
+            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+            goto fail;
+        }
+        for (owner_index = 0u;
+             owner_index < ownership_update->state.range_count; ++owner_index) {
+            RinVkBufferOwnershipRange* range =
+                &ownership_update->state.ranges[owner_index];
+            if (range->offset >= resource_end ||
+                range->offset + range->size <= write.offset)
+                continue;
+            if (range->transfer_pending != 0u ||
+                (range->owner_queue_family != RIN_VK_QUEUE_FAMILY_IGNORED &&
+                 range->owner_queue_family != queue_family_index)) {
+                result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+                goto fail;
+            }
+            range->owner_queue_family = queue_family_index;
+        }
+        for (owner_index = 0u; owner_index < index; ++owner_index)
+            if (ownership_updates[owner_index].buffer == buffer ||
+                packet->bindings[owner_index].allocation_handle ==
+                    buffer->memory->product_allocation) {
+                result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+                goto fail;
+            }
+        binding->allocation_handle = buffer->memory->product_allocation;
+        binding->offset = resource_offset;
+        binding->size_bytes = write.size_bytes;
+        binding->resource_index = descriptor->resource_index;
+        binding->access = write.access;
+        binding->reserved[0] = 0u;
+        binding->reserved[1] = 0u;
+        resource_indices[descriptor->resource_index] = 1u;
+        if ((write.access & RIN_GPU_RESOURCE_READ) != 0u)
+            required_access |= RIN_VULKAN_PRODUCT_MEMORY_GPU_READ;
+        if ((write.access & RIN_GPU_RESOURCE_WRITE) != 0u)
+            required_access |= RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE;
+        if (!append_submission_resource(resources, &resource_count,
+                                        binding->allocation_handle,
+                                        required_access)) {
+            result = RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+            goto fail;
+        }
+    }
+    for (index = 0u; index < pipeline->descriptor_count; ++index)
+        if (resource_indices[index] == 0u) {
+            result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+            goto fail;
+        }
+    *packet_out = packet;
+    *packet_size_out = packet_size;
+    *resource_count_out = resource_count;
+    *ownership_updates_out = ownership_updates;
+    *ownership_update_count_out = pipeline->descriptor_count;
+    return RIN_VK_SUCCESS;
+
+fail:
+    free(packet);
+    free(ownership_updates);
+    return (RinVkResult)result;
 }
 
 static int ownership_semaphore_wait_matches(
@@ -6607,11 +6955,6 @@ static void commit_image_layout_updates(
                          __ATOMIC_RELEASE);
     }
 }
-
-typedef struct RinVkBufferOwnershipUpdate {
-    RinVkBufferSlot* buffer;
-    RinVkBufferOwnershipState state;
-} RinVkBufferOwnershipUpdate;
 
 static int buffer_ownership_wait_matches(
         struct RinVkDevice_T* device,
@@ -6863,6 +7206,10 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     RinVkSubmitInfo request;
     RinGpuVulkanCommandBufferV1*
         command_buffers[RIN_VK_MAX_SUBMIT_COMMAND_BUFFERS];
+    RinGpuVulkanComputePacketV1* validation_compute_packet = NULL;
+    size_t validation_compute_packet_size = 0u;
+    RinVkBufferOwnershipUpdate* validation_compute_ownership_updates = NULL;
+    uint32_t validation_compute_ownership_update_count = 0u;
     RinVulkanProductResourceV1
         resources[RIN_VULKAN_PRODUCT_MAX_RESOURCES_PER_SUBMISSION];
     RinGpuVulkanTransferPacketV2 validation_packet_v2;
@@ -6878,6 +7225,7 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     uint32_t resource_count = 0u;
     uint32_t pending_resource_use_count = 0u;
     uint32_t index;
+    int compute_submission = 0;
     int sync_locked = 0;
     int waits_ready = 1;
     RinVkImageSlot*
@@ -7119,11 +7467,36 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
             &g_command_runtime, request.commandBufferCount,
             command_buffers) != RIN_GPU_VULKAN_COMMAND_OK ||
         !validate_submission_query_events(device, request.commandBufferCount,
-                                           command_buffers) ||
-        !snapshot_submission_packet_v2(
-            device, queue_slot_value->queue_family_index, command_buffers,
-            request.commandBufferCount, &validation_packet_v2, resources,
-            &resource_count)) {
+                                           command_buffers)) {
+        result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        goto done;
+    }
+    for (index = 0u; index < request.commandBufferCount; ++index)
+        if (command_buffers[index]->compute_dispatch_count != 0u ||
+            command_buffers[index]->compute_pipeline_bound != 0u ||
+            command_buffers[index]->dispatch_compute_pipeline != 0u)
+            compute_submission = 1;
+    if (compute_submission) {
+        result = snapshot_compute_submission(
+            device, queue_slot_value->queue_family_index,
+            queue_slot_value->family_queue_index, queue_slot_value->queue_index,
+            command_buffers, request.commandBufferCount,
+            &validation_compute_packet, &validation_compute_packet_size,
+            resources, &resource_count, &validation_compute_ownership_updates,
+            &validation_compute_ownership_update_count);
+        if (result != RIN_VK_SUCCESS) goto done;
+        free(validation_compute_packet);
+        validation_compute_packet = NULL;
+        free(validation_compute_ownership_updates);
+        validation_compute_ownership_updates = NULL;
+        memset(&validation_packet_v2, 0, sizeof(validation_packet_v2));
+        validation_packet_v2.struct_size = sizeof(validation_packet_v2);
+        validation_packet_v2.version = RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_2;
+        resource_count = 0u;
+    } else if (!snapshot_submission_packet_v2(
+                   device, queue_slot_value->queue_family_index,
+                   command_buffers, request.commandBufferCount,
+                   &validation_packet_v2, resources, &resource_count)) {
         result = RIN_VK_ERROR_INITIALIZATION_FAILED;
         goto done;
     }
@@ -7173,28 +7546,48 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     slot->command_buffer_count = request.commandBufferCount;
     memcpy(slot->command_buffers, command_buffers,
            sizeof(*command_buffers) * request.commandBufferCount);
-    if (!snapshot_submission_packet_v2(
-                device, queue_slot_value->queue_family_index, command_buffers,
-                request.commandBufferCount, &slot->extended_packet,
-                slot->resources, &slot->resource_count) ||
-        rin_gpu_vulkan_command_buffers_mark_submitted(
+    if (compute_submission) {
+        result = snapshot_compute_submission(
+            device, queue_slot_value->queue_family_index,
+            queue_slot_value->family_queue_index, queue_slot_value->queue_index,
+            command_buffers, request.commandBufferCount, &slot->compute_packet,
+            &slot->compute_packet_size, slot->resources,
+            &slot->resource_count, &slot->compute_buffer_ownership_updates,
+            &slot->compute_buffer_ownership_update_count);
+        if (result != RIN_VK_SUCCESS) {
+            clear_submission_slot(slot);
+            goto done;
+        }
+    } else if (!snapshot_submission_packet_v2(
+                   device, queue_slot_value->queue_family_index,
+                   command_buffers, request.commandBufferCount,
+                   &slot->extended_packet, slot->resources,
+                   &slot->resource_count)) {
+        clear_submission_slot(slot);
+        result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        goto done;
+    }
+    if (rin_gpu_vulkan_command_buffers_mark_submitted(
             &g_command_runtime, request.commandBufferCount,
             command_buffers) != RIN_GPU_VULKAN_COMMAND_OK) {
         clear_submission_slot(slot);
         result = RIN_VK_ERROR_INITIALIZATION_FAILED;
         goto done;
     }
-    memset(&slot->routed_packet, 0, sizeof(slot->routed_packet));
-    slot->routed_packet.struct_size = sizeof(slot->routed_packet);
-    slot->routed_packet.version = RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_3;
-    slot->routed_packet.op_count = slot->extended_packet.op_count;
-    slot->routed_packet.queue_family_index =
-        queue_slot_value->queue_family_index;
-    slot->routed_packet.queue_index = queue_slot_value->family_queue_index;
-    slot->routed_packet.product_queue_id = queue_slot_value->queue_index;
-    memcpy(slot->routed_packet.operations, slot->extended_packet.operations,
-           sizeof(slot->routed_packet.operations[0]) *
-               slot->extended_packet.op_count);
+    if (!compute_submission) {
+        memset(&slot->routed_packet, 0, sizeof(slot->routed_packet));
+        slot->routed_packet.struct_size = sizeof(slot->routed_packet);
+        slot->routed_packet.version = RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_3;
+        slot->routed_packet.op_count = slot->extended_packet.op_count;
+        slot->routed_packet.queue_family_index =
+            queue_slot_value->queue_family_index;
+        slot->routed_packet.queue_index = queue_slot_value->family_queue_index;
+        slot->routed_packet.product_queue_id = queue_slot_value->queue_index;
+        memcpy(slot->routed_packet.operations,
+               slot->extended_packet.operations,
+               sizeof(slot->routed_packet.operations[0]) *
+                   slot->extended_packet.op_count);
+    }
     slot->wait_semaphore_count = request.waitSemaphoreCount;
     slot->signal_semaphore_count = request.signalSemaphoreCount;
     slot->fence = (RinVkFence)fence;
@@ -7277,6 +7670,8 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     }
 
 done:
+    free(validation_compute_packet);
+    free(validation_compute_ownership_updates);
     if (sync_locked) sync_unlock();
     __atomic_store_n(&queue_slot_value->submit_lock, 0u, __ATOMIC_RELEASE);
     return result;
@@ -8178,7 +8573,8 @@ void RIN_VKAPI_CALL vkCmdBindDescriptorSets(
                 ? device_slot((RinVkDevice)(void*)owner_address)
                 : NULL;
     layout = owner ? pipeline_layout_slot(owner, layout_handle) : NULL;
-    if (!owner || !layout || first_set > layout->set_layout_count ||
+    if (!owner || !layout || command->compute_dispatch_count != 0u ||
+        first_set > layout->set_layout_count ||
         descriptor_set_count > layout->set_layout_count - first_set) {
         rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime,
                                                      command);
@@ -8212,9 +8608,78 @@ void RIN_VKAPI_CALL vkCmdBindDescriptorSets(
         rin_gpu_vulkan_command_buffer_record_descriptor_bind(
             &g_command_runtime, command, first_set, set_handles,
             descriptor_set_count, dynamic_offsets, dynamic_offset_count) !=
-            RIN_GPU_VULKAN_COMMAND_OK)
+            RIN_GPU_VULKAN_COMMAND_OK) {
         rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime,
                                                      command);
+        return;
+    }
+    command->descriptor_bind_point = pipeline_bind_point;
+    for (index = 0u; index < descriptor_set_count; ++index)
+        command->descriptor_set_layouts[index] =
+            layout->set_layouts[first_set + index];
+}
+
+void RIN_VKAPI_CALL vkCmdBindPipeline(
+        RinVkCommandBuffer command_buffer, uint32_t pipeline_bind_point,
+        RinVkPipeline pipeline_handle) {
+    RinGpuVulkanCommandBufferV1* command =
+        (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
+    uintptr_t owner_address = 0u;
+    RinVkDevice owner_device;
+    if (rin_gpu_vulkan_command_buffer_owner(
+            &g_command_runtime, command, &owner_address) !=
+        RIN_GPU_VULKAN_COMMAND_OK) {
+        rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime,
+                                                     command);
+        return;
+    }
+    owner_device = (RinVkDevice)(void*)owner_address;
+    if (pipeline_bind_point != RIN_VK_PIPELINE_BIND_POINT_COMPUTE ||
+        pipeline_handle == 0u || !device_slot(owner_device) ||
+        command->compute_dispatch_count != 0u ||
+        command->lifecycle != RIN_GPU_VULKAN_COMMAND_BUFFER_RECORDING ||
+        !pipeline_slot(owner_device, pipeline_handle)) {
+        rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime,
+                                                     command);
+        return;
+    }
+    command->bound_compute_pipeline = pipeline_handle;
+    command->compute_pipeline_bound = 1u;
+}
+
+void RIN_VKAPI_CALL vkCmdDispatch(
+        RinVkCommandBuffer command_buffer, uint32_t group_count_x,
+        uint32_t group_count_y, uint32_t group_count_z) {
+    RinGpuVulkanCommandBufferV1* command =
+        (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
+    uintptr_t owner_address = 0u;
+    RinVkDevice owner_device;
+    if (rin_gpu_vulkan_command_buffer_owner(
+            &g_command_runtime, command, &owner_address) !=
+        RIN_GPU_VULKAN_COMMAND_OK) {
+        rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime,
+                                                     command);
+        return;
+    }
+    owner_device = (RinVkDevice)(void*)owner_address;
+    if (!device_slot(owner_device) ||
+        command->lifecycle != RIN_GPU_VULKAN_COMMAND_BUFFER_RECORDING ||
+        command->compute_pipeline_bound == 0u ||
+        command->bound_compute_pipeline == 0u ||
+        command->compute_dispatch_count != 0u || group_count_x == 0u ||
+        group_count_y == 0u || group_count_z == 0u ||
+        group_count_x > 65535u || group_count_y > 65535u ||
+        group_count_z > 65535u ||
+        !pipeline_slot(owner_device, command->bound_compute_pipeline)) {
+        rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime,
+                                                     command);
+        return;
+    }
+    command->dispatch_compute_pipeline = command->bound_compute_pipeline;
+    command->compute_group_count_x = group_count_x;
+    command->compute_group_count_y = group_count_y;
+    command->compute_group_count_z = group_count_z;
+    command->compute_dispatch_count = 1u;
 }
 
 typedef struct RinVkPipelineCacheBlobHeader {
@@ -8331,6 +8796,184 @@ void RIN_VKAPI_CALL vkDestroyShaderModule(
     sync_lock();
     module = shader_module_slot(device, shader_module);
     if (module) clear_shader_module_slot(module);
+    sync_unlock();
+}
+
+static RinVkResult create_compute_pipeline_one(
+        RinVkDevice device, const RinVkComputePipelineCreateInfo* info,
+        RinVkPipeline* pipeline_out) {
+    struct RinVkDevice_T* owner;
+    RinVkShaderModuleSlot* module;
+    RinVkPipelineLayoutSlot* layout;
+    RinVkPipelineSlot* pipeline;
+    RinSpirvTranslationInfoV1 translation;
+    RinVkDescriptorSetLayout set_layouts[
+        RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS];
+    uint32_t* spirv_copy = NULL;
+    uint8_t* shader_ir = NULL;
+    size_t spirv_size = 0u;
+    size_t shader_size = 0u;
+    uint32_t set_layout_count = 0u;
+    uint32_t index;
+    uint32_t slot_index = 0u;
+    const RinShaderHeaderV1* shader_header;
+    int translate_result;
+
+    if (!info || !pipeline_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    *pipeline_out = 0u;
+    if (info->sType != RIN_VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO ||
+        info->pNext || info->flags != 0u ||
+        info->stage.sType !=
+            RIN_VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO ||
+        info->stage.pNext || info->stage.flags != 0u ||
+        info->stage.stage != RIN_VK_SHADER_STAGE_COMPUTE_BIT ||
+        !info->stage.pName || info->stage.pSpecializationInfo ||
+        info->basePipelineHandle != 0u || info->basePipelineIndex != -1)
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+
+    sync_lock();
+    owner = device_slot(device);
+    module = owner ? shader_module_slot(device, info->stage.module) : NULL;
+    layout = owner ? pipeline_layout_slot(device, info->layout) : NULL;
+    if (!owner || !module || !layout ||
+        layout->set_layout_count == 0u ||
+        layout->set_layout_count >
+            RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS) {
+        sync_unlock();
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    }
+    spirv_copy = (uint32_t*)malloc(module->code_size);
+    spirv_size = module->code_size;
+    set_layout_count = layout->set_layout_count;
+    if (spirv_copy)
+        memcpy(spirv_copy, module->code, module->code_size);
+    memcpy(set_layouts, layout->set_layouts,
+           sizeof(set_layouts[0]) * set_layout_count);
+    sync_unlock();
+    if (!spirv_copy) return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+
+    shader_ir = (uint8_t*)malloc(RIN_SHADER_MAX_SOURCE_BYTES);
+    if (!shader_ir) {
+        free(spirv_copy);
+        return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+    memset(&translation, 0, sizeof(translation));
+    translate_result = ringpu_vulkan_graphics_translate_shader(
+        spirv_copy, spirv_size / sizeof(uint32_t),
+        RIN_SHADER_STAGE_COMPUTE, NULL, 0u, shader_ir,
+        RIN_SHADER_MAX_SOURCE_BYTES, &translation);
+    free(spirv_copy);
+    shader_header = (const RinShaderHeaderV1*)(const void*)shader_ir;
+    if (translate_result != RIN_GPU_VULKAN_GRAPHICS_OK ||
+        translation.descriptor_count == 0u ||
+        translation.descriptor_count > RIN_SPIRV_MAX_RESOURCES ||
+        shader_header->total_size < sizeof(RinShaderHeaderV1) ||
+        shader_header->total_size > RIN_SHADER_MAX_SOURCE_BYTES ||
+        shader_header->stage != RIN_SHADER_STAGE_COMPUTE ||
+        strcmp(info->stage.pName, translation.entry_name) != 0) {
+        free(shader_ir);
+        return translate_result == RIN_GPU_VULKAN_GRAPHICS_LIMIT
+                   ? RIN_VK_ERROR_OUT_OF_HOST_MEMORY
+                   : RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    }
+    shader_size = shader_header->total_size;
+    for (index = 0u; index < translation.descriptor_count; ++index) {
+        const RinSpirvDescriptorV1* descriptor =
+            &translation.descriptors[index];
+        uint32_t prior;
+        if (descriptor->set != 0u ||
+            descriptor->resource_kind != RIN_SHADER_RESOURCE_STORAGE_BUFFER ||
+            descriptor->resource_index >= RIN_SHADER_MAX_RESOURCES ||
+            descriptor->binding != descriptor->resource_index) {
+            free(shader_ir);
+            return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        }
+        for (prior = 0u; prior < index; ++prior)
+            if (translation.descriptors[prior].resource_index ==
+                    descriptor->resource_index ||
+                (translation.descriptors[prior].set == descriptor->set &&
+                 translation.descriptors[prior].binding ==
+                     descriptor->binding)) {
+                free(shader_ir);
+                return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+            }
+    }
+
+    sync_lock();
+    owner = device_slot(device);
+    layout = owner ? pipeline_layout_slot(device, info->layout) : NULL;
+    if (!owner || !layout ||
+        layout->set_layout_count != set_layout_count ||
+        layout->set_layout_count == 0u ||
+        layout->set_layout_count > RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS ||
+        memcmp(set_layouts, layout->set_layouts,
+               sizeof(set_layouts[0]) * layout->set_layout_count) != 0) {
+        sync_unlock();
+        free(shader_ir);
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    }
+    pipeline = reserve_pipeline_slot(owner, &slot_index);
+    if (!pipeline) {
+        sync_unlock();
+        free(shader_ir);
+        return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+    pipeline->set_layout_count = layout->set_layout_count;
+    pipeline->descriptor_count = translation.descriptor_count;
+    pipeline->shader_size = (uint32_t)shader_size;
+    memcpy(pipeline->set_layouts, set_layouts,
+           sizeof(set_layouts[0]) * layout->set_layout_count);
+    memcpy(pipeline->descriptors, translation.descriptors,
+           sizeof(pipeline->descriptors[0]) * translation.descriptor_count);
+    pipeline->shader_ir = shader_ir;
+    __atomic_store_n(&pipeline->state, 1u, __ATOMIC_RELEASE);
+    *pipeline_out = resource_handle(RIN_VK_PIPELINE_TAG, slot_index,
+                                    pipeline->generation);
+    sync_unlock();
+    return RIN_VK_SUCCESS;
+}
+
+RinVkResult RIN_VKAPI_CALL vkCreateComputePipelines(
+        RinVkDevice device, RinVkPipelineCache pipeline_cache,
+        uint32_t create_info_count,
+        const RinVkComputePipelineCreateInfo* create_infos,
+        const void* allocator, RinVkPipeline* pipelines) {
+    struct RinVkDevice_T* owner = device_slot(device);
+    RinVkResult result = RIN_VK_SUCCESS;
+    uint32_t index;
+    (void)allocator;
+    if (create_info_count == 0u ||
+        create_info_count > RIN_VK_MAX_PIPELINES || !create_infos ||
+        !pipelines)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    for (index = 0u; index < create_info_count; ++index) pipelines[index] = 0u;
+    if (!owner ||
+        (pipeline_cache != 0u && !pipeline_cache_slot(device, pipeline_cache)))
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    for (index = 0u; index < create_info_count; ++index) {
+        result = create_compute_pipeline_one(device, &create_infos[index],
+                                             &pipelines[index]);
+        if (result != RIN_VK_SUCCESS) break;
+    }
+    if (result != RIN_VK_SUCCESS) {
+        while (index != 0u) {
+            --index;
+            vkDestroyPipeline(device, pipelines[index], NULL);
+            pipelines[index] = 0u;
+        }
+    }
+    return result;
+}
+
+void RIN_VKAPI_CALL vkDestroyPipeline(RinVkDevice device,
+                                      RinVkPipeline handle,
+                                      const void* allocator) {
+    RinVkPipelineSlot* pipeline;
+    (void)allocator;
+    if (handle == 0u) return;
+    sync_lock();
+    pipeline = pipeline_slot(device, handle);
+    if (pipeline) clear_pipeline_slot(pipeline);
     sync_unlock();
 }
 
@@ -8632,8 +9275,16 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
         return (RinVkVoidFunction)vkCreatePipelineLayout;
     if (name_equal(name, "vkDestroyPipelineLayout"))
         return (RinVkVoidFunction)vkDestroyPipelineLayout;
+    if (name_equal(name, "vkCreateComputePipelines"))
+        return (RinVkVoidFunction)vkCreateComputePipelines;
+    if (name_equal(name, "vkDestroyPipeline"))
+        return (RinVkVoidFunction)vkDestroyPipeline;
     if (name_equal(name, "vkCmdBindDescriptorSets"))
         return (RinVkVoidFunction)vkCmdBindDescriptorSets;
+    if (name_equal(name, "vkCmdBindPipeline"))
+        return (RinVkVoidFunction)vkCmdBindPipeline;
+    if (name_equal(name, "vkCmdDispatch"))
+        return (RinVkVoidFunction)vkCmdDispatch;
     if (name_equal(name, "vkCreatePipelineCache"))
         return (RinVkVoidFunction)vkCreatePipelineCache;
     if (name_equal(name, "vkDestroyPipelineCache"))

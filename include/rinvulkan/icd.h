@@ -27,6 +27,10 @@
 #define RIN_VK_MAX_EXTENSION_NAME_SIZE 256u
 #define RIN_VK_MAX_DESCRIPTION_SIZE 256u
 
+#define RIN_VK_PIPELINE_BIND_POINT_GRAPHICS 0u
+#define RIN_VK_PIPELINE_BIND_POINT_COMPUTE 1u
+#define RIN_VK_SHADER_STAGE_COMPUTE_BIT UINT32_C(0x00000020)
+
 #define RIN_VK_STRUCTURE_TYPE_APPLICATION_INFO 0
 #define RIN_VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO 1
 #define RIN_VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO 2
@@ -39,6 +43,8 @@
 #define RIN_VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO 14
 #define RIN_VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO 15
 #define RIN_VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO 17
+#define RIN_VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO 18
+#define RIN_VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO 29
 #define RIN_VK_STRUCTURE_TYPE_EVENT_CREATE_INFO 10
 #define RIN_VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO 28
 #define RIN_VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO 31
@@ -222,6 +228,7 @@ typedef uint64_t RinVkDescriptorPool;
 typedef uint64_t RinVkDescriptorSet;
 typedef uint64_t RinVkPipelineLayout;
 typedef uint64_t RinVkPipelineCache;
+typedef uint64_t RinVkPipeline;
 typedef uint64_t RinVkShaderModule;
 typedef uint64_t RinVkQueryPool;
 typedef uint64_t RinVkEvent;
@@ -1142,6 +1149,26 @@ typedef struct RinVkShaderModuleCreateInfo {
     const uint32_t* pCode;
 } RinVkShaderModuleCreateInfo;
 
+typedef struct RinVkPipelineShaderStageCreateInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    uint32_t stage;
+    RinVkShaderModule module;
+    const char* pName;
+    const void* pSpecializationInfo;
+} RinVkPipelineShaderStageCreateInfo;
+
+typedef struct RinVkComputePipelineCreateInfo {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    RinVkPipelineShaderStageCreateInfo stage;
+    RinVkPipelineLayout layout;
+    RinVkPipeline basePipelineHandle;
+    int32_t basePipelineIndex;
+} RinVkComputePipelineCreateInfo;
+
 typedef struct RinVkDescriptorBufferInfo {
     RinVkBuffer buffer;
     uint64_t offset;
@@ -1193,8 +1220,12 @@ typedef struct RinVkSamplerCreateInfo {
 
 #define RIN_VK_BUFFER_USAGE_TRANSFER_SRC_BIT UINT32_C(0x00000001)
 #define RIN_VK_BUFFER_USAGE_TRANSFER_DST_BIT UINT32_C(0x00000002)
+#define RIN_VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT UINT32_C(0x00000010)
+#define RIN_VK_BUFFER_USAGE_STORAGE_BUFFER_BIT UINT32_C(0x00000020)
 #define RIN_VK_BUFFER_USAGE_KNOWN \
-    (RIN_VK_BUFFER_USAGE_TRANSFER_SRC_BIT | RIN_VK_BUFFER_USAGE_TRANSFER_DST_BIT)
+    (RIN_VK_BUFFER_USAGE_TRANSFER_SRC_BIT | RIN_VK_BUFFER_USAGE_TRANSFER_DST_BIT | \
+     RIN_VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | \
+     RIN_VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)
 #define RIN_VK_IMAGE_TYPE_2D 1u
 #define RIN_VK_FORMAT_R8G8B8A8_UNORM 37
 #define RIN_VK_FORMAT_D32_SFLOAT 126
@@ -1923,6 +1954,14 @@ RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkDestroyPipelineLayout(RinVkDevice device, RinVkPipelineLayout layout,
                         const void* allocator);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkCreateComputePipelines(RinVkDevice device, RinVkPipelineCache pipeline_cache,
+                         uint32_t create_info_count,
+                         const RinVkComputePipelineCreateInfo* create_infos,
+                         const void* allocator, RinVkPipeline* pipelines);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkDestroyPipeline(RinVkDevice device, RinVkPipeline pipeline,
+                  const void* allocator);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkCreatePipelineCache(RinVkDevice device,
                       const RinVkPipelineCacheCreateInfo* create_info,
                       const void* allocator, RinVkPipelineCache* cache_out);
@@ -1952,6 +1991,12 @@ vkCmdBindDescriptorSets(RinVkCommandBuffer command_buffer,
                          const RinVkDescriptorSet* descriptor_sets,
                          uint32_t dynamic_offset_count,
                          const uint32_t* dynamic_offsets);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdBindPipeline(RinVkCommandBuffer command_buffer,
+                  uint32_t pipeline_bind_point, RinVkPipeline pipeline);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdDispatch(RinVkCommandBuffer command_buffer, uint32_t group_count_x,
+              uint32_t group_count_y, uint32_t group_count_z);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkCreateQueryPool(RinVkDevice device,
                   const RinVkQueryPoolCreateInfo* create_info,

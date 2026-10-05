@@ -90,9 +90,19 @@ static void reset_recording(RinGpuVulkanCommandBufferV1* buffer) {
     buffer->descriptor_bind_first_set = 0u;
     buffer->descriptor_bind_set_count = 0u;
     buffer->descriptor_dynamic_offset_count = 0u;
+    buffer->descriptor_bind_point = 0u;
+    buffer->compute_pipeline_bound = 0u;
     memset(buffer->descriptor_sets, 0, sizeof(buffer->descriptor_sets));
+    memset(buffer->descriptor_set_layouts, 0,
+           sizeof(buffer->descriptor_set_layouts));
     memset(buffer->descriptor_dynamic_offsets, 0,
            sizeof(buffer->descriptor_dynamic_offsets));
+    buffer->bound_compute_pipeline = 0u;
+    buffer->dispatch_compute_pipeline = 0u;
+    buffer->compute_dispatch_count = 0u;
+    buffer->compute_group_count_x = 0u;
+    buffer->compute_group_count_y = 0u;
+    buffer->compute_group_count_z = 0u;
     buffer->barrier_count = 0u;
     buffer->reserved_barrier = 0u;
     memset(buffer->barriers, 0, sizeof(buffer->barriers));

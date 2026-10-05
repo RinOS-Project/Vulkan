@@ -101,6 +101,11 @@ int rin_gpu_vulkan_descriptor_set_matches_layout(
     const RinGpuVulkanDescriptorRuntimeV1* runtime,
     RinGpuVulkanDescriptorHandleV1 set,
     RinGpuVulkanDescriptorHandleV1 layout);
+int rin_gpu_vulkan_descriptor_set_get_write(
+    const RinGpuVulkanDescriptorRuntimeV1* runtime,
+    RinGpuVulkanDescriptorHandleV1 set, uint32_t set_index,
+    uint32_t binding, uint32_t array_element,
+    RinGpuVulkanDescriptorWriteV1* write_out);
 int rin_gpu_vulkan_descriptor_set_update(
     RinGpuVulkanDescriptorRuntimeV1* runtime,
     RinGpuVulkanDescriptorHandleV1 set,
