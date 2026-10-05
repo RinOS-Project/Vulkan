@@ -748,6 +748,55 @@ int main(void) {
                   physical, display_properties[0].display, &count,
                   mode_properties) == RIN_VK_ERROR_INITIALIZATION_FAILED);
     }
+    {
+        RinVkSurfaceKHR live_surfaces[TEST_DISPLAY_SURFACE_CAPACITY];
+        uint32_t surface_index;
+        provider.display_count = 1u;
+        count = 1u;
+        CHECK(vkGetPhysicalDeviceDisplayPropertiesKHR(
+                  physical, &count, display_properties) == RIN_VK_SUCCESS);
+        CHECK(count == 1u);
+        count = 2u;
+        CHECK(vkGetDisplayModePropertiesKHR(
+                  physical, display_properties[0].display, &count,
+                  mode_properties) == RIN_VK_SUCCESS);
+        CHECK(count == 2u);
+        surface_create_info.displayMode = mode_properties[0].displayMode;
+        surface_create_info.imageExtent.width = 1600u;
+        surface_create_info.imageExtent.height = 900u;
+        for (surface_index = 0u;
+             surface_index < TEST_DISPLAY_SURFACE_CAPACITY; ++surface_index) {
+            CHECK(vkCreateDisplayPlaneSurfaceKHR(
+                      instance, &surface_create_info, NULL,
+                      &live_surfaces[surface_index]) == RIN_VK_SUCCESS);
+        }
+        vkDestroyInstance(instance, NULL);
+        instance = NULL;
+        CHECK(vkCreateInstance(&instance_create, NULL, &instance) ==
+              RIN_VK_SUCCESS);
+        CHECK(vkGetInstanceProcAddr(
+                  instance, "vkCreateDisplayPlaneSurfaceKHR") == NULL);
+        count = 1u;
+        CHECK(vkEnumeratePhysicalDevices(
+                  instance, &count, physical_devices) == RIN_VK_SUCCESS);
+        CHECK(count == 1u);
+        physical = physical_devices[0];
+        count = 1u;
+        CHECK(vkGetPhysicalDeviceDisplayPropertiesKHR(
+                  physical, &count, display_properties) == RIN_VK_SUCCESS);
+        CHECK(count == 1u);
+        count = 2u;
+        CHECK(vkGetDisplayModePropertiesKHR(
+                  physical, display_properties[0].display, &count,
+                  mode_properties) == RIN_VK_SUCCESS);
+        CHECK(count == 2u);
+        surface_create_info.displayMode = mode_properties[0].displayMode;
+        CHECK(vkCreateDisplayPlaneSurfaceKHR(instance, &surface_create_info,
+                  NULL, &created_surface) == RIN_VK_SUCCESS);
+        CHECK(created_surface != 0u && created_surface != live_surfaces[0]);
+        vkDestroySurfaceKHR(instance, created_surface, NULL);
+        created_surface = 0u;
+    }
     exit_code = 0;
 
 cleanup:
