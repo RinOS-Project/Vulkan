@@ -17,6 +17,14 @@ _Static_assert(offsetof(RinVulkanWsiPlatformV3, query_surface_support) ==
 _Static_assert(sizeof(RinVulkanWsiPlatformV3) ==
                    (sizeof(void*) == 8u ? 184u : 144u),
                "Vulkan WSI V3 ABI drift");
+_Static_assert(sizeof(RinVulkanWsiSurfacePropertiesV4) == 252u,
+               "Vulkan WSI surface properties ABI drift");
+_Static_assert(offsetof(RinVulkanWsiPlatformV4, query_surface_properties) ==
+                   sizeof(RinVulkanWsiPlatformV3),
+               "Vulkan WSI V4 callback prefix drift");
+_Static_assert(sizeof(RinVulkanWsiPlatformV4) ==
+                   (sizeof(void*) == 8u ? 224u : 180u),
+               "Vulkan WSI V4 ABI drift");
 
 #if UINTPTR_MAX == UINT64_MAX
 _Static_assert(sizeof(RinVkDisplayPropertiesKHR) == 48u,

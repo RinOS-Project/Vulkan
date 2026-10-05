@@ -113,6 +113,16 @@
 #define RIN_VK_KHR_DISPLAY_SPEC_VERSION 23u
 #define RIN_VK_KHR_SWAPCHAIN_SPEC_VERSION 70u
 #define RIN_VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR UINT32_C(0x00000001)
+#define RIN_VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR UINT32_C(0x00000001)
+#define RIN_VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR UINT32_C(0x00000002)
+#define RIN_VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR UINT32_C(0x00000004)
+#define RIN_VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR UINT32_C(0x00000008)
+#define RIN_VK_COMPOSITE_ALPHA_KNOWN_BITS_KHR UINT32_C(0x0000000f)
+#define RIN_VK_PRESENT_MODE_IMMEDIATE_KHR 0
+#define RIN_VK_PRESENT_MODE_MAILBOX_KHR 1
+#define RIN_VK_PRESENT_MODE_FIFO_KHR 2
+#define RIN_VK_PRESENT_MODE_FIFO_RELAXED_KHR 3
+#define RIN_VK_COLOR_SPACE_SRGB_NONLINEAR_KHR 0
 #define RIN_VK_EXT_DEBUG_UTILS_EXTENSION "VK_EXT_debug_utils"
 #define RIN_VK_DEBUG_UTILS_SPEC_VERSION 2u
 #define RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT 0x00000001u
@@ -258,6 +268,7 @@ typedef uint64_t RinVkSurfaceKHR;
 typedef uint64_t RinVkDisplayKHR;
 typedef uint64_t RinVkDisplayModeKHR;
 typedef uint64_t RinVkSwapchainKHR;
+typedef int32_t RinVkPresentModeKHR;
 typedef uint64_t RinVkSampler;
 typedef uint64_t RinVkDeviceMemory;
 typedef uint64_t RinVkFence;
@@ -2055,6 +2066,10 @@ int rin_gpu_vulkan_icd_bind_wsi_platform_v3(
     RinVulkanWsiPlatformV3* platform);
 int rin_gpu_vulkan_icd_unbind_wsi_platform_v3(
     RinVulkanWsiPlatformV3* platform);
+int rin_gpu_vulkan_icd_bind_wsi_platform_v4(
+    RinVulkanWsiPlatformV4* platform);
+int rin_gpu_vulkan_icd_unbind_wsi_platform_v4(
+    RinVulkanWsiPlatformV4* platform);
 /* Product completion is driven by the RinGPU service loop, not by a forged
  * synchronous Vulkan wait.  It retires only work reported complete by the
  * product runtime and leaves still-pending command buffers leased. */
@@ -2174,6 +2189,18 @@ RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkGetPhysicalDeviceSurfaceSupportKHR(
     RinVkPhysicalDevice physical_device, uint32_t queue_family_index,
     RinVkSurfaceKHR surface, uint32_t* supported_out);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+    RinVkPhysicalDevice physical_device, RinVkSurfaceKHR surface,
+    RinVkSurfaceCapabilitiesKHR* capabilities_out);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkGetPhysicalDeviceSurfaceFormatsKHR(
+    RinVkPhysicalDevice physical_device, RinVkSurfaceKHR surface,
+    uint32_t* format_count, RinVkSurfaceFormatKHR* formats);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkGetPhysicalDeviceSurfacePresentModesKHR(
+    RinVkPhysicalDevice physical_device, RinVkSurfaceKHR surface,
+    uint32_t* present_mode_count, RinVkPresentModeKHR* present_modes);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkGetPhysicalDeviceDisplayPlanePropertiesKHR(
     RinVkPhysicalDevice physical_device, uint32_t* property_count,

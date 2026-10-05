@@ -15,6 +15,7 @@ typedef struct TestWsiProvider {
     int query_planes_result;
     int query_plane_capabilities_result;
     int query_surface_support_result;
+    int query_surface_properties_result;
     uint32_t display_count;
     uint32_t mode_count;
     uint32_t plane_count;
@@ -22,6 +23,7 @@ typedef struct TestWsiProvider {
     uint32_t present_call_count;
     uint32_t surface_support;
     uint32_t surface_support_calls;
+    uint32_t surface_properties_calls;
     uint32_t destroy_surface_during_query;
     uint32_t expected_queue_flags;
     uint32_t expected_queue_count;
@@ -33,6 +35,7 @@ typedef struct TestWsiProvider {
     RinVulkanWsiDisplayPlaneV2 planes[RIN_VULKAN_WSI_MAX_PLANES];
     uint64_t supported_display_cookies[RIN_VULKAN_WSI_MAX_DISPLAYS];
     RinVulkanWsiPlaneCapabilitiesV2 plane_capabilities;
+    RinVulkanWsiSurfacePropertiesV4 surface_properties;
 } TestWsiProvider;
 
 static void make_profile(RinGpuVulkanPhysicalDeviceV2* profile) {
@@ -158,6 +161,40 @@ static void make_display_provider(TestWsiProvider* provider) {
     provider->plane_capabilities.min_dst_height = 1u;
     provider->plane_capabilities.max_dst_width = 4096u;
     provider->plane_capabilities.max_dst_height = 2160u;
+
+    provider->surface_properties.struct_size =
+        sizeof(provider->surface_properties);
+    provider->surface_properties.version =
+        RIN_VULKAN_WSI_PLATFORM_V4_VERSION;
+    provider->surface_properties.min_image_count = 2u;
+    provider->surface_properties.max_image_count = 3u;
+    provider->surface_properties.current_extent_width = UINT32_MAX;
+    provider->surface_properties.current_extent_height = UINT32_MAX;
+    provider->surface_properties.min_image_extent_width = 640u;
+    provider->surface_properties.min_image_extent_height = 480u;
+    provider->surface_properties.max_image_extent_width = 1920u;
+    provider->surface_properties.max_image_extent_height = 1080u;
+    provider->surface_properties.max_image_array_layers = 1u;
+    provider->surface_properties.supported_transforms =
+        RIN_VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    provider->surface_properties.current_transform =
+        RIN_VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    provider->surface_properties.supported_composite_alpha =
+        RIN_VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR |
+        RIN_VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
+    provider->surface_properties.supported_usage_flags =
+        RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+        RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    provider->surface_properties.format_count = 1u;
+    provider->surface_properties.formats[0].format =
+        RIN_VK_FORMAT_R8G8B8A8_UNORM;
+    provider->surface_properties.formats[0].color_space =
+        RIN_VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    provider->surface_properties.present_mode_count = 2u;
+    provider->surface_properties.present_modes[0] =
+        RIN_VK_PRESENT_MODE_IMMEDIATE_KHR;
+    provider->surface_properties.present_modes[1] =
+        RIN_VK_PRESENT_MODE_FIFO_KHR;
 }
 
 static int query_displays(void* context, uint64_t device_generation,
@@ -343,6 +380,30 @@ static int query_surface_support(void* context, uint64_t device_generation,
     return RIN_VULKAN_WSI_PLATFORM_OK;
 }
 
+static int query_surface_properties(
+    void* context, uint64_t device_generation, uint64_t display_cookie,
+    uint64_t output_generation, uint64_t mode_cookie, uint32_t plane_index,
+    RinVulkanWsiSurfacePropertiesV4* properties_out) {
+    TestWsiProvider* provider = (TestWsiProvider*)context;
+    if (!provider || !properties_out)
+        return RIN_VULKAN_WSI_PLATFORM_INVALID_ARGUMENT;
+    ++provider->surface_properties_calls;
+    if (provider->query_surface_properties_result !=
+        RIN_VULKAN_WSI_PLATFORM_OK)
+        return provider->query_surface_properties_result;
+    if (device_generation != provider->device_generation)
+        return RIN_VULKAN_WSI_PLATFORM_DEVICE_LOST;
+    if (display_cookie != provider->display.display_cookie ||
+        output_generation != provider->output_generation)
+        return RIN_VULKAN_WSI_PLATFORM_OUT_OF_DATE;
+    if ((mode_cookie != provider->modes[0].mode_cookie &&
+         mode_cookie != provider->modes[1].mode_cookie) ||
+        plane_index >= provider->plane_count)
+        return RIN_VULKAN_WSI_PLATFORM_UNSUPPORTED;
+    *properties_out = provider->surface_properties;
+    return RIN_VULKAN_WSI_PLATFORM_OK;
+}
+
 int main(void) {
     RinGpuVulkanPhysicalDeviceV2 profile;
     RinGpuVulkanRuntimeV1 runtime;
@@ -350,6 +411,7 @@ int main(void) {
     RinVulkanWsiPlatformV1 legacy_wsi;
     RinVulkanWsiPlatformV2 wsi;
     RinVulkanWsiPlatformV3 wsi_v3;
+    RinVulkanWsiPlatformV4 wsi_v4;
     TestWsiProvider provider;
     RinVkApplicationInfo application;
     RinVkInstanceCreateInfo instance_create;
@@ -429,6 +491,11 @@ int main(void) {
     wsi_v3.query_plane_supported_displays = query_plane_supported_displays;
     wsi_v3.query_plane_capabilities = query_plane_capabilities;
     wsi_v3.query_surface_support = query_surface_support;
+    memset(&wsi_v4, 0, sizeof(wsi_v4));
+    memcpy(&wsi_v4, &wsi_v3, sizeof(wsi_v3));
+    wsi_v4.struct_size = sizeof(wsi_v4);
+    wsi_v4.version = RIN_VULKAN_WSI_PLATFORM_V4_VERSION;
+    wsi_v4.query_surface_properties = query_surface_properties;
     provider.expected_queue_flags = RIN_GPU_VK_QUEUE_GRAPHICS |
                                    RIN_GPU_VK_QUEUE_COMPUTE |
                                    RIN_GPU_VK_QUEUE_TRANSFER;
@@ -455,6 +522,14 @@ int main(void) {
     CHECK(rin_gpu_vulkan_icd_bind_wsi_platform_v3(&wsi_v3) ==
           RIN_GPU_VULKAN_INVALID_ARGUMENT);
     wsi_v3.query_surface_support = query_surface_support;
+    CHECK(rin_gpu_vulkan_icd_bind_wsi_platform_v3(&wsi_v3) ==
+          RIN_GPU_VULKAN_OK);
+    CHECK(rin_gpu_vulkan_icd_unbind_wsi_platform_v3(&wsi_v3) ==
+          RIN_GPU_VULKAN_OK);
+    wsi_v4.query_surface_properties = NULL;
+    CHECK(rin_gpu_vulkan_icd_bind_wsi_platform_v4(&wsi_v4) ==
+          RIN_GPU_VULKAN_INVALID_ARGUMENT);
+    wsi_v4.query_surface_properties = query_surface_properties;
 
     count = 2u;
     CHECK(vkEnumerateInstanceExtensionProperties(NULL, &count, extensions) ==
@@ -507,6 +582,18 @@ int main(void) {
               instance, "vkGetPhysicalDeviceSurfaceSupportKHR") == NULL);
     CHECK(vk_icdGetPhysicalDeviceProcAddr(
               instance, "vkGetPhysicalDeviceSurfaceSupportKHR") == NULL);
+    CHECK(vkGetInstanceProcAddr(
+              instance, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR") == NULL);
+    CHECK(vk_icdGetPhysicalDeviceProcAddr(
+              instance, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR") == NULL);
+    CHECK(vkGetInstanceProcAddr(
+              instance, "vkGetPhysicalDeviceSurfaceFormatsKHR") == NULL);
+    CHECK(vk_icdGetPhysicalDeviceProcAddr(
+              instance, "vkGetPhysicalDeviceSurfaceFormatsKHR") == NULL);
+    CHECK(vkGetInstanceProcAddr(
+              instance, "vkGetPhysicalDeviceSurfacePresentModesKHR") == NULL);
+    CHECK(vk_icdGetPhysicalDeviceProcAddr(
+              instance, "vkGetPhysicalDeviceSurfacePresentModesKHR") == NULL);
 
     count = 0u;
     CHECK(vkEnumeratePhysicalDevices(instance, &count, NULL) == RIN_VK_SUCCESS);
@@ -520,10 +607,10 @@ int main(void) {
     count = 0u;
     CHECK(vkGetPhysicalDeviceDisplayPropertiesKHR(physical, &count, NULL) ==
           RIN_VK_ERROR_EXTENSION_NOT_PRESENT);
-    CHECK(rin_gpu_vulkan_icd_bind_wsi_platform_v3(&wsi_v3) ==
+    CHECK(rin_gpu_vulkan_icd_bind_wsi_platform_v4(&wsi_v4) ==
           RIN_GPU_VULKAN_OK);
     wsi_bound = 1u;
-    CHECK(rin_gpu_vulkan_icd_unbind_wsi_platform_v3(&wsi_v3) ==
+    CHECK(rin_gpu_vulkan_icd_unbind_wsi_platform_v4(&wsi_v4) ==
           RIN_GPU_VULKAN_BUSY);
 
     count = 0u;
@@ -687,6 +774,110 @@ int main(void) {
     created_surface = 0u;
     CHECK(vkCreateDisplayPlaneSurfaceKHR(instance, &surface_create_info, NULL,
               &created_surface) == RIN_VK_SUCCESS);
+    {
+        RinVkSurfaceCapabilitiesKHR capabilities;
+        RinVkSurfaceFormatKHR formats[2];
+        RinVkPresentModeKHR present_modes[2];
+        CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+                  physical, created_surface, &capabilities) == RIN_VK_SUCCESS);
+        CHECK(capabilities.minImageCount == 2u &&
+              capabilities.maxImageCount == 3u &&
+              capabilities.currentExtent.width == UINT32_MAX &&
+              capabilities.currentExtent.height == UINT32_MAX &&
+              capabilities.minImageExtent.width == 640u &&
+              capabilities.maxImageExtent.height == 1080u &&
+              capabilities.maxImageArrayLayers == 1u &&
+              capabilities.supportedUsageFlags ==
+                  (RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                   RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT));
+        provider.surface_properties.max_image_count = 0u;
+        CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+                  physical, created_surface, &capabilities) == RIN_VK_SUCCESS);
+        CHECK(capabilities.maxImageCount == 64u);
+        provider.surface_properties.max_image_count = 3u;
+        count = 0u;
+        CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(
+                  physical, created_surface, &count, NULL) == RIN_VK_SUCCESS);
+        CHECK(count == 1u);
+        count = 0u;
+        CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(
+                  physical, created_surface, &count, formats) ==
+              RIN_VK_INCOMPLETE);
+        CHECK(count == 0u);
+        count = 1u;
+        CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(
+                  physical, created_surface, &count, formats) ==
+              RIN_VK_SUCCESS);
+        CHECK(count == 1u &&
+              formats[0].format == RIN_VK_FORMAT_R8G8B8A8_UNORM &&
+              formats[0].colorSpace == RIN_VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
+        count = 0u;
+        CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(
+                  physical, created_surface, &count, NULL) == RIN_VK_SUCCESS);
+        CHECK(count == 2u);
+        count = 1u;
+        CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(
+                  physical, created_surface, &count, present_modes) ==
+              RIN_VK_INCOMPLETE);
+        CHECK(count == 1u &&
+              present_modes[0] == RIN_VK_PRESENT_MODE_IMMEDIATE_KHR);
+        count = 2u;
+        CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(
+                  physical, created_surface, &count, present_modes) ==
+              RIN_VK_SUCCESS);
+        CHECK(count == 2u &&
+              present_modes[1] == RIN_VK_PRESENT_MODE_FIFO_KHR);
+
+        provider.surface_properties.supported_usage_flags |= UINT32_C(0x8000);
+        CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+                  physical, created_surface, &capabilities) ==
+              RIN_VK_ERROR_DEVICE_LOST);
+        CHECK(memcmp(&capabilities, &(RinVkSurfaceCapabilitiesKHR){0},
+                     sizeof(capabilities)) == 0);
+        provider.surface_properties.supported_usage_flags &=
+            ~UINT32_C(0x8000);
+        provider.surface_properties.min_image_count = 4u;
+        CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+                  physical, created_surface, &capabilities) ==
+              RIN_VK_ERROR_DEVICE_LOST);
+        CHECK(memcmp(&capabilities, &(RinVkSurfaceCapabilitiesKHR){0},
+                     sizeof(capabilities)) == 0);
+        provider.surface_properties.min_image_count = 2u;
+        provider.surface_properties.formats[0].format =
+            RIN_VK_FORMAT_D32_SFLOAT;
+        count = 2u;
+        CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(
+                  physical, created_surface, &count, formats) ==
+              RIN_VK_ERROR_DEVICE_LOST);
+        CHECK(count == 0u);
+        provider.surface_properties.formats[0].format =
+            RIN_VK_FORMAT_R8G8B8A8_UNORM;
+        provider.surface_properties.format_count = 2u;
+        provider.surface_properties.formats[1] =
+            provider.surface_properties.formats[0];
+        count = 2u;
+        CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(
+                  physical, created_surface, &count, formats) ==
+              RIN_VK_ERROR_DEVICE_LOST);
+        CHECK(count == 0u);
+        provider.surface_properties.format_count = 1u;
+        provider.surface_properties.present_modes[1] =
+            RIN_VK_PRESENT_MODE_IMMEDIATE_KHR;
+        count = 2u;
+        CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(
+                  physical, created_surface, &count, present_modes) ==
+              RIN_VK_ERROR_DEVICE_LOST);
+        CHECK(count == 0u);
+        provider.surface_properties.present_modes[1] =
+            RIN_VK_PRESENT_MODE_FIFO_KHR;
+        provider.query_surface_properties_result =
+            RIN_VULKAN_WSI_PLATFORM_UNSUPPORTED;
+        CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+                  physical, created_surface, &capabilities) ==
+              RIN_VK_ERROR_FEATURE_NOT_PRESENT);
+        provider.query_surface_properties_result =
+            RIN_VULKAN_WSI_PLATFORM_OK;
+    }
     CHECK(provider.present_call_count == 0u &&
           provider.display.current_mode_cookie == UINT64_C(0xabc2) &&
           provider.output_generation == 11u);
@@ -832,6 +1023,11 @@ int main(void) {
               RIN_VK_ERROR_OUT_OF_DATE_KHR);
         CHECK(surface_supported == 0u &&
               provider.surface_support_calls == support_calls_before + 1u);
+        count = 0u;
+        CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(
+                  physical, stale_output_surface, &count, NULL) ==
+              RIN_VK_ERROR_OUT_OF_DATE_KHR);
+        CHECK(count == 0u);
         count = 2u;
         CHECK(vkGetDisplayModePropertiesKHR(
                   physical, old_display, &count, mode_properties) ==
@@ -938,7 +1134,7 @@ cleanup:
     if (foreign_instance) vkDestroyInstance(foreign_instance, NULL);
     if (instance) vkDestroyInstance(instance, NULL);
     if (wsi_bound &&
-        rin_gpu_vulkan_icd_unbind_wsi_platform_v3(&wsi_v3) !=
+        rin_gpu_vulkan_icd_unbind_wsi_platform_v4(&wsi_v4) !=
             RIN_GPU_VULKAN_OK)
         exit_code = 1;
     if (product_bound &&
