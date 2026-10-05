@@ -318,6 +318,7 @@ int main(void) {
     RinVkDisplayModeKHR created_mode = 0u;
     RinVkDisplaySurfaceCreateInfoKHR surface_create_info;
     RinVkSurfaceKHR created_surface = 0u;
+    RinVkSurfaceKHR stale_output_surface = 0u;
     RinVkDisplayPlanePropertiesKHR plane_properties[1];
     RinVkDisplayPlaneCapabilitiesKHR plane_capabilities;
     RinVkDisplayKHR supported_displays[1];
@@ -681,6 +682,9 @@ int main(void) {
     {
         const RinVkDisplayKHR old_display = display_properties[0].display;
         const char* const old_display_name = display_properties[0].displayName;
+        CHECK(vkCreateDisplayPlaneSurfaceKHR(instance, &surface_create_info,
+                  NULL, &stale_output_surface) == RIN_VK_SUCCESS);
+        CHECK(stale_output_surface != 0u);
         provider.output_generation += 1u;
         provider.display.output_generation = provider.output_generation;
         provider.planes[0].output_generation = provider.output_generation;
@@ -701,6 +705,13 @@ int main(void) {
               display_properties[0].physicalResolution.width == 1600u &&
               display_properties[0].physicalResolution.height == 900u &&
               strcmp(old_display_name, "RinOS primary") == 0);
+        created_surface = UINT64_C(0xfeed);
+        CHECK(vkCreateDisplayPlaneSurfaceKHR(instance, &surface_create_info,
+                  NULL, &created_surface) ==
+              RIN_VK_ERROR_INITIALIZATION_FAILED);
+        CHECK(created_surface == 0u);
+        vkDestroySurfaceKHR(instance, stale_output_surface, NULL);
+        stale_output_surface = 0u;
         count = 1u;
         CHECK(vkGetPhysicalDeviceDisplayPlanePropertiesKHR(
                   physical, &count, plane_properties) == RIN_VK_SUCCESS);
