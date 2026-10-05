@@ -11,10 +11,16 @@ rejects absent callbacks and stale product state. This repository does not
 claim physical GPU driver, IRQ/DMA, external backend, or hardware evidence.
 
 The public ICD currently advertises only the host-validated Vulkan 1.0
-bounded profile. Vulkan 1.1-1.3 feature chains and all extensions are
-fail-closed until their command, lifetime, synchronization, and error
-semantics are wired and tested; the internal product profile version is not a
-public capability claim.
+bounded profile. Vulkan 1.1-1.3 feature chains and unsupported extensions are
+rejected until their command, lifetime, synchronization, and error semantics
+are wired and tested; the internal product profile version is not a public
+capability claim. The implemented `VK_EXT_debug_utils` instance extension
+provides filtered debug messengers, application-submitted messages, object
+names/tags, and command-buffer/queue label events. Label events and object
+metadata are delivered to enabled debug messengers as synchronous verbose
+diagnostics, so a consumer can record their names, colors, object identity,
+and tag bytes. The extension does not claim to ship a Vulkan validation layer;
+loader-provided layers can use the same messenger callback path.
 
 `RinGpuVulkanSoftwarePlatformV1` is the host-only product owner used by the
 software-path regression. It owns zeroed allocation bytes, validates GPU

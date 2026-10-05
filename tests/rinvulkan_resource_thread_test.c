@@ -28,6 +28,86 @@ static RinVulkanProductSubmitFn g_software_submit;
 static uint32_t g_busy_submit_responses;
 static uint32_t g_submit_call_count;
 
+typedef struct DebugCapture {
+    uint32_t callback_count;
+    uint32_t object_name_count;
+    uint32_t object_tag_count;
+    uint32_t command_label_count;
+    uint32_t queue_label_count;
+    uint32_t submitted_message_count;
+    uint32_t instance_failed_count;
+    int malformed;
+} DebugCapture;
+
+static uint32_t debug_capture_callback(
+        uint32_t severity, uint32_t types,
+        const RinVkDebugUtilsMessengerCallbackDataEXT* callback_data,
+        void* opaque) {
+    DebugCapture* capture = (DebugCapture*)opaque;
+    if (!capture || !callback_data || !callback_data->pMessageIdName ||
+        !callback_data->pMessage || severity == 0u || types == 0u) {
+        if (capture) capture->malformed = 1;
+        return 0u;
+    }
+    ++capture->callback_count;
+    if (strcmp(callback_data->pMessageIdName,
+               "RinVulkan.DebugUtils.ObjectName") == 0) {
+        if (callback_data->objectCount != 1u || !callback_data->pObjects ||
+            !callback_data->pObjects[0].pObjectName ||
+            strcmp(callback_data->pObjects[0].pObjectName,
+                   "command buffer") != 0)
+            capture->malformed = 1;
+        else
+            ++capture->object_name_count;
+    } else if (strcmp(callback_data->pMessageIdName,
+                      "RinVulkan.DebugUtils.ObjectTag") == 0) {
+        if (callback_data->objectCount != 1u || !callback_data->pObjects ||
+            !callback_data->pObjects[0].pObjectName ||
+            strcmp(callback_data->pMessage,
+                   "tag=0x0072696e74657374 data=0x476e6952") != 0) {
+            fprintf(stderr, "object tag callback message: %s\n",
+                    callback_data->pMessage);
+            capture->malformed = 1;
+        } else
+            ++capture->object_tag_count;
+    } else if (strcmp(callback_data->pMessageIdName,
+                      "RinVulkan.DebugUtils.CommandLabelBegin") == 0 ||
+               strcmp(callback_data->pMessageIdName,
+                      "RinVulkan.DebugUtils.CommandLabelInsert") == 0) {
+        if (callback_data->cmdBufLabelCount != 1u ||
+            !callback_data->pCmdBufLabels ||
+            !callback_data->pCmdBufLabels[0].pLabelName ||
+            strcmp(callback_data->pCmdBufLabels[0].pLabelName,
+                   "record transfer") != 0 ||
+            callback_data->pCmdBufLabels[0].color[1] != 0.5f)
+            capture->malformed = 1;
+        else
+            ++capture->command_label_count;
+    } else if (strcmp(callback_data->pMessageIdName,
+                      "RinVulkan.DebugUtils.QueueLabelBegin") == 0) {
+        if (callback_data->queueLabelCount != 1u ||
+            !callback_data->pQueueLabels ||
+            !callback_data->pQueueLabels[0].pLabelName ||
+            strcmp(callback_data->pQueueLabels[0].pLabelName,
+                   "main queue") != 0)
+            capture->malformed = 1;
+        else
+            ++capture->queue_label_count;
+    } else if (strcmp(callback_data->pMessageIdName, "app.message") == 0) {
+        if (strcmp(callback_data->pMessage, "validation probe") != 0)
+            capture->malformed = 1;
+        else
+            ++capture->submitted_message_count;
+    } else if (strcmp(callback_data->pMessageIdName,
+                      "RinVulkan.InstanceCreateFailed") == 0) {
+        if (severity != RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
+            capture->malformed = 1;
+        else
+            ++capture->instance_failed_count;
+    }
+    return 0u;
+}
+
 static int submit_busy_once(void* context,
                             const RinVulkanProductSubmissionV1* submission,
                             const RinVulkanProductResourceV1* resources,
@@ -286,12 +366,21 @@ int main(void) {
     RinGpuVulkanSoftwarePlatformV1 software_platform;
     RinVkApplicationInfo application;
     RinVkInstanceCreateInfo instance_create;
+    RinVkInstanceCreateInfo no_debug_instance_create;
+    RinVkDebugUtilsMessengerCreateInfoEXT debug_messenger_create;
+    RinVkDebugUtilsMessengerCallbackDataEXT debug_message;
+    RinVkExtensionProperties instance_extension;
+    RinVkDebugUtilsObjectNameInfoEXT debug_object_name;
+    RinVkDebugUtilsObjectTagInfoEXT debug_object_tag;
+    RinVkDebugUtilsLabelEXT debug_label;
     RinVkDeviceQueueCreateInfo queue_create;
     RinVkDeviceCreateInfo device_create;
     RinVkPhysicalDeviceVulkan12Features vulkan12_features;
     RinVkPhysicalDeviceSynchronization2Features synchronization2_features;
     RinVkBufferCreateInfo buffer_create;
     RinVkInstance instance = NULL;
+    RinVkInstance no_debug_instance = NULL;
+    RinVkDebugUtilsMessengerEXT debug_messenger = 0u;
     RinVkPhysicalDevice physical = NULL;
     RinVkDevice device = NULL;
     RinVkQueue queue = NULL;
@@ -336,11 +425,17 @@ int main(void) {
     uint32_t wait_stage = UINT32_C(0x00001000);
     float priorities[2] = {1.0f, 1.0f};
     uint32_t physical_count = 1u;
+    uint32_t instance_extension_count = 0u;
+    uint32_t debug_tag_payload = UINT32_C(0x52696e47);
     int runtime_initialized = 0;
     int runtime_bound = 0;
     int software_platform_initialized = 0;
     int product_platform_bound = 0;
     int result = 1;
+    DebugCapture debug_capture = {0u, 0u, 0u, 0u, 0u, 0u, 0u, 0};
+    const char* debug_utils_extension = RIN_VK_EXT_DEBUG_UTILS_EXTENSION;
+    const char* enabled_instance_extensions[1];
+    const char* unknown_instance_extension = "VK_EXT_rin_unknown";
 
 #define CHECK(condition) do { \
     if (!(condition)) { \
@@ -373,10 +468,88 @@ int main(void) {
     application.sType = RIN_VK_STRUCTURE_TYPE_APPLICATION_INFO;
     application.pApplicationName = "RinVulkan resource thread test";
     application.apiVersion = RIN_GPU_VK_ICD_API_VERSION;
+    CHECK(vkEnumerateInstanceExtensionProperties(
+              NULL, &instance_extension_count, NULL) == RIN_VK_SUCCESS);
+    CHECK(instance_extension_count == 1u);
+    instance_extension_count = 1u;
+    CHECK(vkEnumerateInstanceExtensionProperties(
+              NULL, &instance_extension_count, &instance_extension) ==
+          RIN_VK_SUCCESS);
+    CHECK(strcmp(instance_extension.extensionName,
+                 RIN_VK_EXT_DEBUG_UTILS_EXTENSION) == 0 &&
+          instance_extension.specVersion == RIN_VK_DEBUG_UTILS_SPEC_VERSION);
     memset(&instance_create, 0, sizeof(instance_create));
     instance_create.sType = RIN_VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     instance_create.pApplicationInfo = &application;
+    enabled_instance_extensions[0] = debug_utils_extension;
+    instance_create.enabledExtensionCount = 1u;
+    instance_create.ppEnabledExtensionNames = enabled_instance_extensions;
+    memset(&debug_messenger_create, 0, sizeof(debug_messenger_create));
+    debug_messenger_create.sType =
+        RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+    debug_messenger_create.messageSeverity =
+        RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
+        RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT |
+        RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+    debug_messenger_create.messageType =
+        RIN_VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+        RIN_VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT;
+    debug_messenger_create.pfnUserCallback = debug_capture_callback;
+    debug_messenger_create.pUserData = &debug_capture;
+    instance_create.pNext = &debug_messenger_create;
+    no_debug_instance_create = instance_create;
+    no_debug_instance_create.enabledExtensionCount = 1u;
+    no_debug_instance_create.ppEnabledExtensionNames =
+        &unknown_instance_extension;
+    no_debug_instance_create.pNext = NULL;
+    CHECK(vkCreateInstance(&no_debug_instance_create, NULL,
+                           &no_debug_instance) ==
+          RIN_VK_ERROR_EXTENSION_NOT_PRESENT);
+    CHECK(no_debug_instance == NULL);
+    no_debug_instance_create.enabledExtensionCount = 0u;
+    no_debug_instance_create.ppEnabledExtensionNames = NULL;
+    CHECK(vkCreateInstance(&no_debug_instance_create, NULL,
+                           &no_debug_instance) == RIN_VK_SUCCESS);
+    CHECK(vkGetInstanceProcAddr(no_debug_instance,
+              "vkCreateDebugUtilsMessengerEXT") == NULL);
+    vkDestroyInstance(no_debug_instance, NULL);
+    no_debug_instance = NULL;
+    CHECK(rin_gpu_vulkan_icd_unbind_product_platform(
+              &software_platform.platform) == RIN_GPU_VULKAN_OK);
+    product_platform_bound = 0;
+    CHECK(rin_gpu_vulkan_icd_unbind_runtime(&runtime) == RIN_GPU_VULKAN_OK);
+    runtime_bound = 0;
+    CHECK(vkCreateInstance(&instance_create, NULL, &instance) ==
+          RIN_VK_ERROR_INITIALIZATION_FAILED);
+    CHECK(instance == NULL && debug_capture.instance_failed_count == 1u &&
+          debug_capture.malformed == 0);
+    CHECK(rin_gpu_vulkan_icd_bind_runtime(&runtime) == RIN_GPU_VULKAN_OK);
+    runtime_bound = 1;
+    CHECK(rin_gpu_vulkan_icd_bind_product_platform(
+              &software_platform.platform) == RIN_GPU_VULKAN_OK);
+    product_platform_bound = 1;
     CHECK(vkCreateInstance(&instance_create, NULL, &instance) == RIN_VK_SUCCESS);
+    CHECK(debug_capture.callback_count == 2u &&
+          debug_capture.instance_failed_count == 1u &&
+          debug_capture.malformed == 0);
+    CHECK(vkGetInstanceProcAddr(instance,
+              "vkCreateDebugUtilsMessengerEXT") != NULL);
+    CHECK(vkGetInstanceProcAddr(instance,
+              "vkSubmitDebugUtilsMessageEXT") != NULL);
+    CHECK(vkCreateDebugUtilsMessengerEXT(
+              instance, &debug_messenger_create, NULL, &debug_messenger) ==
+          RIN_VK_SUCCESS);
+    CHECK(debug_messenger != 0u);
+    memset(&debug_message, 0, sizeof(debug_message));
+    debug_message.sType =
+        RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CALLBACK_DATA_EXT;
+    debug_message.pMessageIdName = "app.message";
+    debug_message.pMessage = "validation probe";
+    vkSubmitDebugUtilsMessageEXT(
+        instance, RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT,
+        RIN_VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT, &debug_message);
+    CHECK(debug_capture.submitted_message_count == 1u &&
+          debug_capture.malformed == 0);
     CHECK(vkEnumeratePhysicalDevices(instance, &physical_count, &physical) ==
           RIN_VK_SUCCESS);
     CHECK(physical_count == 1u && physical != NULL);
@@ -408,6 +581,19 @@ int main(void) {
     vkGetDeviceQueue(device, 0u, 0u, &queue);
     vkGetDeviceQueue(device, 0u, 1u, &second_queue);
     CHECK(queue != NULL && second_queue != NULL);
+    CHECK(vkGetDeviceProcAddr(device,
+              "vkCmdBeginDebugUtilsLabelEXT") != NULL);
+    CHECK(vkGetDeviceProcAddr(device,
+              "vkSetDebugUtilsObjectNameEXT") != NULL);
+    memset(&debug_label, 0, sizeof(debug_label));
+    debug_label.sType = RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+    debug_label.pLabelName = "main queue";
+    debug_label.color[0] = 0.25f;
+    vkQueueBeginDebugUtilsLabelEXT(queue, &debug_label);
+    vkQueueInsertDebugUtilsLabelEXT(queue, &debug_label);
+    vkQueueEndDebugUtilsLabelEXT(queue);
+    CHECK(debug_capture.queue_label_count == 1u &&
+          debug_capture.malformed == 0);
 
     memset(&fence_create, 0, sizeof(fence_create));
     fence_create.sType = RIN_VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -434,6 +620,52 @@ int main(void) {
         RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     CHECK(vkBeginCommandBuffer(command_buffer, &command_buffer_begin) ==
           RIN_VK_SUCCESS);
+    memset(&debug_object_name, 0, sizeof(debug_object_name));
+    debug_object_name.sType =
+        RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+    debug_object_name.objectType = RIN_VK_OBJECT_TYPE_COMMAND_BUFFER;
+    debug_object_name.objectHandle = (uint64_t)(uintptr_t)command_buffer;
+    debug_object_name.pObjectName = "command buffer";
+    CHECK(vkSetDebugUtilsObjectNameEXT(device, &debug_object_name) ==
+          RIN_VK_SUCCESS);
+    memset(&debug_object_tag, 0, sizeof(debug_object_tag));
+    debug_object_tag.sType =
+        RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_TAG_INFO_EXT;
+    debug_object_tag.objectType = debug_object_name.objectType;
+    debug_object_tag.objectHandle = debug_object_name.objectHandle;
+    debug_object_tag.tagName = UINT64_C(0x72696e74657374);
+    debug_object_tag.tagSize = sizeof(debug_capture.callback_count);
+    debug_object_tag.pTag = &debug_tag_payload;
+    CHECK(vkSetDebugUtilsObjectTagEXT(device, &debug_object_tag) ==
+          RIN_VK_SUCCESS);
+    debug_label.pLabelName = "record transfer";
+    debug_label.color[1] = 0.5f;
+    vkCmdBeginDebugUtilsLabelEXT(command_buffer, &debug_label);
+    vkCmdInsertDebugUtilsLabelEXT(command_buffer, &debug_label);
+    vkCmdEndDebugUtilsLabelEXT(command_buffer);
+    if (debug_capture.object_name_count != 1u ||
+        debug_capture.object_tag_count != 1u ||
+        debug_capture.command_label_count != 2u ||
+        debug_capture.malformed != 0)
+        fprintf(stderr,
+                "debug captures name=%u tag=%u command-label=%u queue-label=%u submitted=%u malformed=%d callbacks=%u\n",
+                debug_capture.object_name_count,
+                debug_capture.object_tag_count,
+                debug_capture.command_label_count,
+                debug_capture.queue_label_count,
+                debug_capture.submitted_message_count,
+                debug_capture.malformed, debug_capture.callback_count);
+    CHECK(debug_capture.object_name_count == 1u &&
+          debug_capture.object_tag_count == 1u &&
+          debug_capture.command_label_count == 2u &&
+          debug_capture.callback_count == 11u &&
+          debug_capture.malformed == 0);
+    vkDestroyDebugUtilsMessengerEXT(instance, debug_messenger, NULL);
+    debug_messenger = 0u;
+    vkSubmitDebugUtilsMessageEXT(
+        instance, RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT,
+        RIN_VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT, &debug_message);
+    CHECK(debug_capture.callback_count == 11u);
     CHECK(vkEndCommandBuffer(command_buffer) == RIN_VK_SUCCESS);
     memset(&busy_product_submit, 0, sizeof(busy_product_submit));
     busy_product_submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -655,6 +887,7 @@ int main(void) {
     result = 0;
 
 cleanup:
+    if (no_debug_instance) vkDestroyInstance(no_debug_instance, NULL);
     if (deferred_semaphore)
         vkDestroySemaphore(device, deferred_semaphore, NULL);
     if (timeline_gate) vkDestroySemaphore(device, timeline_gate, NULL);
@@ -664,6 +897,8 @@ cleanup:
     if (semaphore) vkDestroySemaphore(device, semaphore, NULL);
     if (fence) vkDestroyFence(device, fence, NULL);
     if (device) vkDestroyDevice(device, NULL);
+    if (debug_messenger && instance)
+        vkDestroyDebugUtilsMessengerEXT(instance, debug_messenger, NULL);
     if (instance) vkDestroyInstance(instance, NULL);
     if (product_platform_bound)
         (void)rin_gpu_vulkan_icd_unbind_product_platform(

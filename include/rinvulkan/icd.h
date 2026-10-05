@@ -68,6 +68,11 @@
 #define RIN_VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO 1000314005
 #define RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO 1000314006
 #define RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES 1000314007
+#define RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT 1000128000
+#define RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_TAG_INFO_EXT 1000128001
+#define RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT 1000128002
+#define RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CALLBACK_DATA_EXT 1000128003
+#define RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT 1000128004
 
 #define RIN_VK_SEMAPHORE_TYPE_BINARY 0u
 #define RIN_VK_SEMAPHORE_TYPE_TIMELINE 1u
@@ -76,6 +81,37 @@
     "VK_KHR_timeline_semaphore"
 #define RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION \
     "VK_KHR_synchronization2"
+#define RIN_VK_EXT_DEBUG_UTILS_EXTENSION "VK_EXT_debug_utils"
+#define RIN_VK_DEBUG_UTILS_SPEC_VERSION 2u
+#define RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT 0x00000001u
+#define RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT 0x00000010u
+#define RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT 0x00000100u
+#define RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT 0x00001000u
+#define RIN_VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT 0x00000001u
+#define RIN_VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT 0x00000002u
+#define RIN_VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT 0x00000004u
+#define RIN_VK_OBJECT_TYPE_INSTANCE 1
+#define RIN_VK_OBJECT_TYPE_PHYSICAL_DEVICE 2
+#define RIN_VK_OBJECT_TYPE_DEVICE 3
+#define RIN_VK_OBJECT_TYPE_QUEUE 4
+#define RIN_VK_OBJECT_TYPE_SEMAPHORE 5
+#define RIN_VK_OBJECT_TYPE_COMMAND_BUFFER 6
+#define RIN_VK_OBJECT_TYPE_FENCE 7
+#define RIN_VK_OBJECT_TYPE_DEVICE_MEMORY 8
+#define RIN_VK_OBJECT_TYPE_BUFFER 9
+#define RIN_VK_OBJECT_TYPE_IMAGE 10
+#define RIN_VK_OBJECT_TYPE_EVENT 11
+#define RIN_VK_OBJECT_TYPE_QUERY_POOL 12
+#define RIN_VK_OBJECT_TYPE_IMAGE_VIEW 14
+#define RIN_VK_OBJECT_TYPE_SHADER_MODULE 15
+#define RIN_VK_OBJECT_TYPE_PIPELINE_CACHE 16
+#define RIN_VK_OBJECT_TYPE_PIPELINE_LAYOUT 17
+#define RIN_VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT 20
+#define RIN_VK_OBJECT_TYPE_SAMPLER 21
+#define RIN_VK_OBJECT_TYPE_DESCRIPTOR_POOL 22
+#define RIN_VK_OBJECT_TYPE_DESCRIPTOR_SET 23
+#define RIN_VK_OBJECT_TYPE_COMMAND_POOL 25
+#define RIN_VK_OBJECT_TYPE_DEBUG_UTILS_MESSENGER 1000128000
 #define RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT UINT64_C(0x0000000000001000)
 #define RIN_VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT \
     RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT
@@ -189,6 +225,73 @@ typedef uint64_t RinVkPipelineCache;
 typedef uint64_t RinVkShaderModule;
 typedef uint64_t RinVkQueryPool;
 typedef uint64_t RinVkEvent;
+typedef uint64_t RinVkDebugUtilsMessengerEXT;
+
+typedef struct RinVkDebugUtilsObjectNameInfoEXT {
+    RinVkStructureType sType;
+    const void* pNext;
+    int32_t objectType;
+    uint64_t objectHandle;
+    const char* pObjectName;
+} RinVkDebugUtilsObjectNameInfoEXT;
+
+typedef struct RinVkDebugUtilsObjectTagInfoEXT {
+    RinVkStructureType sType;
+    const void* pNext;
+    int32_t objectType;
+    uint64_t objectHandle;
+    uint64_t tagName;
+    size_t tagSize;
+    const void* pTag;
+} RinVkDebugUtilsObjectTagInfoEXT;
+
+typedef struct RinVkDebugUtilsLabelEXT {
+    RinVkStructureType sType;
+    const void* pNext;
+    const char* pLabelName;
+    float color[4];
+} RinVkDebugUtilsLabelEXT;
+
+typedef struct RinVkDebugUtilsObjectNameEXT {
+    int32_t objectType;
+    uint64_t objectHandle;
+    const char* pObjectName;
+} RinVkDebugUtilsObjectNameEXT;
+
+typedef struct RinVkDebugUtilsLabelDataEXT {
+    const char* pLabelName;
+    float color[4];
+} RinVkDebugUtilsLabelDataEXT;
+
+typedef struct RinVkDebugUtilsMessengerCallbackDataEXT {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    const char* pMessageIdName;
+    int32_t messageIdNumber;
+    const char* pMessage;
+    uint32_t queueLabelCount;
+    const RinVkDebugUtilsLabelDataEXT* pQueueLabels;
+    uint32_t cmdBufLabelCount;
+    const RinVkDebugUtilsLabelDataEXT* pCmdBufLabels;
+    uint32_t objectCount;
+    const RinVkDebugUtilsObjectNameEXT* pObjects;
+} RinVkDebugUtilsMessengerCallbackDataEXT;
+
+typedef uint32_t (RIN_VKAPI_CALL *RinVkDebugUtilsMessengerCallbackEXT)(
+    uint32_t message_severity, uint32_t message_types,
+    const RinVkDebugUtilsMessengerCallbackDataEXT* callback_data,
+    void* user_data);
+
+typedef struct RinVkDebugUtilsMessengerCreateInfoEXT {
+    RinVkStructureType sType;
+    const void* pNext;
+    uint32_t flags;
+    uint32_t messageSeverity;
+    uint32_t messageType;
+    RinVkDebugUtilsMessengerCallbackEXT pfnUserCallback;
+    void* pUserData;
+} RinVkDebugUtilsMessengerCreateInfoEXT;
 
 typedef struct RinVkPhysicalDeviceSynchronization2Features {
     RinVkStructureType sType;
@@ -1493,6 +1596,22 @@ _Static_assert(sizeof(RinVkClearColorValue) == 16u,
                "Vulkan clear-color ABI drift");
 _Static_assert(sizeof(RinVkClearDepthStencilValue) == 8u,
                "Vulkan clear-depth ABI drift");
+#if UINTPTR_MAX == UINT64_MAX
+_Static_assert(sizeof(RinVkDebugUtilsObjectNameInfoEXT) == 40u,
+               "Vulkan debug object-name ABI drift");
+_Static_assert(sizeof(RinVkDebugUtilsObjectTagInfoEXT) == 56u,
+               "Vulkan debug object-tag ABI drift");
+_Static_assert(sizeof(RinVkDebugUtilsLabelEXT) == 40u,
+               "Vulkan debug label ABI drift");
+_Static_assert(sizeof(RinVkDebugUtilsObjectNameEXT) == 24u,
+               "Vulkan debug callback object ABI drift");
+_Static_assert(sizeof(RinVkDebugUtilsLabelDataEXT) == 24u,
+               "Vulkan debug callback label ABI drift");
+_Static_assert(sizeof(RinVkDebugUtilsMessengerCallbackDataEXT) == 96u,
+               "Vulkan debug callback data ABI drift");
+_Static_assert(sizeof(RinVkDebugUtilsMessengerCreateInfoEXT) == 48u,
+               "Vulkan debug messenger create ABI drift");
+#endif
 _Static_assert(sizeof(RinVkBufferMemoryBarrier2) == 80u,
                "Vulkan buffer-memory-barrier2 ABI drift");
 _Static_assert(sizeof(RinVkImageMemoryBarrier2) == 96u,
@@ -1533,6 +1652,46 @@ RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkEnumerateInstanceExtensionProperties(
     const char* layer_name, uint32_t* property_count,
     RinVkExtensionProperties* properties);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkCreateDebugUtilsMessengerEXT(
+    RinVkInstance instance,
+    const RinVkDebugUtilsMessengerCreateInfoEXT* create_info,
+    const void* allocator, RinVkDebugUtilsMessengerEXT* messenger_out);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkDestroyDebugUtilsMessengerEXT(RinVkInstance instance,
+                                RinVkDebugUtilsMessengerEXT messenger,
+                                const void* allocator);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkSetDebugUtilsObjectNameEXT(
+    RinVkDevice device,
+    const RinVkDebugUtilsObjectNameInfoEXT* name_info);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkSetDebugUtilsObjectTagEXT(
+    RinVkDevice device,
+    const RinVkDebugUtilsObjectTagInfoEXT* tag_info);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkSubmitDebugUtilsMessageEXT(
+    RinVkInstance instance, uint32_t message_severity,
+    uint32_t message_types,
+    const RinVkDebugUtilsMessengerCallbackDataEXT* callback_data);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdBeginDebugUtilsLabelEXT(
+    RinVkCommandBuffer command_buffer,
+    const RinVkDebugUtilsLabelEXT* label_info);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdEndDebugUtilsLabelEXT(RinVkCommandBuffer command_buffer);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdInsertDebugUtilsLabelEXT(
+    RinVkCommandBuffer command_buffer,
+    const RinVkDebugUtilsLabelEXT* label_info);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkQueueBeginDebugUtilsLabelEXT(RinVkQueue queue,
+                               const RinVkDebugUtilsLabelEXT* label_info);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkQueueEndDebugUtilsLabelEXT(RinVkQueue queue);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkQueueInsertDebugUtilsLabelEXT(RinVkQueue queue,
+                                const RinVkDebugUtilsLabelEXT* label_info);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkEnumerateDeviceExtensionProperties(
     RinVkPhysicalDevice physical_device, const char* layer_name,

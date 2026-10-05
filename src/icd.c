@@ -45,6 +45,18 @@
 #define RIN_VK_MAX_SHADER_MODULES 64u
 #define RIN_VK_MAX_QUERY_POOLS 32u
 #define RIN_VK_MAX_EVENTS 128u
+#define RIN_VK_MAX_DEBUG_MESSENGERS 32u
+#define RIN_VK_MAX_DEBUG_OBJECTS 256u
+#define RIN_VK_DEBUG_UTILS_MESSENGER_TAG UINT64_C(0x5255)
+#define RIN_VK_DEBUG_SEVERITY_MASK \
+    (RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | \
+     RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT | \
+     RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | \
+     RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
+#define RIN_VK_DEBUG_TYPE_MASK \
+    (RIN_VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | \
+     RIN_VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | \
+     RIN_VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT)
 #define RIN_VK_QUERY_POOL_MAX_QUERIES 64u
 #define RIN_VK_PIPELINE_CACHE_MAX_PAYLOAD 4096u
 #define RIN_VK_RESOURCE_ALIGNMENT UINT64_C(2097152)
@@ -88,6 +100,7 @@ static void zero_vulkan13_properties(
         RinVkPhysicalDeviceVulkan13Properties* properties);
 static void sync_lock(void);
 static void sync_unlock(void);
+static void yield_thread(void);
 
 struct RinVkPhysicalDevice_T {
     uintptr_t loader_magic;
@@ -98,7 +111,7 @@ struct RinVkPhysicalDevice_T {
 struct RinVkInstance_T {
     uintptr_t loader_magic;
     uint32_t state;
-    uint32_t reserved;
+    uint32_t debug_utils_enabled;
     RinGpuVulkanHandle runtime_handle;
     struct RinVkPhysicalDevice_T
         physical_devices[RIN_GPU_VULKAN_MAX_PHYSICAL_DEVICES];
@@ -280,6 +293,29 @@ typedef struct RinVkSemaphoreSlot {
     uint64_t pending_value;
 } RinVkSemaphoreSlot;
 
+typedef struct RinVkDebugUtilsMessengerSlot {
+    uint32_t state;
+    uint32_t generation;
+    uint32_t active_callbacks;
+    uint32_t reserved;
+    struct RinVkInstance_T* owner;
+    uint32_t message_severity;
+    uint32_t message_type;
+    RinVkDebugUtilsMessengerCallbackEXT callback;
+    void* user_data;
+} RinVkDebugUtilsMessengerSlot;
+
+typedef struct RinVkDebugUtilsObjectSlot {
+    uint32_t state;
+    uint32_t object_type;
+    struct RinVkInstance_T* owner;
+    uint64_t object_handle;
+    char* name;
+    uint64_t tag_name;
+    size_t tag_size;
+    void* tag;
+} RinVkDebugUtilsObjectSlot;
+
 typedef struct RinVkSubmissionSlot {
     uint32_t state;
     uint32_t command_buffer_count;
@@ -350,6 +386,10 @@ static RinVkQueryPoolSlot g_query_pools[RIN_VK_MAX_QUERY_POOLS];
 static RinVkEventSlot g_events[RIN_VK_MAX_EVENTS];
 static RinVkFenceSlot g_fences[RIN_VK_MAX_FENCES];
 static RinVkSemaphoreSlot g_semaphores[RIN_VK_MAX_SEMAPHORES];
+static RinVkDebugUtilsMessengerSlot
+    g_debug_utils_messengers[RIN_VK_MAX_DEBUG_MESSENGERS];
+static RinVkDebugUtilsObjectSlot
+    g_debug_utils_objects[RIN_VK_MAX_DEBUG_OBJECTS];
 static RinVkSubmissionSlot g_submissions[RIN_VK_MAX_SUBMISSIONS];
 static RinVkCommandResourceUseSlot
     g_command_resource_uses[RIN_GPU_VULKAN_COMMAND_MAX_BUFFERS];
@@ -1575,6 +1615,369 @@ static struct RinVkQueue_T* queue_slot(RinVkQueue queue) {
         }
     }
     return NULL;
+}
+
+static struct RinVkInstance_T* debug_instance_for_device(
+        const struct RinVkDevice_T* device) {
+    uint32_t index;
+    if (!device) return NULL;
+    for (index = 0u; index < RIN_GPU_VULKAN_MAX_INSTANCES; ++index) {
+        struct RinVkInstance_T* instance = &g_instances[index];
+        if (__atomic_load_n(&instance->state, __ATOMIC_ACQUIRE) == 1u &&
+            instance->runtime_handle == device->owner_instance)
+            return instance;
+    }
+    return NULL;
+}
+
+static RinVkDebugUtilsMessengerSlot* debug_messenger_slot(
+        struct RinVkInstance_T* owner, RinVkDebugUtilsMessengerEXT handle) {
+    uint32_t index_field = (uint32_t)(handle & UINT64_C(0xffff));
+    uint32_t generation = (uint32_t)(handle >> 16u);
+    RinVkDebugUtilsMessengerSlot* slot;
+    if (!owner || (handle >> 48u) != RIN_VK_DEBUG_UTILS_MESSENGER_TAG ||
+        index_field == 0u || index_field > RIN_VK_MAX_DEBUG_MESSENGERS ||
+        generation == 0u)
+        return NULL;
+    slot = &g_debug_utils_messengers[index_field - 1u];
+    if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) != 1u ||
+        slot->generation != generation || slot->owner != owner)
+        return NULL;
+    return slot;
+}
+
+static int debug_messenger_create_info_valid(
+        const RinVkDebugUtilsMessengerCreateInfoEXT* create_info) {
+    return create_info &&
+           create_info->sType ==
+               RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT &&
+           create_info->pNext == NULL && create_info->flags == 0u &&
+           create_info->messageSeverity != 0u &&
+           (create_info->messageSeverity & ~RIN_VK_DEBUG_SEVERITY_MASK) == 0u &&
+           create_info->messageType != 0u &&
+           (create_info->messageType & ~RIN_VK_DEBUG_TYPE_MASK) == 0u &&
+           create_info->pfnUserCallback != NULL;
+}
+
+static int debug_object_type_supported(uint32_t object_type) {
+    switch (object_type) {
+    case RIN_VK_OBJECT_TYPE_INSTANCE:
+    case RIN_VK_OBJECT_TYPE_PHYSICAL_DEVICE:
+    case RIN_VK_OBJECT_TYPE_DEVICE:
+    case RIN_VK_OBJECT_TYPE_QUEUE:
+    case RIN_VK_OBJECT_TYPE_SEMAPHORE:
+    case RIN_VK_OBJECT_TYPE_COMMAND_BUFFER:
+    case RIN_VK_OBJECT_TYPE_FENCE:
+    case RIN_VK_OBJECT_TYPE_DEVICE_MEMORY:
+    case RIN_VK_OBJECT_TYPE_BUFFER:
+    case RIN_VK_OBJECT_TYPE_IMAGE:
+    case RIN_VK_OBJECT_TYPE_EVENT:
+    case RIN_VK_OBJECT_TYPE_QUERY_POOL:
+    case RIN_VK_OBJECT_TYPE_IMAGE_VIEW:
+    case RIN_VK_OBJECT_TYPE_SHADER_MODULE:
+    case RIN_VK_OBJECT_TYPE_PIPELINE_CACHE:
+    case RIN_VK_OBJECT_TYPE_PIPELINE_LAYOUT:
+    case RIN_VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT:
+    case RIN_VK_OBJECT_TYPE_SAMPLER:
+    case RIN_VK_OBJECT_TYPE_DESCRIPTOR_POOL:
+    case RIN_VK_OBJECT_TYPE_DESCRIPTOR_SET:
+    case RIN_VK_OBJECT_TYPE_COMMAND_POOL:
+    case RIN_VK_OBJECT_TYPE_DEBUG_UTILS_MESSENGER:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static void debug_emit(
+        struct RinVkInstance_T* instance, uint32_t severity,
+        uint32_t types,
+        const RinVkDebugUtilsMessengerCallbackDataEXT* callback_data) {
+    struct CallbackSnapshot {
+        RinVkDebugUtilsMessengerCallbackEXT callback;
+        void* user_data;
+        RinVkDebugUtilsMessengerSlot* slot;
+        uint32_t generation;
+    } callbacks[RIN_VK_MAX_DEBUG_MESSENGERS];
+    uint32_t callback_count = 0u;
+    uint32_t index;
+    if (!instance || !instance->debug_utils_enabled || !callback_data ||
+        severity == 0u || (severity & (severity - 1u)) != 0u ||
+        (severity & RIN_VK_DEBUG_SEVERITY_MASK) == 0u || types == 0u ||
+        (types & ~RIN_VK_DEBUG_TYPE_MASK) != 0u)
+        return;
+    sync_lock();
+    for (index = 0u; index < RIN_VK_MAX_DEBUG_MESSENGERS; ++index) {
+        RinVkDebugUtilsMessengerSlot* slot =
+            &g_debug_utils_messengers[index];
+        if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) != 1u ||
+            slot->owner != instance ||
+            (slot->message_severity & severity) == 0u ||
+            (slot->message_type & types) == 0u)
+            continue;
+        callbacks[callback_count].callback = slot->callback;
+        callbacks[callback_count].user_data = slot->user_data;
+        callbacks[callback_count].slot = slot;
+        callbacks[callback_count].generation = slot->generation;
+        (void)__atomic_add_fetch(&slot->active_callbacks, 1u,
+                                 __ATOMIC_ACQ_REL);
+        ++callback_count;
+    }
+    sync_unlock();
+    for (index = 0u; index < callback_count; ++index) {
+        (void)callbacks[index].callback(severity, types, callback_data,
+                                        callbacks[index].user_data);
+        sync_lock();
+        if (callbacks[index].slot->generation == callbacks[index].generation)
+            (void)__atomic_sub_fetch(
+                &callbacks[index].slot->active_callbacks, 1u,
+                __ATOMIC_RELEASE);
+        sync_unlock();
+    }
+}
+
+static void debug_instance_create_report(
+        const RinVkDebugUtilsMessengerCreateInfoEXT* create_info,
+        uint32_t severity, const char* message_id, const char* message) {
+    RinVkDebugUtilsMessengerCallbackDataEXT callback_data;
+    if (!create_info || !create_info->pfnUserCallback ||
+        (create_info->messageSeverity & severity) == 0u ||
+        (create_info->messageType &
+         RIN_VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT) == 0u)
+        return;
+    memset(&callback_data, 0, sizeof(callback_data));
+    callback_data.sType =
+        RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CALLBACK_DATA_EXT;
+    callback_data.pMessageIdName = message_id;
+    callback_data.pMessage = message;
+    (void)create_info->pfnUserCallback(
+        severity, RIN_VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT,
+        &callback_data, create_info->pUserData);
+}
+
+static RinVkDebugUtilsObjectSlot* debug_object_find(
+        struct RinVkInstance_T* owner, uint32_t object_type,
+        uint64_t object_handle, RinVkDebugUtilsObjectSlot** free_slot) {
+    uint32_t index;
+    if (free_slot) *free_slot = NULL;
+    for (index = 0u; index < RIN_VK_MAX_DEBUG_OBJECTS; ++index) {
+        RinVkDebugUtilsObjectSlot* slot = &g_debug_utils_objects[index];
+        if (slot->state == 1u && slot->owner == owner &&
+            slot->object_type == object_type &&
+            slot->object_handle == object_handle)
+            return slot;
+        if (slot->state == 0u && free_slot && !*free_slot)
+            *free_slot = slot;
+    }
+    return NULL;
+}
+
+static void debug_object_clear(struct RinVkInstance_T* owner,
+                               uint32_t object_type,
+                               uint64_t object_handle) {
+    RinVkDebugUtilsObjectSlot* slot;
+    if (!owner || object_handle == 0u) return;
+    sync_lock();
+    slot = debug_object_find(owner, object_type, object_handle, NULL);
+    if (slot) {
+        free(slot->name);
+        free(slot->tag);
+        memset(slot, 0, sizeof(*slot));
+    }
+    sync_unlock();
+}
+
+static void debug_utils_cleanup_instance(struct RinVkInstance_T* owner) {
+    uint32_t wait_for_callbacks[RIN_VK_MAX_DEBUG_MESSENGERS] = {0u};
+    uint32_t generations[RIN_VK_MAX_DEBUG_MESSENGERS] = {0u};
+    uint32_t index;
+    if (!owner) return;
+    sync_lock();
+    for (index = 0u; index < RIN_VK_MAX_DEBUG_MESSENGERS; ++index) {
+        RinVkDebugUtilsMessengerSlot* slot =
+            &g_debug_utils_messengers[index];
+        if (slot->owner == owner) {
+            wait_for_callbacks[index] = 1u;
+            generations[index] = slot->generation;
+            __atomic_store_n(&slot->state, 2u, __ATOMIC_RELEASE);
+        }
+    }
+    sync_unlock();
+    for (index = 0u; index < RIN_VK_MAX_DEBUG_MESSENGERS; ++index) {
+        RinVkDebugUtilsMessengerSlot* slot =
+            &g_debug_utils_messengers[index];
+        if (!wait_for_callbacks[index]) continue;
+        while (__atomic_load_n(&slot->active_callbacks, __ATOMIC_ACQUIRE) !=
+               0u)
+            yield_thread();
+    }
+    sync_lock();
+    for (index = 0u; index < RIN_VK_MAX_DEBUG_MESSENGERS; ++index) {
+        RinVkDebugUtilsMessengerSlot* slot =
+            &g_debug_utils_messengers[index];
+        if (!wait_for_callbacks[index] || slot->owner != owner ||
+            slot->generation != generations[index])
+            continue;
+        slot->owner = NULL;
+        slot->message_severity = 0u;
+        slot->message_type = 0u;
+        slot->callback = NULL;
+        slot->user_data = NULL;
+        slot->reserved = 0u;
+        __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
+    }
+    for (index = 0u; index < RIN_VK_MAX_DEBUG_OBJECTS; ++index) {
+        RinVkDebugUtilsObjectSlot* slot = &g_debug_utils_objects[index];
+        if (slot->owner != owner) continue;
+        free(slot->name);
+        free(slot->tag);
+        memset(slot, 0, sizeof(*slot));
+    }
+    sync_unlock();
+}
+
+static RinVkResult debug_object_update(
+        struct RinVkInstance_T* owner, uint32_t object_type,
+        uint64_t object_handle, const char* name, uint64_t tag_name,
+        const void* tag, size_t tag_size, int update_name, int update_tag) {
+    RinVkDebugUtilsObjectSlot* slot;
+    RinVkDebugUtilsObjectSlot* free_slot;
+    char* name_copy = NULL;
+    void* tag_copy = NULL;
+    size_t name_size = 0u;
+    int remove_record;
+    if (!owner || !debug_object_type_supported(object_type) ||
+        object_handle == 0u || (name && !update_name) ||
+        (tag_size != 0u && (!tag || !update_tag)))
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    if (update_name && name && name[0] != '\0') {
+        name_size = strlen(name);
+        if (name_size == SIZE_MAX) return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+        name_copy = (char*)malloc(name_size + 1u);
+        if (!name_copy) return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+        memcpy(name_copy, name, name_size + 1u);
+    }
+    if (update_tag && tag_size != 0u) {
+        tag_copy = malloc(tag_size);
+        if (!tag_copy) {
+            free(name_copy);
+            return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+        }
+        memcpy(tag_copy, tag, tag_size);
+    }
+    sync_lock();
+    slot = debug_object_find(owner, object_type, object_handle, &free_slot);
+    if (!slot && (name_copy || tag_copy)) {
+        if (!free_slot) {
+            sync_unlock();
+            free(name_copy);
+            free(tag_copy);
+            return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+        }
+        slot = free_slot;
+        memset(slot, 0, sizeof(*slot));
+        slot->state = 1u;
+        slot->owner = owner;
+        slot->object_type = object_type;
+        slot->object_handle = object_handle;
+    }
+    if (slot) {
+        if (update_name) {
+            free(slot->name);
+            slot->name = name_copy;
+            name_copy = NULL;
+        }
+        if (update_tag) {
+            free(slot->tag);
+            slot->tag = tag_copy;
+            tag_copy = NULL;
+            slot->tag_name = tag_size == 0u ? 0u : tag_name;
+            slot->tag_size = tag_size;
+        }
+        remove_record = slot->name == NULL && slot->tag == NULL;
+        if (remove_record) {
+            memset(slot, 0, sizeof(*slot));
+        }
+    }
+    sync_unlock();
+    free(name_copy);
+    free(tag_copy);
+    return RIN_VK_SUCCESS;
+}
+
+static char* debug_tag_message(uint64_t tag_name, const void* tag,
+                               size_t tag_size) {
+    static const char hex_digits[] = "0123456789abcdef";
+    char* message;
+    size_t index;
+    if (tag_size == 0u) {
+        static const char cleared[] = "object tag cleared";
+        message = (char*)malloc(sizeof(cleared));
+        if (message) memcpy(message, cleared, sizeof(cleared));
+        return message;
+    }
+    if (!tag || tag_size > (SIZE_MAX - 31u) / 2u) return NULL;
+    message = (char*)malloc(31u + tag_size * 2u);
+    if (!message) return NULL;
+    memcpy(message, "tag=0x", 6u);
+    for (index = 0u; index < 16u; ++index) {
+        const uint32_t shift = (uint32_t)((15u - index) * 4u);
+        message[6u + index] = hex_digits[(tag_name >> shift) & 0xfu];
+    }
+    memcpy(message + 22u, " data=0x", 8u);
+    for (index = 0u; index < tag_size; ++index) {
+        const uint8_t byte = ((const uint8_t*)tag)[index];
+        message[30u + index * 2u] = hex_digits[byte >> 4u];
+        message[31u + index * 2u] = hex_digits[byte & 0xfu];
+    }
+    message[30u + tag_size * 2u] = '\0';
+    return message;
+}
+
+static void debug_utils_annotation(
+        struct RinVkInstance_T* owner, const char* message_id,
+        uint32_t object_type, uint64_t object_handle,
+        const RinVkDebugUtilsLabelDataEXT* queue_label,
+        const RinVkDebugUtilsLabelDataEXT* command_label,
+        const char* message) {
+    RinVkDebugUtilsMessengerCallbackDataEXT data;
+    RinVkDebugUtilsObjectNameEXT object;
+    char* object_name = NULL;
+    memset(&data, 0, sizeof(data));
+    data.sType = RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CALLBACK_DATA_EXT;
+    data.pMessageIdName = message_id;
+    data.pMessage = message;
+    if (queue_label) {
+        data.queueLabelCount = 1u;
+        data.pQueueLabels = queue_label;
+    }
+    if (command_label) {
+        data.cmdBufLabelCount = 1u;
+        data.pCmdBufLabels = command_label;
+    }
+    if (object_handle != 0u) {
+        object.objectType = (int32_t)object_type;
+        object.objectHandle = object_handle;
+        object.pObjectName = NULL;
+        sync_lock();
+        {
+            RinVkDebugUtilsObjectSlot* slot = debug_object_find(
+                owner, object_type, object_handle, NULL);
+            if (slot && slot->name) {
+                size_t name_size = strlen(slot->name);
+                object_name = (char*)malloc(name_size + 1u);
+                if (object_name)
+                    memcpy(object_name, slot->name, name_size + 1u);
+            }
+        }
+        data.objectCount = 1u;
+        data.pObjects = &object;
+        sync_unlock();
+        object.pObjectName = object_name;
+    }
+    debug_emit(owner, RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT,
+               RIN_VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT, &data);
+    free(object_name);
 }
 
 static int submission_slots_active(void) {
@@ -2894,10 +3297,319 @@ RinVkResult RIN_VKAPI_CALL vkEnumerateInstanceVersion(
 RinVkResult RIN_VKAPI_CALL vkEnumerateInstanceExtensionProperties(
         const char* layer_name, uint32_t* property_count,
         RinVkExtensionProperties* properties) {
-    (void)properties;
+    RinVkExtensionProperties extension;
+    uint32_t capacity;
     if (!property_count) return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    *property_count = 0u;
-    return layer_name ? RIN_VK_ERROR_LAYER_NOT_PRESENT : RIN_VK_SUCCESS;
+    if (layer_name) {
+        *property_count = 0u;
+        return RIN_VK_ERROR_LAYER_NOT_PRESENT;
+    }
+    capacity = *property_count;
+    if (!properties) {
+        *property_count = 1u;
+        return RIN_VK_SUCCESS;
+    }
+    *property_count = capacity == 0u ? 0u : 1u;
+    if (capacity == 0u) return RIN_VK_INCOMPLETE;
+    memset(&extension, 0, sizeof(extension));
+    memcpy(extension.extensionName, RIN_VK_EXT_DEBUG_UTILS_EXTENSION,
+           sizeof(RIN_VK_EXT_DEBUG_UTILS_EXTENSION));
+    extension.specVersion = RIN_VK_DEBUG_UTILS_SPEC_VERSION;
+    properties[0] = extension;
+    return RIN_VK_SUCCESS;
+}
+
+RinVkResult RIN_VKAPI_CALL vkCreateDebugUtilsMessengerEXT(
+        RinVkInstance instance,
+        const RinVkDebugUtilsMessengerCreateInfoEXT* create_info,
+        const void* allocator, RinVkDebugUtilsMessengerEXT* messenger_out) {
+    struct RinVkInstance_T* owner = instance_slot(instance);
+    uint32_t index;
+    (void)allocator;
+    if (!messenger_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    *messenger_out = 0u;
+    if (!owner || !owner->debug_utils_enabled)
+        return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
+    if (!debug_messenger_create_info_valid(create_info))
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    sync_lock();
+    for (index = 0u; index < RIN_VK_MAX_DEBUG_MESSENGERS; ++index) {
+        RinVkDebugUtilsMessengerSlot* slot =
+            &g_debug_utils_messengers[index];
+        if (slot->state != 0u) continue;
+        if (slot->generation == UINT32_MAX) {
+            slot->state = 3u;
+            continue;
+        }
+        ++slot->generation;
+        if (slot->generation == 0u) {
+            slot->state = 3u;
+            continue;
+        }
+        slot->active_callbacks = 0u;
+        slot->reserved = 0u;
+        slot->owner = owner;
+        slot->message_severity = create_info->messageSeverity;
+        slot->message_type = create_info->messageType;
+        slot->callback = create_info->pfnUserCallback;
+        slot->user_data = create_info->pUserData;
+        slot->state = 1u;
+        *messenger_out = resource_handle(
+            RIN_VK_DEBUG_UTILS_MESSENGER_TAG, index, slot->generation);
+        break;
+    }
+    sync_unlock();
+    return *messenger_out != 0u ? RIN_VK_SUCCESS
+                                : RIN_VK_ERROR_TOO_MANY_OBJECTS;
+}
+
+void RIN_VKAPI_CALL vkDestroyDebugUtilsMessengerEXT(
+        RinVkInstance instance, RinVkDebugUtilsMessengerEXT messenger,
+        const void* allocator) {
+    struct RinVkInstance_T* owner = instance_slot(instance);
+    RinVkDebugUtilsMessengerSlot* slot;
+    uint32_t generation;
+    (void)allocator;
+    if (!owner || messenger == 0u) return;
+    sync_lock();
+    slot = debug_messenger_slot(owner, messenger);
+    if (slot) {
+        generation = slot->generation;
+        __atomic_store_n(&slot->state, 2u, __ATOMIC_RELEASE);
+    }
+    sync_unlock();
+    if (!slot) return;
+    while (__atomic_load_n(&slot->active_callbacks, __ATOMIC_ACQUIRE) != 0u)
+        yield_thread();
+    sync_lock();
+    if (slot->generation == generation && slot->state == 2u) {
+        slot->owner = NULL;
+        slot->message_severity = 0u;
+        slot->message_type = 0u;
+        slot->callback = NULL;
+        slot->user_data = NULL;
+        slot->reserved = 0u;
+        __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
+    }
+    sync_unlock();
+}
+
+RinVkResult RIN_VKAPI_CALL vkSetDebugUtilsObjectNameEXT(
+        RinVkDevice device,
+        const RinVkDebugUtilsObjectNameInfoEXT* name_info) {
+    struct RinVkDevice_T* device_value = device_slot(device);
+    struct RinVkInstance_T* owner = debug_instance_for_device(device_value);
+    RinVkResult result;
+    if (!device_value || !owner || !owner->debug_utils_enabled)
+        return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
+    if (!name_info ||
+        name_info->sType !=
+            RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT ||
+        name_info->pNext || name_info->objectHandle == 0u ||
+        !debug_object_type_supported((uint32_t)name_info->objectType))
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    result = debug_object_update(owner, (uint32_t)name_info->objectType,
+                                 name_info->objectHandle,
+                                 name_info->pObjectName, 0u, NULL, 0u,
+                                 1, 0);
+    if (result != RIN_VK_SUCCESS) return result;
+    debug_utils_annotation(owner, "RinVulkan.DebugUtils.ObjectName",
+                           (uint32_t)name_info->objectType,
+                           name_info->objectHandle, NULL, NULL,
+                           name_info->pObjectName ? name_info->pObjectName
+                                                  : "object name cleared");
+    return RIN_VK_SUCCESS;
+}
+
+RinVkResult RIN_VKAPI_CALL vkSetDebugUtilsObjectTagEXT(
+        RinVkDevice device,
+        const RinVkDebugUtilsObjectTagInfoEXT* tag_info) {
+    struct RinVkDevice_T* device_value = device_slot(device);
+    struct RinVkInstance_T* owner = debug_instance_for_device(device_value);
+    char* tag_message;
+    RinVkResult result;
+    if (!device_value || !owner || !owner->debug_utils_enabled)
+        return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
+    if (!tag_info ||
+        tag_info->sType !=
+            RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_TAG_INFO_EXT ||
+        tag_info->pNext || tag_info->objectHandle == 0u ||
+        !debug_object_type_supported((uint32_t)tag_info->objectType) ||
+        (tag_info->tagSize != 0u && !tag_info->pTag))
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    tag_message = debug_tag_message(tag_info->tagName, tag_info->pTag,
+                                    tag_info->tagSize);
+    if (!tag_message) return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+    result = debug_object_update(owner, (uint32_t)tag_info->objectType,
+                                 tag_info->objectHandle, NULL,
+                                 tag_info->tagName, tag_info->pTag,
+                                 tag_info->tagSize, 0, 1);
+    if (result != RIN_VK_SUCCESS) {
+        free(tag_message);
+        return result;
+    }
+    debug_utils_annotation(owner, "RinVulkan.DebugUtils.ObjectTag",
+                           (uint32_t)tag_info->objectType,
+                           tag_info->objectHandle, NULL, NULL,
+                           tag_message);
+    free(tag_message);
+    return RIN_VK_SUCCESS;
+}
+
+void RIN_VKAPI_CALL vkSubmitDebugUtilsMessageEXT(
+        RinVkInstance instance, uint32_t message_severity,
+        uint32_t message_types,
+        const RinVkDebugUtilsMessengerCallbackDataEXT* callback_data) {
+    struct RinVkInstance_T* owner = instance_slot(instance);
+    if (!owner || !owner->debug_utils_enabled || !callback_data ||
+        callback_data->sType !=
+            RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CALLBACK_DATA_EXT ||
+        callback_data->pNext || !callback_data->pMessage ||
+        (callback_data->queueLabelCount && !callback_data->pQueueLabels) ||
+        (callback_data->cmdBufLabelCount && !callback_data->pCmdBufLabels) ||
+        (callback_data->objectCount && !callback_data->pObjects) ||
+        message_severity == 0u ||
+        (message_severity & (message_severity - 1u)) != 0u ||
+        (message_severity & ~RIN_VK_DEBUG_SEVERITY_MASK) != 0u ||
+        message_types == 0u || (message_types & ~RIN_VK_DEBUG_TYPE_MASK) != 0u)
+        return;
+    debug_emit(owner, message_severity, message_types, callback_data);
+}
+
+static RinVkDebugUtilsLabelDataEXT debug_label_data(
+        const RinVkDebugUtilsLabelEXT* label_info) {
+    RinVkDebugUtilsLabelDataEXT label;
+    uint32_t index;
+    label.pLabelName = label_info->pLabelName;
+    for (index = 0u; index < 4u; ++index)
+        label.color[index] = label_info->color[index];
+    return label;
+}
+
+static int debug_label_valid(const RinVkDebugUtilsLabelEXT* label_info) {
+    uint32_t index;
+    if (!label_info ||
+        label_info->sType != RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT ||
+        label_info->pNext || !label_info->pLabelName)
+        return 0;
+    for (index = 0u; index < 4u; ++index)
+        if (!(label_info->color[index] >= 0.0f &&
+              label_info->color[index] <= 1.0f))
+            return 0;
+    return 1;
+}
+
+static RinGpuVulkanCommandBufferV1* debug_command_buffer(
+        RinVkCommandBuffer command_buffer,
+        struct RinVkDevice_T** device_out) {
+    RinGpuVulkanCommandBufferV1* core =
+        (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
+    struct RinVkDevice_T* device;
+    if (!core || core->loader_magic != RIN_VK_ICD_LOADER_MAGIC ||
+        core->lifecycle != RIN_GPU_VULKAN_COMMAND_BUFFER_RECORDING)
+        return NULL;
+    device = device_slot((RinVkDevice)core->owner);
+    if (!device) return NULL;
+    if (device_out) *device_out = device;
+    return core;
+}
+
+void RIN_VKAPI_CALL vkCmdBeginDebugUtilsLabelEXT(
+        RinVkCommandBuffer command_buffer,
+        const RinVkDebugUtilsLabelEXT* label_info) {
+    struct RinVkDevice_T* device = NULL;
+    RinGpuVulkanCommandBufferV1* core =
+        debug_command_buffer(command_buffer, &device);
+    RinVkDebugUtilsLabelDataEXT label;
+    struct RinVkInstance_T* owner;
+    if (!core || !debug_label_valid(label_info) ||
+        !(owner = debug_instance_for_device(device)) ||
+        !owner->debug_utils_enabled)
+        return;
+    label = debug_label_data(label_info);
+    debug_utils_annotation(owner, "RinVulkan.DebugUtils.CommandLabelBegin",
+                           RIN_VK_OBJECT_TYPE_COMMAND_BUFFER,
+                           (uint64_t)(uintptr_t)command_buffer,
+                           NULL, &label, label_info->pLabelName);
+}
+
+void RIN_VKAPI_CALL vkCmdEndDebugUtilsLabelEXT(
+        RinVkCommandBuffer command_buffer) {
+    struct RinVkDevice_T* device = NULL;
+    RinGpuVulkanCommandBufferV1* core =
+        debug_command_buffer(command_buffer, &device);
+    struct RinVkInstance_T* owner;
+    if (!core || !(owner = debug_instance_for_device(device)) ||
+        !owner->debug_utils_enabled)
+        return;
+    debug_utils_annotation(owner, "RinVulkan.DebugUtils.CommandLabelEnd",
+                           RIN_VK_OBJECT_TYPE_COMMAND_BUFFER,
+                           (uint64_t)(uintptr_t)command_buffer,
+                           NULL, NULL, "command label end");
+}
+
+void RIN_VKAPI_CALL vkCmdInsertDebugUtilsLabelEXT(
+        RinVkCommandBuffer command_buffer,
+        const RinVkDebugUtilsLabelEXT* label_info) {
+    struct RinVkDevice_T* device = NULL;
+    RinGpuVulkanCommandBufferV1* core =
+        debug_command_buffer(command_buffer, &device);
+    RinVkDebugUtilsLabelDataEXT label;
+    struct RinVkInstance_T* owner;
+    if (!core || !debug_label_valid(label_info) ||
+        !(owner = debug_instance_for_device(device)) ||
+        !owner->debug_utils_enabled)
+        return;
+    label = debug_label_data(label_info);
+    debug_utils_annotation(owner, "RinVulkan.DebugUtils.CommandLabelInsert",
+                           RIN_VK_OBJECT_TYPE_COMMAND_BUFFER,
+                           (uint64_t)(uintptr_t)command_buffer,
+                           NULL, &label, label_info->pLabelName);
+}
+
+void RIN_VKAPI_CALL vkQueueBeginDebugUtilsLabelEXT(
+        RinVkQueue queue, const RinVkDebugUtilsLabelEXT* label_info) {
+    struct RinVkQueue_T* queue_value = queue_slot(queue);
+    struct RinVkInstance_T* owner;
+    RinVkDebugUtilsLabelDataEXT label;
+    if (!queue_value || !debug_label_valid(label_info) ||
+        !(owner = debug_instance_for_device(queue_value->device)) ||
+        !owner->debug_utils_enabled)
+        return;
+    label = debug_label_data(label_info);
+    debug_utils_annotation(owner, "RinVulkan.DebugUtils.QueueLabelBegin",
+                           RIN_VK_OBJECT_TYPE_QUEUE,
+                           (uint64_t)(uintptr_t)queue,
+                           &label, NULL, label_info->pLabelName);
+}
+
+void RIN_VKAPI_CALL vkQueueEndDebugUtilsLabelEXT(RinVkQueue queue) {
+    struct RinVkQueue_T* queue_value = queue_slot(queue);
+    struct RinVkInstance_T* owner;
+    if (!queue_value ||
+        !(owner = debug_instance_for_device(queue_value->device)) ||
+        !owner->debug_utils_enabled)
+        return;
+    debug_utils_annotation(owner, "RinVulkan.DebugUtils.QueueLabelEnd",
+                           RIN_VK_OBJECT_TYPE_QUEUE,
+                           (uint64_t)(uintptr_t)queue,
+                           NULL, NULL, "queue label end");
+}
+
+void RIN_VKAPI_CALL vkQueueInsertDebugUtilsLabelEXT(
+        RinVkQueue queue, const RinVkDebugUtilsLabelEXT* label_info) {
+    struct RinVkQueue_T* queue_value = queue_slot(queue);
+    struct RinVkInstance_T* owner;
+    RinVkDebugUtilsLabelDataEXT label;
+    if (!queue_value || !debug_label_valid(label_info) ||
+        !(owner = debug_instance_for_device(queue_value->device)) ||
+        !owner->debug_utils_enabled)
+        return;
+    label = debug_label_data(label_info);
+    debug_utils_annotation(owner, "RinVulkan.DebugUtils.QueueLabelInsert",
+                           RIN_VK_OBJECT_TYPE_QUEUE,
+                           (uint64_t)(uintptr_t)queue,
+                           &label, NULL, label_info->pLabelName);
 }
 
 RinVkResult RIN_VKAPI_CALL vkEnumerateDeviceExtensionProperties(
@@ -2950,8 +3662,10 @@ RinVkResult RIN_VKAPI_CALL vkCreateInstance(
     RinGpuVulkanInstanceRequestV1 request;
     RinGpuVulkanRuntimeV1* runtime;
     struct RinVkInstance_T* slot = NULL;
+    const RinVkDebugUtilsMessengerCreateInfoEXT* create_messenger_info = NULL;
     uint32_t index;
     uint32_t expected;
+    uint32_t debug_utils_enabled = 0u;
     int result;
     (void)allocator;
 
@@ -2960,12 +3674,33 @@ RinVkResult RIN_VKAPI_CALL vkCreateInstance(
     if (!create_info ||
         create_info->sType != RIN_VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    if (create_info->pNext || create_info->flags != 0u)
-        return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
+    if (create_info->flags != 0u)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
     if (create_info->enabledLayerCount != 0u)
         return RIN_VK_ERROR_LAYER_NOT_PRESENT;
-    if (create_info->enabledExtensionCount != 0u)
+    if (create_info->enabledExtensionCount > 1u ||
+        (create_info->enabledExtensionCount != 0u &&
+         !create_info->ppEnabledExtensionNames))
         return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
+    if (create_info->enabledExtensionCount == 1u) {
+        if (!create_info->ppEnabledExtensionNames[0] ||
+            !name_equal(create_info->ppEnabledExtensionNames[0],
+                        RIN_VK_EXT_DEBUG_UTILS_EXTENSION))
+            return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
+        debug_utils_enabled = 1u;
+    }
+    if (create_info->pNext) {
+        const RinVkBaseFeatureStructure* chain =
+            (const RinVkBaseFeatureStructure*)create_info->pNext;
+        if (!debug_utils_enabled ||
+            chain->sType !=
+                RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT)
+            return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
+        create_messenger_info =
+            (const RinVkDebugUtilsMessengerCreateInfoEXT*)chain;
+        if (!debug_messenger_create_info_valid(create_messenger_info))
+            return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    }
 
     memset(&request, 0, sizeof(request));
     request.struct_size = sizeof(request);
@@ -2991,7 +3726,14 @@ RinVkResult RIN_VKAPI_CALL vkCreateInstance(
     }
 
     runtime = acquire_runtime();
-    if (!runtime) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    if (!runtime) {
+        debug_instance_create_report(
+            create_messenger_info,
+            RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+            "RinVulkan.InstanceCreateFailed",
+            "Vulkan instance runtime is not bound");
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    }
     for (index = 0u; index < RIN_GPU_VULKAN_MAX_INSTANCES; ++index) {
         expected = 0u;
         if (__atomic_compare_exchange_n(&g_instances[index].state,
@@ -3008,18 +3750,34 @@ RinVkResult RIN_VKAPI_CALL vkCreateInstance(
     }
     memset(slot->physical_devices, 0, sizeof(slot->physical_devices));
     slot->loader_magic = RIN_VK_ICD_LOADER_MAGIC;
-    slot->reserved = 0u;
+    slot->debug_utils_enabled = debug_utils_enabled;
     slot->runtime_handle = 0u;
     result = call_create_instance(runtime, &request, &slot->runtime_handle);
     release_runtime();
     if (result != RIN_GPU_VULKAN_OK) {
+        debug_instance_create_report(
+            create_messenger_info,
+            RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+            "RinVulkan.InstanceCreateFailed",
+            "Vulkan instance creation failed");
         slot->loader_magic = 0u;
+        slot->debug_utils_enabled = 0u;
         slot->runtime_handle = 0u;
         __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
         return map_result(result);
     }
     __atomic_store_n(&slot->state, 1u, __ATOMIC_RELEASE);
     *instance_out = slot;
+    if (create_messenger_info &&
+        (create_messenger_info->messageSeverity &
+         RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) != 0u &&
+        (create_messenger_info->messageType &
+         RIN_VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT) != 0u) {
+        debug_instance_create_report(
+            create_messenger_info,
+            RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT,
+            "RinVulkan.InstanceCreateSucceeded", "Vulkan instance created");
+    }
     return RIN_VK_SUCCESS;
 }
 
@@ -3046,10 +3804,11 @@ void RIN_VKAPI_CALL vkDestroyInstance(RinVkInstance instance,
         __atomic_store_n(&slot->state, 1u, __ATOMIC_RELEASE);
         return;
     }
+    debug_utils_cleanup_instance(slot);
     memset(slot->physical_devices, 0, sizeof(slot->physical_devices));
     slot->runtime_handle = 0u;
     slot->loader_magic = 0u;
-    slot->reserved = 0u;
+    slot->debug_utils_enabled = 0u;
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
 }
 
@@ -3568,6 +4327,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
 void RIN_VKAPI_CALL vkDestroyDevice(RinVkDevice device,
                                     const void* allocator) {
     struct RinVkDevice_T* slot = device_slot(device);
+    struct RinVkInstance_T* debug_owner = debug_instance_for_device(slot);
     RinGpuVulkanRuntimeV1* runtime;
     uint32_t expected = 1u;
     int result;
@@ -3603,12 +4363,37 @@ void RIN_VKAPI_CALL vkDestroyDevice(RinVkDevice device,
         __atomic_store_n(&slot->state, 1u, __ATOMIC_RELEASE);
         return;
     }
+    {
+        uint32_t command_index;
+        for (command_index = 0u;
+             command_index < RIN_GPU_VULKAN_COMMAND_MAX_BUFFERS;
+             ++command_index) {
+            RinGpuVulkanCommandBufferV1* command_buffer =
+                &g_command_runtime.buffers[command_index];
+            if (__atomic_load_n(&command_buffer->state, __ATOMIC_ACQUIRE) ==
+                    1u &&
+                command_buffer->owner == (uintptr_t)slot)
+                debug_object_clear(
+                    debug_owner, RIN_VK_OBJECT_TYPE_COMMAND_BUFFER,
+                    (uint64_t)(uintptr_t)command_buffer);
+        }
+    }
     (void)rin_gpu_vulkan_command_owner_cleanup(
         &g_command_runtime, (uintptr_t)slot);
     cleanup_device_sync_objects(slot);
     cleanup_device_shader_modules(slot);
     (void)rin_gpu_vulkan_descriptor_runtime_shutdown(
         &slot->descriptor_runtime);
+    debug_object_clear(debug_owner, RIN_VK_OBJECT_TYPE_DEVICE,
+                       (uint64_t)(uintptr_t)slot);
+    {
+        uint32_t queue_index;
+        for (queue_index = 0u; queue_index < slot->queue_count;
+             ++queue_index)
+            debug_object_clear(
+                debug_owner, RIN_VK_OBJECT_TYPE_QUEUE,
+                (uint64_t)(uintptr_t)&slot->queues[queue_index]);
+    }
     __atomic_store_n(&slot->descriptor_validation_error, 0u,
                      __ATOMIC_RELEASE);
     slot->timeline_enabled = 0u;
@@ -4068,6 +4853,7 @@ void RIN_VKAPI_CALL vkDestroyCommandPool(
         RinVkDevice device, RinVkCommandPool command_pool,
         const void* allocator) {
     struct RinVkDevice_T* slot = device_slot(device);
+    struct RinVkInstance_T* debug_owner = debug_instance_for_device(slot);
     RinGpuVulkanCommandPoolSlotV1* core_pool =
         (RinGpuVulkanCommandPoolSlotV1*)(uintptr_t)
             command_pool_to_core(command_pool);
@@ -4079,17 +4865,22 @@ void RIN_VKAPI_CALL vkDestroyCommandPool(
     (void)allocator;
     if (!slot || command_pool == (RinVkCommandPool)0) return;
     for (index = 0u; index < RIN_GPU_VULKAN_COMMAND_MAX_BUFFERS; ++index) {
-        RinVkCommandResourceUseSlot* use_slot = &g_command_resource_uses[index];
-        if (use_slot->command_buffer &&
-            use_slot->command_buffer->pool == core_pool)
-            tracked_buffers[tracked_count++] = use_slot->command_buffer;
+        RinGpuVulkanCommandBufferV1* command_buffer =
+            &g_command_runtime.buffers[index];
+        if (__atomic_load_n(&command_buffer->state, __ATOMIC_ACQUIRE) == 1u &&
+            command_buffer->pool == core_pool)
+            tracked_buffers[tracked_count++] = command_buffer;
     }
     result = rin_gpu_vulkan_command_pool_destroy(
         &g_command_runtime, (uintptr_t)slot,
         command_pool_to_core(command_pool));
     if (result == RIN_GPU_VULKAN_COMMAND_OK)
-        for (index = 0u; index < tracked_count; ++index)
+        for (index = 0u; index < tracked_count; ++index) {
             clear_command_resource_uses(tracked_buffers[index]);
+            debug_object_clear(
+                debug_owner, RIN_VK_OBJECT_TYPE_COMMAND_BUFFER,
+                (uint64_t)(uintptr_t)tracked_buffers[index]);
+        }
 }
 
 RinVkResult RIN_VKAPI_CALL vkResetCommandPool(
@@ -4157,6 +4948,7 @@ void RIN_VKAPI_CALL vkFreeCommandBuffers(
         uint32_t command_buffer_count,
         const RinVkCommandBuffer* command_buffers) {
     struct RinVkDevice_T* slot = device_slot(device);
+    struct RinVkInstance_T* debug_owner = debug_instance_for_device(slot);
     RinGpuVulkanCommandBufferV1*
         snapshot[RIN_GPU_VULKAN_COMMAND_MAX_BUFFERS];
     uint32_t index;
@@ -4171,8 +4963,12 @@ void RIN_VKAPI_CALL vkFreeCommandBuffers(
         command_pool_to_core(command_pool),
         command_buffer_count, snapshot);
     for (index = 0u; index < command_buffer_count; ++index)
-        if (__atomic_load_n(&snapshot[index]->state, __ATOMIC_ACQUIRE) == 0u)
+        if (__atomic_load_n(&snapshot[index]->state, __ATOMIC_ACQUIRE) == 0u) {
             clear_command_resource_uses(snapshot[index]);
+            debug_object_clear(
+                debug_owner, RIN_VK_OBJECT_TYPE_COMMAND_BUFFER,
+                (uint64_t)(uintptr_t)command_buffers[index]);
+        }
 }
 
 RinVkResult RIN_VKAPI_CALL vkBeginCommandBuffer(
@@ -7670,7 +8466,28 @@ RinVkResult RIN_VKAPI_CALL vkMergePipelineCaches(
 
 RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
         RinVkDevice device, const char* name) {
-    if (!device_slot(device) || !name) return NULL;
+    struct RinVkDevice_T* device_value = device_slot(device);
+    struct RinVkInstance_T* instance =
+        debug_instance_for_device(device_value);
+    if (!device_value || !name) return NULL;
+    if (instance && instance->debug_utils_enabled) {
+        if (name_equal(name, "vkSetDebugUtilsObjectNameEXT"))
+            return (RinVkVoidFunction)vkSetDebugUtilsObjectNameEXT;
+        if (name_equal(name, "vkSetDebugUtilsObjectTagEXT"))
+            return (RinVkVoidFunction)vkSetDebugUtilsObjectTagEXT;
+        if (name_equal(name, "vkCmdBeginDebugUtilsLabelEXT"))
+            return (RinVkVoidFunction)vkCmdBeginDebugUtilsLabelEXT;
+        if (name_equal(name, "vkCmdEndDebugUtilsLabelEXT"))
+            return (RinVkVoidFunction)vkCmdEndDebugUtilsLabelEXT;
+        if (name_equal(name, "vkCmdInsertDebugUtilsLabelEXT"))
+            return (RinVkVoidFunction)vkCmdInsertDebugUtilsLabelEXT;
+        if (name_equal(name, "vkQueueBeginDebugUtilsLabelEXT"))
+            return (RinVkVoidFunction)vkQueueBeginDebugUtilsLabelEXT;
+        if (name_equal(name, "vkQueueEndDebugUtilsLabelEXT"))
+            return (RinVkVoidFunction)vkQueueEndDebugUtilsLabelEXT;
+        if (name_equal(name, "vkQueueInsertDebugUtilsLabelEXT"))
+            return (RinVkVoidFunction)vkQueueInsertDebugUtilsLabelEXT;
+    }
     if (name_equal(name, "vkGetDeviceProcAddr"))
         return (RinVkVoidFunction)vkGetDeviceProcAddr;
     if (name_equal(name, "vkDestroyDevice"))
@@ -7853,6 +8670,30 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetInstanceProcAddr(
     if (name_equal(name, "vk_icdGetPhysicalDeviceProcAddr"))
         return (RinVkVoidFunction)vk_icdGetPhysicalDeviceProcAddr;
     if (!instance_slot(instance)) return NULL;
+    if (instance_slot(instance)->debug_utils_enabled) {
+        if (name_equal(name, "vkCreateDebugUtilsMessengerEXT"))
+            return (RinVkVoidFunction)vkCreateDebugUtilsMessengerEXT;
+        if (name_equal(name, "vkDestroyDebugUtilsMessengerEXT"))
+            return (RinVkVoidFunction)vkDestroyDebugUtilsMessengerEXT;
+        if (name_equal(name, "vkSetDebugUtilsObjectNameEXT"))
+            return (RinVkVoidFunction)vkSetDebugUtilsObjectNameEXT;
+        if (name_equal(name, "vkSetDebugUtilsObjectTagEXT"))
+            return (RinVkVoidFunction)vkSetDebugUtilsObjectTagEXT;
+        if (name_equal(name, "vkSubmitDebugUtilsMessageEXT"))
+            return (RinVkVoidFunction)vkSubmitDebugUtilsMessageEXT;
+        if (name_equal(name, "vkCmdBeginDebugUtilsLabelEXT"))
+            return (RinVkVoidFunction)vkCmdBeginDebugUtilsLabelEXT;
+        if (name_equal(name, "vkCmdEndDebugUtilsLabelEXT"))
+            return (RinVkVoidFunction)vkCmdEndDebugUtilsLabelEXT;
+        if (name_equal(name, "vkCmdInsertDebugUtilsLabelEXT"))
+            return (RinVkVoidFunction)vkCmdInsertDebugUtilsLabelEXT;
+        if (name_equal(name, "vkQueueBeginDebugUtilsLabelEXT"))
+            return (RinVkVoidFunction)vkQueueBeginDebugUtilsLabelEXT;
+        if (name_equal(name, "vkQueueEndDebugUtilsLabelEXT"))
+            return (RinVkVoidFunction)vkQueueEndDebugUtilsLabelEXT;
+        if (name_equal(name, "vkQueueInsertDebugUtilsLabelEXT"))
+            return (RinVkVoidFunction)vkQueueInsertDebugUtilsLabelEXT;
+    }
     if (name_equal(name, "vkDestroyInstance"))
         return (RinVkVoidFunction)vkDestroyInstance;
     if (name_equal(name, "vkEnumeratePhysicalDevices"))
