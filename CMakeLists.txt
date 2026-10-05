@@ -39,6 +39,46 @@ else()
     target_compile_options(RinVulkan PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+option(RINVULKAN_BUILD_VALIDATION_SMOKE
+    "Build a shared ICD and exercise it through the Khronos Vulkan loader and validation layer"
+    OFF)
+if(RINVULKAN_BUILD_VALIDATION_SMOKE)
+    if(NOT UNIX OR APPLE)
+        message(FATAL_ERROR
+            "RINVULKAN_BUILD_VALIDATION_SMOKE requires the POSIX Vulkan loader")
+    endif()
+    find_package(Vulkan REQUIRED)
+    set_target_properties(RinGPU PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+    add_library(RinVulkanICD SHARED ${RINVULKAN_SOURCES})
+    target_compile_features(RinVulkanICD PRIVATE c_std_11)
+    target_include_directories(RinVulkanICD
+        PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(RinVulkanICD PRIVATE RinGPU::RinGPU)
+    set_target_properties(RinVulkanICD PROPERTIES
+        OUTPUT_NAME "rin-vulkan-icd"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lib")
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        # An ICD exports Vulkan entry points but must keep its own references
+        # bound locally when it shares a process with the system loader.
+        target_link_options(RinVulkanICD PRIVATE "-Wl,-Bsymbolic")
+    endif()
+    if(MSVC)
+        target_compile_options(RinVulkanICD PRIVATE /W4)
+    else()
+        target_compile_options(RinVulkanICD PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
+    set(RIN_VULKAN_ICD_LIBRARY
+        "${CMAKE_SHARED_LIBRARY_PREFIX}rin-vulkan-icd${CMAKE_SHARED_LIBRARY_SUFFIX}")
+    set(RIN_VULKAN_ICD_MANIFEST_DIR
+        "${CMAKE_CURRENT_BINARY_DIR}/share/vulkan/icd.d")
+    file(MAKE_DIRECTORY "${RIN_VULKAN_ICD_MANIFEST_DIR}")
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/icd.d/rin-vulkan.json.in"
+        "${RIN_VULKAN_ICD_MANIFEST_DIR}/rin-vulkan.json" @ONLY)
+endif()
+
 include(CTest)
 if(BUILD_TESTING)
     if(NOT WIN32)
@@ -102,4 +142,27 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME rinvulkan-platform-time
         COMMAND rinvulkan-platform-time-test)
+    if(RINVULKAN_BUILD_VALIDATION_SMOKE)
+        add_executable(rinvulkan-loader-validation-test
+            tests/rinvulkan_loader_validation_test.c)
+        target_compile_features(rinvulkan-loader-validation-test PRIVATE
+            c_std_11)
+        target_include_directories(rinvulkan-loader-validation-test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include)
+        target_link_libraries(rinvulkan-loader-validation-test PRIVATE
+            Vulkan::Vulkan ${CMAKE_DL_LIBS})
+        if(MSVC)
+            target_compile_options(rinvulkan-loader-validation-test PRIVATE
+                /W4)
+        else()
+            target_compile_options(rinvulkan-loader-validation-test PRIVATE
+                -Wall -Wextra -Wpedantic -Werror)
+        endif()
+        add_test(NAME rinvulkan-loader-validation
+            COMMAND rinvulkan-loader-validation-test
+                "$<TARGET_FILE:RinVulkanICD>")
+        set_tests_properties(rinvulkan-loader-validation PROPERTIES
+            ENVIRONMENT
+                "VK_DRIVER_FILES=${RIN_VULKAN_ICD_MANIFEST_DIR}/rin-vulkan.json;VK_ICD_FILENAMES=${RIN_VULKAN_ICD_MANIFEST_DIR}/rin-vulkan.json")
+    endif()
 endif()

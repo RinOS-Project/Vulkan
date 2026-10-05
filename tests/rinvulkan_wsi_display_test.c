@@ -53,6 +53,16 @@ typedef struct TestWsiProvider {
     RinVulkanWsiSurfacePropertiesV4 surface_properties;
 } TestWsiProvider;
 
+typedef struct TestLoaderCreateInfoHeader {
+    RinVkStructureType sType;
+    void* pNext;
+} TestLoaderCreateInfoHeader;
+
+enum {
+    TEST_LOADER_INSTANCE_CREATE_INFO = 47,
+    TEST_LOADER_DEVICE_CREATE_INFO = 48
+};
+
 static void make_profile(RinGpuVulkanPhysicalDeviceV2* profile) {
     memset(profile, 0, sizeof(*profile));
     profile->struct_size = sizeof(*profile);
@@ -96,6 +106,18 @@ static void make_profile(RinGpuVulkanPhysicalDeviceV2* profile) {
     profile->device_type = RIN_GPU_VK_PHYSICAL_TYPE_VIRTUAL_GPU;
     memcpy(profile->device_name, "RinGPU WSI test", sizeof("RinGPU WSI test"));
     profile->pipeline_cache_uuid[0] = 0x53u;
+}
+
+static uint32_t RIN_VKAPI_CALL loader_chain_debug_callback(
+        uint32_t severity, uint32_t types,
+        const RinVkDebugUtilsMessengerCallbackDataEXT* callback_data,
+        void* user_data) {
+    uint32_t* call_count = (uint32_t*)user_data;
+    (void)severity;
+    (void)types;
+    (void)callback_data;
+    ++*call_count;
+    return 0u;
 }
 
 static void make_display_provider(TestWsiProvider* provider) {
@@ -528,9 +550,14 @@ int main(void) {
     RinVulkanWsiPlatformV4 wsi_v4;
     TestWsiProvider provider;
     RinVkApplicationInfo application;
+    RinVkDebugUtilsMessengerCreateInfoEXT loader_debug_create_info;
     RinVkInstanceCreateInfo instance_create;
+    TestLoaderCreateInfoHeader loader_instance_create_info;
+    TestLoaderCreateInfoHeader loader_device_create_info;
+    const char* loader_layer_name = "VK_LAYER_KHRONOS_validation";
     const char* unimplemented_display_extension =
         RIN_VK_KHR_DISPLAY_EXTENSION;
+    const char* debug_utils_extension = RIN_VK_EXT_DEBUG_UTILS_EXTENSION;
     RinVkInstance instance = NULL;
     RinVkInstance foreign_instance = NULL;
     RinVkPhysicalDevice physical_devices[1];
@@ -557,6 +584,7 @@ int main(void) {
     RinVkImageViewCreateInfo image_view_info;
     RinVkImageView swapchain_image_view = 0u;
     uint32_t surface_supported = UINT32_MAX;
+    uint32_t loader_chain_debug_calls = 0u;
     RinVkDisplayPlanePropertiesKHR plane_properties[1];
     RinVkDisplayPlaneCapabilitiesKHR plane_capabilities;
     RinVkDisplayKHR supported_displays[1];
@@ -681,8 +709,31 @@ int main(void) {
     CHECK(instance == NULL);
     instance_create.enabledExtensionCount = 0u;
     instance_create.ppEnabledExtensionNames = NULL;
+    loader_instance_create_info.sType =
+        (RinVkStructureType)TEST_LOADER_INSTANCE_CREATE_INFO;
+    memset(&loader_debug_create_info, 0, sizeof(loader_debug_create_info));
+    loader_debug_create_info.sType =
+        RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+    loader_debug_create_info.messageSeverity =
+        RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT;
+    loader_debug_create_info.messageType =
+        RIN_VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT;
+    loader_debug_create_info.pfnUserCallback = loader_chain_debug_callback;
+    loader_debug_create_info.pUserData = &loader_chain_debug_calls;
+    loader_instance_create_info.pNext = &loader_debug_create_info;
+    instance_create.pNext = &loader_instance_create_info;
+    instance_create.enabledLayerCount = 1u;
+    instance_create.ppEnabledLayerNames = &loader_layer_name;
+    instance_create.enabledExtensionCount = 1u;
+    instance_create.ppEnabledExtensionNames = &debug_utils_extension;
     CHECK(vkCreateInstance(&instance_create, NULL, &instance) ==
           RIN_VK_SUCCESS);
+    CHECK(loader_chain_debug_calls == 1u);
+    instance_create.pNext = NULL;
+    instance_create.enabledLayerCount = 0u;
+    instance_create.ppEnabledLayerNames = NULL;
+    instance_create.enabledExtensionCount = 0u;
+    instance_create.ppEnabledExtensionNames = NULL;
     CHECK(vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceDisplayPropertiesKHR")
           == NULL);
     CHECK(vk_icdGetPhysicalDeviceProcAddr(
@@ -1279,6 +1330,12 @@ int main(void) {
             device_create_info.sType = RIN_VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
             device_create_info.queueCreateInfoCount = 1u;
             device_create_info.pQueueCreateInfos = &device_queue_info;
+            loader_device_create_info.sType =
+                (RinVkStructureType)TEST_LOADER_DEVICE_CREATE_INFO;
+            loader_device_create_info.pNext = NULL;
+            device_create_info.pNext = &loader_device_create_info;
+            device_create_info.enabledLayerCount = 1u;
+            device_create_info.ppEnabledLayerNames = &loader_layer_name;
             CHECK(vkCreateDevice(physical, &device_create_info, NULL,
                                  &device) == RIN_VK_SUCCESS);
             CHECK(vkGetDeviceProcAddr(device, "vkCreateSwapchainKHR") == NULL);

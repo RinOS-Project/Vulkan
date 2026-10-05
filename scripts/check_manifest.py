@@ -14,7 +14,8 @@ def main() -> int:
     icd = manifest.get("ICD")
     if (manifest.get("file_format_version") != "1.0.0" or
             not isinstance(icd, dict) or icd.get("api_version") != "1.0.0" or
-            "$ORIGIN" not in icd.get("library_path", "")):
+            icd.get("library_path") !=
+                "$ORIGIN/../../../lib/librin-vulkan-icd.so"):
         raise SystemExit("invalid RinVulkan ICD manifest")
     return 0
 

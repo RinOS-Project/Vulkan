@@ -18,6 +18,8 @@
 #define RIN_VK_ICD_CALL_RETRIES 4096u
 #define RIN_VK_FEATURE_CHAIN_MAX 8u
 #define RIN_VK_PROPERTY_CHAIN_MAX 8u
+#define RIN_VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO 47
+#define RIN_VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO 48
 #define RIN_VK_MAX_BUFFERS 128u
 #define RIN_VK_MAX_IMAGES 128u
 #define RIN_VK_MAX_MEMORIES 64u
@@ -707,6 +709,7 @@ static int all_zero(const void* data, size_t size) {
 }
 
 static int collect_feature_chain(void* first, int allow_unknown,
+                                 int allow_loader_device_info,
                                  RinVkFeatureChain* chain) {
     RinVkBaseFeatureStructure* node =
         (RinVkBaseFeatureStructure*)first;
@@ -734,6 +737,11 @@ static int collect_feature_chain(void* first, int allow_unknown,
             if (chain->synchronization2) return 0;
             chain->synchronization2 =
                 (RinVkPhysicalDeviceSynchronization2Features*)node;
+        } else if (allow_loader_device_info &&
+                   node->sType ==
+                       RIN_VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO) {
+            /* Loader-private dispatch metadata is consumed by the loader and
+             * is not a Vulkan feature request. */
         } else if (!allow_unknown) {
             return 0;
         }
@@ -2262,6 +2270,37 @@ static int debug_messenger_create_info_valid(
            create_info->messageType != 0u &&
            (create_info->messageType & ~RIN_VK_DEBUG_TYPE_MASK) == 0u &&
            create_info->pfnUserCallback != NULL;
+}
+
+static int collect_instance_create_chain(
+        const void* first, int debug_utils_enabled,
+        const RinVkDebugUtilsMessengerCreateInfoEXT** messenger_out) {
+    const RinVkBaseFeatureStructure* node =
+        (const RinVkBaseFeatureStructure*)first;
+    const void* seen[RIN_VK_FEATURE_CHAIN_MAX];
+    uint32_t count = 0u;
+    uint32_t index;
+    if (!messenger_out) return 0;
+    *messenger_out = NULL;
+    while (node && count < RIN_VK_FEATURE_CHAIN_MAX) {
+        for (index = 0u; index < count; ++index) {
+            if (seen[index] == node) return 0;
+        }
+        seen[count++] = node;
+        if (node->sType ==
+            RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT) {
+            if (!debug_utils_enabled || *messenger_out) return 0;
+            *messenger_out =
+                (const RinVkDebugUtilsMessengerCreateInfoEXT*)node;
+        } else if (node->sType !=
+                   RIN_VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO) {
+            return 0;
+        }
+        node = (const RinVkBaseFeatureStructure*)node->pNext;
+    }
+    return node == NULL &&
+           (!*messenger_out ||
+            debug_messenger_create_info_valid(*messenger_out));
 }
 
 static int debug_object_type_supported(uint32_t object_type) {
@@ -5449,8 +5488,8 @@ RinVkResult RIN_VKAPI_CALL vkCreateInstance(
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
     if (create_info->flags != 0u)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    if (create_info->enabledLayerCount != 0u)
-        return RIN_VK_ERROR_LAYER_NOT_PRESENT;
+    /* Instance layers are owned and dispatched by the Vulkan loader.  The
+     * enabled layer names may remain in the ICD call; do not resolve them. */
     if (create_info->enabledExtensionCount > 1u ||
         (create_info->enabledExtensionCount != 0u &&
          !create_info->ppEnabledExtensionNames))
@@ -5462,18 +5501,10 @@ RinVkResult RIN_VKAPI_CALL vkCreateInstance(
             return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
         debug_utils_enabled = 1u;
     }
-    if (create_info->pNext) {
-        const RinVkBaseFeatureStructure* chain =
-            (const RinVkBaseFeatureStructure*)create_info->pNext;
-        if (!debug_utils_enabled ||
-            chain->sType !=
-                RIN_VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT)
-            return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
-        create_messenger_info =
-            (const RinVkDebugUtilsMessengerCreateInfoEXT*)chain;
-        if (!debug_messenger_create_info_valid(create_messenger_info))
-            return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    }
+    if (!collect_instance_create_chain(create_info->pNext,
+                                       debug_utils_enabled,
+                                       &create_messenger_info))
+        return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
 
     memset(&request, 0, sizeof(request));
     request.struct_size = sizeof(request);
@@ -7187,7 +7218,7 @@ void RIN_VKAPI_CALL vkGetPhysicalDeviceFeatures2(
     if (!features) return;
     memset(&features->features, 0, sizeof(features->features));
     if (features->sType != RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 ||
-        !collect_feature_chain(features->pNext, 1, &chain))
+        !collect_feature_chain(features->pNext, 1, 0, &chain))
         return;
     if (chain.vulkan12) {
         memset(&chain.vulkan12->samplerMirrorClampToEdge, 0,
@@ -7400,7 +7431,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
     if (!physical || !create_info ||
         create_info->sType != RIN_VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    if (!collect_feature_chain((void*)create_info->pNext, 0,
+    if (!collect_feature_chain((void*)create_info->pNext, 0, 1,
                                &feature_chain) ||
         !requested_vulkan12_features(feature_chain.vulkan12,
                                      &chain_features) ||
@@ -7420,8 +7451,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
         return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
     if (create_info->flags != 0u)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    if (create_info->enabledLayerCount != 0u)
-        return RIN_VK_ERROR_LAYER_NOT_PRESENT;
+    /* Device layers are deprecated and dispatch is owned by the loader. */
     if (!device_extensions_valid(create_info))
         return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
     if (create_info->queueCreateInfoCount == 0u ||
