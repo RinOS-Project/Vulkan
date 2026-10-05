@@ -138,31 +138,89 @@ static void make_constant_fragment(ShaderBlob* shader)
                 RIN_SHADER_UNUSED, 0u);
 }
 
-static void make_constant_compute(uint8_t* storage)
+static void emit_spirv_instruction(uint32_t* words, size_t* count,
+                                   uint16_t opcode, uint16_t word_count,
+                                   const uint32_t* operands)
 {
-    RinShaderHeaderV1* header = (RinShaderHeaderV1*)storage;
-    RinShaderInstructionV1* code =
-        (RinShaderInstructionV1*)(storage + sizeof(*header));
-    memset(storage, 0, sizeof(*header) + 4u * sizeof(*code));
-    header->magic = RIN_SHADER_MAGIC;
-    header->version = RIN_SHADER_IR_VERSION;
-    header->header_size = sizeof(*header);
-    header->stage = RIN_SHADER_STAGE_COMPUTE;
-    header->instruction_count = 4u;
-    header->register_count = 2u;
-    header->resource_count = 1u;
-    header->workgroup_x = 1u;
-    header->workgroup_y = 1u;
-    header->workgroup_z = 1u;
-    header->total_size = sizeof(*header) + 4u * sizeof(*code);
-    instruction(&code[0], RIN_SHADER_OP_CONST_I32, 0u, RIN_SHADER_UNUSED,
-                RIN_SHADER_UNUSED, RIN_SHADER_UNUSED, 0u);
-    instruction(&code[1], RIN_SHADER_OP_CONST_I32, 1u, RIN_SHADER_UNUSED,
-                RIN_SHADER_UNUSED, RIN_SHADER_UNUSED, 42u);
-    instruction(&code[2], RIN_SHADER_OP_STORE_RESOURCE_I32,
-                RIN_SHADER_UNUSED, 0u, 1u, 0u, 0u);
-    instruction(&code[3], RIN_SHADER_OP_RETURN, RIN_SHADER_UNUSED,
-                RIN_SHADER_UNUSED, RIN_SHADER_UNUSED, RIN_SHADER_UNUSED, 0u);
+    uint16_t index;
+    words[(*count)++] = ((uint32_t)word_count << 16u) | opcode;
+    for (index = 1u; index < word_count; ++index)
+        words[(*count)++] = operands[index - 1u];
+}
+
+static size_t make_compute_storage_module(uint32_t* words)
+{
+    size_t count = 5u;
+    uint32_t operands[6];
+
+    words[0] = RIN_SPIRV_MAGIC;
+    words[1] = 0x00010300u;
+    words[2] = 0u;
+    words[3] = 17u;
+    words[4] = 0u;
+    operands[0] = 1u;
+    emit_spirv_instruction(words, &count, 17u, 2u, operands);
+    operands[0] = 0u; operands[1] = 3u;
+    emit_spirv_instruction(words, &count, 14u, 3u, operands);
+    operands[0] = 5u; operands[1] = 10u;
+    operands[2] = 0x6e69616du; operands[3] = 0u; operands[4] = 7u;
+    emit_spirv_instruction(words, &count, 15u, 6u, operands);
+    operands[0] = 10u; operands[1] = 17u;
+    operands[2] = 1u; operands[3] = 1u; operands[4] = 1u;
+    emit_spirv_instruction(words, &count, 16u, 6u, operands);
+    operands[0] = 3u; operands[1] = 2u;
+    emit_spirv_instruction(words, &count, 71u, 3u, operands);
+    operands[0] = 3u; operands[1] = 0u;
+    operands[2] = 35u; operands[3] = 0u;
+    emit_spirv_instruction(words, &count, 72u, 5u, operands);
+    operands[0] = 3u; operands[1] = 1u;
+    operands[2] = 35u; operands[3] = 4u;
+    emit_spirv_instruction(words, &count, 72u, 5u, operands);
+    operands[0] = 7u; operands[1] = 33u; operands[2] = 0u;
+    emit_spirv_instruction(words, &count, 71u, 4u, operands);
+    operands[0] = 7u; operands[1] = 34u; operands[2] = 0u;
+    emit_spirv_instruction(words, &count, 71u, 4u, operands);
+    operands[0] = 1u;
+    emit_spirv_instruction(words, &count, 19u, 2u, operands);
+    operands[0] = 2u; operands[1] = 32u; operands[2] = 0u;
+    emit_spirv_instruction(words, &count, 21u, 4u, operands);
+    operands[0] = 3u; operands[1] = 2u; operands[2] = 2u;
+    emit_spirv_instruction(words, &count, 30u, 4u, operands);
+    operands[0] = 4u; operands[1] = 12u; operands[2] = 3u;
+    emit_spirv_instruction(words, &count, 32u, 4u, operands);
+    operands[0] = 5u; operands[1] = 12u; operands[2] = 2u;
+    emit_spirv_instruction(words, &count, 32u, 4u, operands);
+    operands[0] = 6u; operands[1] = 1u;
+    emit_spirv_instruction(words, &count, 33u, 3u, operands);
+    operands[0] = 4u; operands[1] = 7u; operands[2] = 12u;
+    emit_spirv_instruction(words, &count, 59u, 4u, operands);
+    operands[0] = 2u; operands[1] = 8u; operands[2] = 0u;
+    emit_spirv_instruction(words, &count, 43u, 4u, operands);
+    operands[0] = 2u; operands[1] = 9u; operands[2] = 42u;
+    emit_spirv_instruction(words, &count, 43u, 4u, operands);
+    operands[0] = 2u; operands[1] = 16u; operands[2] = 1u;
+    emit_spirv_instruction(words, &count, 43u, 4u, operands);
+    operands[0] = 1u; operands[1] = 10u; operands[2] = 0u;
+    operands[3] = 6u;
+    emit_spirv_instruction(words, &count, 54u, 5u, operands);
+    operands[0] = 11u;
+    emit_spirv_instruction(words, &count, 248u, 2u, operands);
+    operands[0] = 5u; operands[1] = 12u;
+    operands[2] = 7u; operands[3] = 8u;
+    emit_spirv_instruction(words, &count, 65u, 5u, operands);
+    operands[0] = 2u; operands[1] = 13u; operands[2] = 12u;
+    emit_spirv_instruction(words, &count, 61u, 4u, operands);
+    operands[0] = 2u; operands[1] = 14u;
+    operands[2] = 13u; operands[3] = 9u;
+    emit_spirv_instruction(words, &count, 128u, 5u, operands);
+    operands[0] = 5u; operands[1] = 15u;
+    operands[2] = 7u; operands[3] = 16u;
+    emit_spirv_instruction(words, &count, 65u, 5u, operands);
+    operands[0] = 15u; operands[1] = 14u;
+    emit_spirv_instruction(words, &count, 62u, 3u, operands);
+    emit_spirv_instruction(words, &count, 253u, 1u, operands);
+    emit_spirv_instruction(words, &count, 56u, 1u, operands);
+    return count;
 }
 
 static int present(void* context, const RinGpuSoftwarePresentedImageV1* image)
@@ -411,7 +469,11 @@ int main(void)
     ShaderBlob streamed_vertex;
     ShaderBlob fragment;
     uint8_t compute[sizeof(RinShaderHeaderV1) +
-                    4u * sizeof(RinShaderInstructionV1)];
+                    16u * sizeof(RinShaderInstructionV1)];
+    size_t compute_shader_size = 0u;
+    uint32_t compute_spirv[128];
+    size_t compute_spirv_word_count;
+    RinSpirvTranslationInfoV1 compute_info;
     RinGpuVulkanGraphicsPipelinePlanV1 plan;
     RinGpuVulkanGraphicsPipelinePlanV1 indexed_plan;
     RinGpuVulkanGraphicsPipelinePlanV1 depth_plan;
@@ -448,7 +510,6 @@ int main(void)
     RinGpuHandle fence = 0u;
     uint8_t presented[64u] = {0};
     uint8_t readback[64u] = {0};
-    uint32_t compute_result = 0u;
 
     make_surface(&surface, presented);
     CHECK(rin_gpu_vulkan_graphics_runtime_init(
@@ -795,30 +856,42 @@ int main(void)
         CHECK(nonzero);
     }
 
-    make_constant_compute(compute);
+    compute_spirv_word_count = make_compute_storage_module(compute_spirv);
+    {
+        int translate_result = ringpu_spirv_translate(
+            compute_spirv, compute_spirv_word_count,
+            RIN_SHADER_STAGE_COMPUTE, NULL, 0u, compute, sizeof(compute),
+            &compute_info);
+        if (translate_result != RIN_SPIRV_OK)
+            fprintf(stderr, "compute SPIR-V translation failed: %d (%s)\n",
+                    translate_result, compute_info.diagnostic);
+        CHECK(translate_result == RIN_SPIRV_OK);
+    }
+    compute_shader_size = ((const RinShaderHeaderV1*)compute)->total_size;
+    CHECK(compute_info.shader.resource_count == 1u);
     memset(&buffer_desc, 0, sizeof(buffer_desc));
     buffer_desc.abi_version = RIN_GPU_ABI_VERSION;
     buffer_desc.struct_size = sizeof(buffer_desc);
-    buffer_desc.size_bytes = 4u;
+    buffer_desc.size_bytes = 8u;
     buffer_desc.usage = RIN_GPU_BUFFER_STORAGE | RIN_GPU_BUFFER_COPY_DESTINATION;
     buffer_desc.flags = RIN_GPU_BUFFER_CPU_VISIBLE;
     CHECK(rin_gpu_vulkan_graphics_runtime_create_buffer(
               &runtime, &buffer_desc, &buffer) == RIN_GPU_OK);
     {
-        uint32_t initial = 0u;
+        const uint32_t initial[2] = {UINT32_C(0x12345678), 0u};
         CHECK(rin_gpu_vulkan_graphics_runtime_upload_buffer(
-                  &runtime, buffer, 0u, &initial, sizeof(initial)) == RIN_GPU_OK);
+                  &runtime, buffer, 0u, initial, sizeof(initial)) == RIN_GPU_OK);
     }
     CHECK(rin_gpu_vulkan_graphics_runtime_create_compute_pipeline(
-              &runtime, compute, sizeof(compute), &compute_pipeline) ==
+              &runtime, compute, compute_shader_size, &compute_pipeline) ==
           RIN_GPU_OK);
     memset(&buffer_binding, 0, sizeof(buffer_binding));
     buffer_binding.abi_version = RIN_GPU_ABI_VERSION;
     buffer_binding.struct_size = sizeof(buffer_binding);
     buffer_binding.binding = 0u;
-    buffer_binding.access = RIN_GPU_RESOURCE_WRITE;
+    buffer_binding.access = RIN_GPU_RESOURCE_READ | RIN_GPU_RESOURCE_WRITE;
     buffer_binding.buffer = buffer;
-    buffer_binding.size_bytes = 4u;
+    buffer_binding.size_bytes = 8u;
     CHECK(rin_gpu_vulkan_graphics_runtime_create_compute_bind_group(
               &runtime, compute_pipeline, &buffer_binding, 1u,
               &compute_group) == RIN_GPU_OK);
@@ -840,10 +913,19 @@ int main(void)
                                                 3u) == RIN_GPU_OK);
     CHECK(rin_gpu_vulkan_graphics_runtime_wait_fence(
               &runtime, fence, 3u, RIN_GPU_TIMEOUT_INFINITE) == RIN_GPU_OK);
-    CHECK(ringpu_runtime_readback_buffer(runtime.runtime, buffer, 0u,
-                                         &compute_result,
-                                         sizeof(compute_result)) == RIN_GPU_OK);
-    CHECK(compute_result == 42u);
+    {
+        uint32_t compute_result[2] = {0u, 0u};
+        CHECK(ringpu_runtime_readback_buffer(runtime.runtime, buffer, 0u,
+                                             compute_result,
+                                             sizeof(compute_result)) ==
+              RIN_GPU_OK);
+        if (compute_result[0] != UINT32_C(0x12345678) ||
+            compute_result[1] != UINT32_C(0x123456a2))
+            fprintf(stderr, "compute readback=%08x,%08x\n",
+                    compute_result[0], compute_result[1]);
+        CHECK(compute_result[0] == UINT32_C(0x12345678) &&
+              compute_result[1] == UINT32_C(0x123456a2));
+    }
     CHECK(rin_gpu_vulkan_graphics_runtime_shutdown(&runtime) == RIN_GPU_OK);
     return 0;
 }
