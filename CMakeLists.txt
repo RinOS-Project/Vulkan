@@ -131,7 +131,8 @@ if(BUILD_TESTING)
     target_compile_features(rinvulkan-sync2-scope-test PRIVATE c_std_11)
     target_include_directories(rinvulkan-sync2-scope-test PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${RINGPU_DIR}/include)
     add_test(NAME rinvulkan-sync2-scope
         COMMAND rinvulkan-sync2-scope-test)
     add_executable(rinvulkan-platform-time-test
