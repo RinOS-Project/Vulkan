@@ -1,7 +1,7 @@
 {
   "file_format_version": "1.0.0",
   "ICD": {
-    "library_path": "$ORIGIN/../../../lib/@RIN_VULKAN_ICD_LIBRARY@",
+    "library_path": "../../../lib/@RIN_VULKAN_ICD_LIBRARY@",
     "api_version": "1.0.0"
   }
 }

@@ -193,6 +193,7 @@
 #define RIN_VK_ERROR_FEATURE_NOT_PRESENT (-8)
 #define RIN_VK_ERROR_INCOMPATIBLE_DRIVER (-9)
 #define RIN_VK_ERROR_TOO_MANY_OBJECTS (-10)
+#define RIN_VK_ERROR_FORMAT_NOT_SUPPORTED (-11)
 #define RIN_VK_ERROR_UNKNOWN (-13)
 #define RIN_VK_SUBOPTIMAL_KHR 1000001003
 #define RIN_VK_ERROR_SURFACE_LOST_KHR (-1000000000)
@@ -647,6 +648,12 @@ typedef struct RinVkPhysicalDeviceSparseProperties {
     uint32_t residencyNonResidentStrict;
 } RinVkPhysicalDeviceSparseProperties;
 
+typedef struct RinVkFormatProperties {
+    uint32_t linearTilingFeatures;
+    uint32_t optimalTilingFeatures;
+    uint32_t bufferFeatures;
+} RinVkFormatProperties;
+
 typedef struct RinVkPhysicalDeviceProperties {
     uint32_t apiVersion;
     uint32_t driverVersion;
@@ -804,6 +811,20 @@ typedef struct RinVkExtent3D {
     uint32_t height;
     uint32_t depth;
 } RinVkExtent3D;
+
+typedef struct RinVkImageFormatProperties {
+    RinVkExtent3D maxExtent;
+    uint32_t maxMipLevels;
+    uint32_t maxArrayLayers;
+    uint32_t sampleCounts;
+    uint64_t maxResourceSize;
+} RinVkImageFormatProperties;
+
+typedef struct RinVkSparseImageFormatProperties {
+    uint32_t aspectMask;
+    RinVkExtent3D imageGranularity;
+    uint32_t flags;
+} RinVkSparseImageFormatProperties;
 
 typedef struct RinVkExtent2D {
     uint32_t width;
@@ -1578,6 +1599,7 @@ typedef struct RinVkSamplerCreateInfo {
 #define RIN_VK_IMAGE_TYPE_2D 1u
 #define RIN_VK_FORMAT_R8G8B8A8_UNORM 37
 #define RIN_VK_FORMAT_D32_SFLOAT 126
+#define RIN_VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT UINT32_C(0x00000080)
 #define RIN_VK_IMAGE_TILING_OPTIMAL 0u
 #define RIN_VK_SAMPLE_COUNT_1_BIT 1u
 #define RIN_VK_SAMPLE_COUNT_2_BIT 2u
@@ -2163,6 +2185,20 @@ RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkGetPhysicalDeviceProperties2(
     RinVkPhysicalDevice physical_device,
     RinVkPhysicalDeviceProperties2* properties);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkGetPhysicalDeviceFormatProperties(
+    RinVkPhysicalDevice physical_device, int32_t format,
+    RinVkFormatProperties* properties);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkGetPhysicalDeviceImageFormatProperties(
+    RinVkPhysicalDevice physical_device, int32_t format, uint32_t image_type,
+    uint32_t tiling, uint32_t usage, uint32_t flags,
+    RinVkImageFormatProperties* properties);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkGetPhysicalDeviceSparseImageFormatProperties(
+    RinVkPhysicalDevice physical_device, int32_t format, uint32_t image_type,
+    uint32_t samples, uint32_t usage, uint32_t tiling,
+    uint32_t* property_count, RinVkSparseImageFormatProperties* properties);
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkGetPhysicalDeviceQueueFamilyProperties(
     RinVkPhysicalDevice physical_device, uint32_t* property_count,

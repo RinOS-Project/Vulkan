@@ -30,7 +30,7 @@ static void initialize_profile(RinGpuVulkanPhysicalDeviceV2* profile) {
     memset(profile, 0, sizeof(*profile));
     profile->struct_size = sizeof(*profile);
     profile->version = RIN_GPU_VULKAN_PHYSICAL_VERSION;
-    profile->api_version = RIN_GPU_VK_ICD_API_VERSION;
+    profile->api_version = RIN_GPU_VK_API_1_3;
     profile->flags = RIN_GPU_VK_PHYSICAL_DMA_ISOLATED |
                      RIN_GPU_VK_PHYSICAL_RESET_CAPABLE;
     profile->features = RIN_GPU_VK_FEATURE_KNOWN;
@@ -44,12 +44,16 @@ static void initialize_profile(RinGpuVulkanPhysicalDeviceV2* profile) {
                                        RIN_GPU_VK_QUEUE_TRANSFER;
     profile->queue_families[0].queue_count = 1u;
     profile->queue_families[0].timestamp_valid_bits = 64u;
-    profile->memory_heap_count = 1u;
+    profile->memory_heap_count = 2u;
     profile->memory_heaps[0].size_bytes = UINT64_C(512) * 1024u * 1024u;
     profile->memory_heaps[0].flags = RIN_GPU_VK_HEAP_DEVICE_LOCAL;
-    profile->memory_type_count = 1u;
+    profile->memory_heaps[1].size_bytes = UINT64_C(128) * 1024u * 1024u;
+    profile->memory_type_count = 2u;
     profile->memory_types[0].heap_index = 0u;
     profile->memory_types[0].property_flags = RIN_GPU_VK_MEMORY_DEVICE_LOCAL;
+    profile->memory_types[1].heap_index = 1u;
+    profile->memory_types[1].property_flags =
+        RIN_GPU_VK_MEMORY_HOST_VISIBLE | RIN_GPU_VK_MEMORY_HOST_COHERENT;
     profile->max_sampler_anisotropy = 1.0f;
     profile->max_image_dimension_2d = 4096u;
     profile->max_bound_descriptor_sets = 4u;
@@ -104,6 +108,9 @@ int main(int argc, char** argv) {
     RinVkDebugUtilsMessengerEXT messenger = 0u;
     RinVkPhysicalDevice physical_devices[4];
     RinVkPhysicalDeviceProperties physical_properties;
+    RinVkFormatProperties format_properties;
+    RinVkImageFormatProperties image_format_properties;
+    RinVkSparseImageFormatProperties sparse_format_properties;
     RinVkDeviceQueueCreateInfo queue_info;
     RinVkDeviceCreateInfo device_info;
     RinVkDevice device = NULL;
@@ -220,6 +227,46 @@ int main(int argc, char** argv) {
         fprintf(stderr, "loader selected an unexpected Vulkan ICD: %s\n",
                 physical_properties.deviceName);
         goto cleanup;
+    }
+    vkGetPhysicalDeviceFormatProperties(
+        physical_devices[0], RIN_VK_FORMAT_R8G8B8A8_UNORM,
+        &format_properties);
+    if (format_properties.optimalTilingFeatures !=
+            RIN_VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT ||
+        format_properties.linearTilingFeatures != 0u ||
+        format_properties.bufferFeatures != 0u) {
+        fprintf(stderr, "loader format query returned incorrect RGBA8 support\n");
+        goto cleanup;
+    }
+    if (vkGetPhysicalDeviceImageFormatProperties(
+            physical_devices[0], RIN_VK_FORMAT_R8G8B8A8_UNORM,
+            RIN_VK_IMAGE_TYPE_2D, RIN_VK_IMAGE_TILING_OPTIMAL,
+            RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            0u, &image_format_properties) != RIN_VK_SUCCESS ||
+        image_format_properties.maxExtent.width != 4096u ||
+        image_format_properties.maxExtent.height != 4096u ||
+        image_format_properties.maxExtent.depth != 1u ||
+        image_format_properties.maxMipLevels != 1u ||
+        image_format_properties.maxArrayLayers != 1u ||
+        image_format_properties.maxResourceSize == 0u) {
+        fprintf(stderr, "loader image-format query returned incorrect limits\n");
+        goto cleanup;
+    }
+    {
+        uint32_t sparse_property_count = 1u;
+        memset(&sparse_format_properties, 0xa5,
+               sizeof(sparse_format_properties));
+        vkGetPhysicalDeviceSparseImageFormatProperties(
+            physical_devices[0], RIN_VK_FORMAT_R8G8B8A8_UNORM,
+            RIN_VK_IMAGE_TYPE_2D, RIN_VK_SAMPLE_COUNT_1_BIT,
+            RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            RIN_VK_IMAGE_TILING_OPTIMAL, &sparse_property_count,
+            &sparse_format_properties);
+        if (sparse_property_count != 0u) {
+            fprintf(stderr, "ICD reported unsupported sparse image formats\n");
+            goto cleanup;
+        }
     }
     memset(&queue_info, 0, sizeof(queue_info));
     queue_info.sType = RIN_VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;

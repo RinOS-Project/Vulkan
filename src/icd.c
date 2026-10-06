@@ -7355,6 +7355,99 @@ void RIN_VKAPI_CALL vkGetPhysicalDeviceProperties2(
     (void)driver_info;
 }
 
+void RIN_VKAPI_CALL vkGetPhysicalDeviceFormatProperties(
+        RinVkPhysicalDevice physical_device, int32_t format,
+        RinVkFormatProperties* properties) {
+    RinGpuVulkanPhysicalDeviceV2 profile;
+    if (!properties) return;
+    memset(properties, 0, sizeof(*properties));
+    if (get_physical_profile(physical_device, &profile) !=
+        RIN_GPU_VULKAN_OK)
+        return;
+    if (format == RIN_VK_FORMAT_R8G8B8A8_UNORM)
+        properties->optimalTilingFeatures =
+            RIN_VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+}
+
+RinVkResult RIN_VKAPI_CALL vkGetPhysicalDeviceImageFormatProperties(
+        RinVkPhysicalDevice physical_device, int32_t format,
+        uint32_t image_type, uint32_t tiling, uint32_t usage,
+        uint32_t flags, RinVkImageFormatProperties* properties) {
+    RinGpuVulkanPhysicalDeviceV2 profile;
+    uint64_t resource_size;
+    uint64_t largest_heap = 0u;
+    uint32_t bytes_per_pixel;
+    uint32_t index;
+
+    if (!properties) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    memset(properties, 0, sizeof(*properties));
+    if (get_physical_profile(physical_device, &profile) !=
+            RIN_GPU_VULKAN_OK ||
+        image_type != RIN_VK_IMAGE_TYPE_2D ||
+        tiling != RIN_VK_IMAGE_TILING_OPTIMAL || flags != 0u || usage == 0u ||
+        (usage & ~RIN_VK_IMAGE_USAGE_KNOWN) != 0u ||
+        (format == RIN_VK_FORMAT_D32_SFLOAT &&
+         (usage & RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0u) ||
+        (bytes_per_pixel = image_format_bytes(format)) == 0u ||
+        profile.max_image_dimension_2d == 0u)
+        return RIN_VK_ERROR_FORMAT_NOT_SUPPORTED;
+
+    resource_size = profile.max_image_dimension_2d;
+    if (resource_size > UINT64_MAX / profile.max_image_dimension_2d)
+        resource_size = UINT64_MAX;
+    else
+        resource_size *= profile.max_image_dimension_2d;
+    if (resource_size > UINT64_MAX / bytes_per_pixel)
+        resource_size = UINT64_MAX;
+    else
+        resource_size *= bytes_per_pixel;
+    if (resource_size > UINT64_MAX / RIN_VK_SAMPLE_COUNT_4_BIT)
+        resource_size = UINT64_MAX;
+    else
+        resource_size *= RIN_VK_SAMPLE_COUNT_4_BIT;
+    for (index = 0u; index < profile.memory_heap_count; ++index) {
+        if (profile.memory_heaps[index].size_bytes > largest_heap)
+            largest_heap = profile.memory_heaps[index].size_bytes;
+    }
+    if (largest_heap == 0u) return RIN_VK_ERROR_FORMAT_NOT_SUPPORTED;
+    if (resource_size > largest_heap) resource_size = largest_heap;
+    if (profile.max_buffer_size != 0u &&
+        resource_size > profile.max_buffer_size)
+        resource_size = profile.max_buffer_size;
+    if (resource_size == 0u) return RIN_VK_ERROR_FORMAT_NOT_SUPPORTED;
+
+    properties->maxExtent.width = profile.max_image_dimension_2d;
+    properties->maxExtent.height = profile.max_image_dimension_2d;
+    properties->maxExtent.depth = 1u;
+    properties->maxMipLevels = 1u;
+    properties->maxArrayLayers = 1u;
+    properties->sampleCounts = RIN_VK_SAMPLE_COUNT_1_BIT |
+                               RIN_VK_SAMPLE_COUNT_2_BIT |
+                               RIN_VK_SAMPLE_COUNT_4_BIT;
+    properties->maxResourceSize = resource_size;
+    return RIN_VK_SUCCESS;
+}
+
+void RIN_VKAPI_CALL vkGetPhysicalDeviceSparseImageFormatProperties(
+        RinVkPhysicalDevice physical_device, int32_t format,
+        uint32_t image_type, uint32_t samples, uint32_t usage,
+        uint32_t tiling, uint32_t* property_count,
+        RinVkSparseImageFormatProperties* properties) {
+    RinGpuVulkanPhysicalDeviceV2 profile;
+    if (!property_count) return;
+    *property_count = 0u;
+    if (get_physical_profile(physical_device, &profile) !=
+        RIN_GPU_VULKAN_OK)
+        return;
+    /* Sparse binding and sparse residency are not advertised by this ICD. */
+    (void)format;
+    (void)image_type;
+    (void)samples;
+    (void)usage;
+    (void)tiling;
+    (void)properties;
+}
+
 void RIN_VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties(
         RinVkPhysicalDevice physical_device, uint32_t* property_count,
         RinVkQueueFamilyProperties* properties) {
@@ -13474,6 +13567,13 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetInstanceProcAddr(
         return (RinVkVoidFunction)vkGetPhysicalDeviceProperties;
     if (name_equal(name, "vkGetPhysicalDeviceProperties2"))
         return (RinVkVoidFunction)vkGetPhysicalDeviceProperties2;
+    if (name_equal(name, "vkGetPhysicalDeviceFormatProperties"))
+        return (RinVkVoidFunction)vkGetPhysicalDeviceFormatProperties;
+    if (name_equal(name, "vkGetPhysicalDeviceImageFormatProperties"))
+        return (RinVkVoidFunction)vkGetPhysicalDeviceImageFormatProperties;
+    if (name_equal(name, "vkGetPhysicalDeviceSparseImageFormatProperties"))
+        return (RinVkVoidFunction)
+            vkGetPhysicalDeviceSparseImageFormatProperties;
     if (name_equal(name, "vkGetPhysicalDeviceQueueFamilyProperties"))
         return (RinVkVoidFunction)
             vkGetPhysicalDeviceQueueFamilyProperties;
@@ -13504,6 +13604,13 @@ RinVkVoidFunction RIN_VKAPI_CALL vk_icdGetPhysicalDeviceProcAddr(
         return (RinVkVoidFunction)vkGetPhysicalDeviceProperties;
     if (name_equal(name, "vkGetPhysicalDeviceProperties2"))
         return (RinVkVoidFunction)vkGetPhysicalDeviceProperties2;
+    if (name_equal(name, "vkGetPhysicalDeviceFormatProperties"))
+        return (RinVkVoidFunction)vkGetPhysicalDeviceFormatProperties;
+    if (name_equal(name, "vkGetPhysicalDeviceImageFormatProperties"))
+        return (RinVkVoidFunction)vkGetPhysicalDeviceImageFormatProperties;
+    if (name_equal(name, "vkGetPhysicalDeviceSparseImageFormatProperties"))
+        return (RinVkVoidFunction)
+            vkGetPhysicalDeviceSparseImageFormatProperties;
     if (name_equal(name, "vkGetPhysicalDeviceQueueFamilyProperties"))
         return (RinVkVoidFunction)
             vkGetPhysicalDeviceQueueFamilyProperties;
