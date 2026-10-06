@@ -102,6 +102,15 @@ int main(int argc, char** argv) {
     RinVkInstanceCreateInfo instance_info;
     RinVkInstance instance = NULL;
     RinVkDebugUtilsMessengerEXT messenger = 0u;
+    RinVkPhysicalDevice physical_devices[4];
+    RinVkPhysicalDeviceProperties physical_properties;
+    RinVkDeviceQueueCreateInfo queue_info;
+    RinVkDeviceCreateInfo device_info;
+    RinVkDevice device = NULL;
+    RinVkQueue queue = NULL;
+    float queue_priority = 1.0f;
+    uint32_t physical_device_count =
+        (uint32_t)(sizeof(physical_devices) / sizeof(physical_devices[0]));
     uint32_t validation_errors = 0u;
     int runtime_initialized = 0;
     int runtime_bound = 0;
@@ -198,6 +207,43 @@ int main(int argc, char** argv) {
         fprintf(stderr, "loader vkCreateDebugUtilsMessengerEXT failed\n");
         goto cleanup;
     }
+
+    if (vkEnumeratePhysicalDevices(instance, &physical_device_count,
+                                   physical_devices) != RIN_VK_SUCCESS ||
+        physical_device_count == 0u) {
+        fprintf(stderr, "loader did not expose the RinVulkan fixture device\n");
+        goto cleanup;
+    }
+    memset(&physical_properties, 0, sizeof(physical_properties));
+    vkGetPhysicalDeviceProperties(physical_devices[0], &physical_properties);
+    if (strcmp(physical_properties.deviceName, "RinVulkan validation") != 0) {
+        fprintf(stderr, "loader selected an unexpected Vulkan ICD: %s\n",
+                physical_properties.deviceName);
+        goto cleanup;
+    }
+    memset(&queue_info, 0, sizeof(queue_info));
+    queue_info.sType = RIN_VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    queue_info.queueFamilyIndex = 0u;
+    queue_info.queueCount = 1u;
+    queue_info.pQueuePriorities = &queue_priority;
+    memset(&device_info, 0, sizeof(device_info));
+    device_info.sType = RIN_VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    device_info.queueCreateInfoCount = 1u;
+    device_info.pQueueCreateInfos = &queue_info;
+    if (vkCreateDevice(physical_devices[0], &device_info, NULL, &device) !=
+            RIN_VK_SUCCESS ||
+        !device) {
+        fprintf(stderr, "loader vkCreateDevice failed\n");
+        goto cleanup;
+    }
+    vkGetDeviceQueue(device, 0u, 0u, &queue);
+    if (!queue) {
+        fprintf(stderr, "loader logical-device dispatch failed\n");
+        goto cleanup;
+    }
+    vkDestroyDevice(device, NULL);
+    device = NULL;
+
     destroy_messenger(instance, messenger, NULL);
     messenger = 0u;
     vkDestroyInstance(instance, NULL);
@@ -211,6 +257,7 @@ int main(int argc, char** argv) {
     result = 0;
 
 cleanup:
+    if (device) vkDestroyDevice(device, NULL);
     if (instance) {
         if (messenger && destroy_messenger)
             destroy_messenger(instance, messenger, NULL);
