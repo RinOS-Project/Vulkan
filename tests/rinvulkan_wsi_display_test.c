@@ -1383,6 +1383,35 @@ int main(void) {
 
             swapchain_create_info.imageFormat =
                 RIN_VK_FORMAT_R8G8B8A8_UNORM;
+            {
+                const uint64_t total_bytes_before = software.total_bytes;
+                const uint64_t capacity_before = software.max_total_bytes;
+                const uint64_t one_image_bytes =
+                    UINT64_C(1280) * UINT64_C(720) * UINT64_C(4);
+                RinVulkanProductStatusV1 status_before;
+                RinVulkanProductStatusV1 status_after;
+                RinVkResult partial_result;
+
+                memset(&status_before, 0, sizeof(status_before));
+                CHECK(software.platform.get_status(
+                          software.platform.context, &status_before) ==
+                      RIN_VULKAN_PRODUCT_OK);
+                software.max_total_bytes = total_bytes_before +
+                                           one_image_bytes;
+                swapchain = UINT64_C(0xfeed);
+                partial_result = vkCreateSwapchainKHR(
+                    device, &swapchain_create_info, NULL, &swapchain);
+                software.max_total_bytes = capacity_before;
+                CHECK(partial_result == RIN_VK_ERROR_OUT_OF_DEVICE_MEMORY);
+                CHECK(swapchain == 0u &&
+                      software.total_bytes == total_bytes_before);
+                memset(&status_after, 0, sizeof(status_after));
+                CHECK(software.platform.get_status(
+                          software.platform.context, &status_after) ==
+                      RIN_VULKAN_PRODUCT_OK);
+                CHECK(status_after.active_allocation_count ==
+                      status_before.active_allocation_count);
+            }
             CHECK(vkCreateSwapchainKHR(device, &swapchain_create_info, NULL,
                                        &swapchain) == RIN_VK_SUCCESS);
             CHECK(swapchain != 0u);
