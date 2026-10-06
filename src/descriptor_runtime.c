@@ -304,13 +304,28 @@ int rin_gpu_vulkan_descriptor_pool_destroy(
         RinGpuVulkanDescriptorHandleV1 pool) {
     uint32_t index;
     uint32_t generation;
+    uint32_t set_index;
     if (!runtime_valid(runtime) ||
         !decode_handle(pool, RIN_GPU_VULKAN_DESCRIPTOR_POOL_TAG,
                        runtime->handle_secret,
                        RIN_GPU_VULKAN_DESCRIPTOR_MAX_POOLS, &index,
                        &generation) || runtime->pools[index].state == 0u ||
-        runtime->pools[index].generation != generation ||
-        runtime->pools[index].live_sets != 0u)
+        runtime->pools[index].generation != generation)
+        return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
+    for (set_index = 0u; set_index < RIN_GPU_VULKAN_DESCRIPTOR_MAX_SETS;
+         ++set_index) {
+        RinGpuVulkanDescriptorHandleV1 set;
+        if (runtime->sets[set_index].state == 0u ||
+            runtime->sets[set_index].pool != pool)
+            continue;
+        set = make_handle(RIN_GPU_VULKAN_DESCRIPTOR_SET_TAG, set_index,
+                          runtime->sets[set_index].generation,
+                          runtime->handle_secret);
+        if (rin_gpu_vulkan_descriptor_set_free_from_pool(runtime, pool, set) !=
+            RIN_GPU_VULKAN_GRAPHICS_OK)
+            return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
+    }
+    if (runtime->pools[index].live_sets != 0u)
         return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
     memset(&runtime->pools[index], 0, sizeof(runtime->pools[index]));
     return RIN_GPU_VULKAN_GRAPHICS_OK;
@@ -453,17 +468,34 @@ int rin_gpu_vulkan_descriptor_set_free_from_pool(
         RinGpuVulkanDescriptorRuntimeV1* runtime,
         RinGpuVulkanDescriptorHandleV1 pool,
         RinGpuVulkanDescriptorHandleV1 set) {
+    if (!rin_gpu_vulkan_descriptor_set_is_valid_from_pool(runtime, pool, set))
+        return RIN_GPU_VULKAN_GRAPHICS_INVALID_ARGUMENT;
+    return rin_gpu_vulkan_descriptor_set_free(runtime, set);
+}
+
+int rin_gpu_vulkan_descriptor_set_is_valid_from_pool(
+        const RinGpuVulkanDescriptorRuntimeV1* runtime,
+        RinGpuVulkanDescriptorHandleV1 pool,
+        RinGpuVulkanDescriptorHandleV1 set) {
     uint32_t set_index;
     uint32_t set_generation;
+    uint32_t pool_index;
+    uint32_t pool_generation;
     if (!runtime_valid(runtime) ||
+        !decode_handle(pool, RIN_GPU_VULKAN_DESCRIPTOR_POOL_TAG,
+                       runtime->handle_secret,
+                       RIN_GPU_VULKAN_DESCRIPTOR_MAX_POOLS, &pool_index,
+                       &pool_generation) || runtime->pools[pool_index].state == 0u ||
+        runtime->pools[pool_index].generation != pool_generation ||
         !decode_handle(set, RIN_GPU_VULKAN_DESCRIPTOR_SET_TAG,
                        runtime->handle_secret,
                        RIN_GPU_VULKAN_DESCRIPTOR_MAX_SETS, &set_index,
                        &set_generation) || runtime->sets[set_index].state == 0u ||
         runtime->sets[set_index].generation != set_generation ||
-        runtime->sets[set_index].pool != pool)
-        return RIN_GPU_VULKAN_GRAPHICS_INVALID_ARGUMENT;
-    return rin_gpu_vulkan_descriptor_set_free(runtime, set);
+        runtime->sets[set_index].pool != pool ||
+        runtime->sets[set_index].pool_generation != pool_generation)
+        return 0;
+    return 1;
 }
 
 int rin_gpu_vulkan_descriptor_set_matches_layout(

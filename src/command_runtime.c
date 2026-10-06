@@ -741,6 +741,16 @@ void rin_gpu_vulkan_command_buffer_record_failure(
     }
 }
 
+void rin_gpu_vulkan_command_buffer_invalidate(
+    RinGpuVulkanCommandRuntimeV1* runtime,
+    RinGpuVulkanCommandBufferV1* handle) {
+    RinGpuVulkanCommandBufferV1* buffer = buffer_slot(runtime, handle);
+
+    if (buffer && buffer->in_flight_count == 0u &&
+        buffer->lifecycle != RIN_GPU_VULKAN_COMMAND_BUFFER_INITIAL)
+        buffer->record_error = 1u;
+}
+
 int rin_gpu_vulkan_command_buffers_validate_submit(
     RinGpuVulkanCommandRuntimeV1* runtime, uint32_t count,
     RinGpuVulkanCommandBufferV1* const* buffers) {

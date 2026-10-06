@@ -97,6 +97,10 @@ int rin_gpu_vulkan_descriptor_set_free_from_pool(
     RinGpuVulkanDescriptorRuntimeV1* runtime,
     RinGpuVulkanDescriptorHandleV1 pool,
     RinGpuVulkanDescriptorHandleV1 set);
+int rin_gpu_vulkan_descriptor_set_is_valid_from_pool(
+    const RinGpuVulkanDescriptorRuntimeV1* runtime,
+    RinGpuVulkanDescriptorHandleV1 pool,
+    RinGpuVulkanDescriptorHandleV1 set);
 int rin_gpu_vulkan_descriptor_set_matches_layout(
     const RinGpuVulkanDescriptorRuntimeV1* runtime,
     RinGpuVulkanDescriptorHandleV1 set,

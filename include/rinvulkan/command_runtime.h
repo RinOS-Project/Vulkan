@@ -453,6 +453,9 @@ int rin_gpu_vulkan_command_buffer_record_event(
 void rin_gpu_vulkan_command_buffer_record_failure(
     RinGpuVulkanCommandRuntimeV1* runtime,
     RinGpuVulkanCommandBufferV1* buffer);
+void rin_gpu_vulkan_command_buffer_invalidate(
+    RinGpuVulkanCommandRuntimeV1* runtime,
+    RinGpuVulkanCommandBufferV1* buffer);
 int rin_gpu_vulkan_command_buffers_validate_submit(
     RinGpuVulkanCommandRuntimeV1* runtime, uint32_t count,
     RinGpuVulkanCommandBufferV1* const* buffers);

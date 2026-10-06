@@ -11974,18 +11974,80 @@ RinVkResult RIN_VKAPI_CALL vkCreateDescriptorPool(
     return RIN_VK_SUCCESS;
 }
 
+static int command_buffer_references_descriptor_set(
+        const struct RinVkDevice_T* owner,
+        const RinGpuVulkanCommandBufferV1* command_buffer,
+        RinVkDescriptorSet set) {
+    uint32_t index;
+    if (__atomic_load_n(&command_buffer->state, __ATOMIC_ACQUIRE) != 1u ||
+        command_buffer->owner != (uintptr_t)owner ||
+        command_buffer->descriptor_bind_recorded == 0u)
+        return 0;
+    if (command_buffer->descriptor_bind_set_count >
+        RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS)
+        return 1;
+    for (index = 0u; index < command_buffer->descriptor_bind_set_count;
+         ++index)
+        if (command_buffer->descriptor_sets[index] == (uint64_t)set)
+            return 1;
+    return 0;
+}
+
+static int command_buffer_references_descriptor_pool(
+        const struct RinVkDevice_T* owner,
+        const RinGpuVulkanCommandBufferV1* command_buffer,
+        RinVkDescriptorPool pool) {
+    uint32_t index;
+    if (__atomic_load_n(&command_buffer->state, __ATOMIC_ACQUIRE) != 1u ||
+        command_buffer->owner != (uintptr_t)owner ||
+        command_buffer->descriptor_bind_recorded == 0u)
+        return 0;
+    if (command_buffer->descriptor_bind_set_count >
+        RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS)
+        return 1;
+    for (index = 0u; index < command_buffer->descriptor_bind_set_count;
+         ++index)
+        if (rin_gpu_vulkan_descriptor_set_is_valid_from_pool(
+                &owner->descriptor_runtime,
+                (RinGpuVulkanDescriptorHandleV1)pool,
+                (RinGpuVulkanDescriptorHandleV1)
+                    command_buffer->descriptor_sets[index]))
+            return 1;
+    return 0;
+}
+
 void RIN_VKAPI_CALL vkDestroyDescriptorPool(RinVkDevice device,
                                             RinVkDescriptorPool pool,
                                             const void* allocator) {
     struct RinVkDevice_T* owner = device_slot(device);
+    uint8_t invalidate[RIN_GPU_VULKAN_COMMAND_MAX_BUFFERS] = {0};
+    uint32_t index;
     int result;
     (void)allocator;
     if (!owner || pool == 0u) return;
+    for (index = 0u; index < RIN_GPU_VULKAN_COMMAND_MAX_BUFFERS; ++index) {
+        RinGpuVulkanCommandBufferV1* command =
+            &g_command_runtime.buffers[index];
+        if (!command_buffer_references_descriptor_pool(owner, command, pool))
+            continue;
+        if (command->in_flight_count != 0u) {
+            __atomic_store_n(&owner->descriptor_validation_error, 1u,
+                             __ATOMIC_RELEASE);
+            return;
+        }
+        invalidate[index] = 1u;
+    }
     result = rin_gpu_vulkan_descriptor_pool_destroy(
         &owner->descriptor_runtime, (RinGpuVulkanDescriptorHandleV1)pool);
-    if (result != RIN_GPU_VULKAN_GRAPHICS_OK)
+    if (result != RIN_GPU_VULKAN_GRAPHICS_OK) {
         __atomic_store_n(&owner->descriptor_validation_error, 1u,
                          __ATOMIC_RELEASE);
+        return;
+    }
+    for (index = 0u; index < RIN_GPU_VULKAN_COMMAND_MAX_BUFFERS; ++index)
+        if (invalidate[index] != 0u)
+            rin_gpu_vulkan_command_buffer_invalidate(
+                &g_command_runtime, &g_command_runtime.buffers[index]);
 }
 
 RinVkResult RIN_VKAPI_CALL vkAllocateDescriptorSets(
@@ -12026,18 +12088,48 @@ RinVkResult RIN_VKAPI_CALL vkFreeDescriptorSets(
         const RinVkDescriptorSet* sets) {
     struct RinVkDevice_T* owner = device_slot(device);
     uint32_t index;
-    RinVkResult result = RIN_VK_SUCCESS;
-    if (!owner || pool == 0u || set_count == 0u || !sets)
+    uint32_t prior;
+    if (!owner || pool == 0u || set_count == 0u || !sets ||
+        set_count > RIN_GPU_VULKAN_DESCRIPTOR_MAX_SETS)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
     for (index = 0u; index < set_count; ++index) {
-        int current = rin_gpu_vulkan_descriptor_set_free_from_pool(
+        if (!rin_gpu_vulkan_descriptor_set_is_valid_from_pool(
+                &owner->descriptor_runtime,
+                (RinGpuVulkanDescriptorHandleV1)pool,
+                (RinGpuVulkanDescriptorHandleV1)sets[index]))
+            return RIN_VK_ERROR_INITIALIZATION_FAILED;
+        for (prior = 0u; prior < index; ++prior)
+            if (sets[prior] == sets[index])
+                return RIN_VK_ERROR_INITIALIZATION_FAILED;
+        for (prior = 0u; prior < RIN_GPU_VULKAN_COMMAND_MAX_BUFFERS;
+             ++prior) {
+            const RinGpuVulkanCommandBufferV1* command =
+                &g_command_runtime.buffers[prior];
+            if (command->in_flight_count != 0u &&
+                command_buffer_references_descriptor_set(
+                    owner, command, sets[index]))
+                return RIN_VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
+    for (index = 0u; index < set_count; ++index) {
+        const int current = rin_gpu_vulkan_descriptor_set_free_from_pool(
             &owner->descriptor_runtime,
             (RinGpuVulkanDescriptorHandleV1)pool,
             (RinGpuVulkanDescriptorHandleV1)sets[index]);
         if (current != RIN_GPU_VULKAN_GRAPHICS_OK)
-            result = map_descriptor_result(current);
+            return map_descriptor_result(current);
     }
-    return result;
+    for (index = 0u; index < set_count; ++index)
+        for (prior = 0u; prior < RIN_GPU_VULKAN_COMMAND_MAX_BUFFERS;
+             ++prior) {
+            RinGpuVulkanCommandBufferV1* command =
+                &g_command_runtime.buffers[prior];
+            if (command_buffer_references_descriptor_set(
+                    owner, command, sets[index]))
+                rin_gpu_vulkan_command_buffer_invalidate(
+                    &g_command_runtime, command);
+        }
+    return RIN_VK_SUCCESS;
 }
 
 void RIN_VKAPI_CALL vkUpdateDescriptorSets(
