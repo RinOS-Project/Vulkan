@@ -12072,10 +12072,17 @@ RinVkResult RIN_VKAPI_CALL vkAllocateDescriptorSets(
             (RinGpuVulkanDescriptorHandleV1)info->pSetLayouts[index], &set);
         if (result != RIN_GPU_VULKAN_GRAPHICS_OK) {
             uint32_t cleanup;
-            for (cleanup = 0u; cleanup < index; ++cleanup)
-                (void)rin_gpu_vulkan_descriptor_set_free(
+            int cleanup_failed = 0;
+            for (cleanup = 0u; cleanup < index; ++cleanup) {
+                if (rin_gpu_vulkan_descriptor_set_free(
                     &owner->descriptor_runtime,
-                    (RinGpuVulkanDescriptorHandleV1)sets_out[cleanup]);
+                    (RinGpuVulkanDescriptorHandleV1)sets_out[cleanup]) !=
+                    RIN_GPU_VULKAN_GRAPHICS_OK)
+                    cleanup_failed = 1;
+                sets_out[cleanup] = 0u;
+            }
+            if (cleanup_failed)
+                return RIN_VK_ERROR_INITIALIZATION_FAILED;
             return map_descriptor_result(result);
         }
         sets_out[index] = (RinVkDescriptorSet)set;
