@@ -1612,12 +1612,14 @@ int main(void) {
                 provider.output_generation += 1u;
                 provider.display.output_generation =
                     provider.output_generation;
+                provider.display.width = 1280u;
+                provider.display.height = 720u;
+                provider.display.current_mode_cookie =
+                    provider.modes[1].mode_cookie;
                 provider.planes[0].output_generation =
                     provider.output_generation;
                 provider.modes[0].output_generation =
                     provider.output_generation;
-                provider.modes[0].width = provider.display.width;
-                provider.modes[0].height = provider.display.height;
                 provider.modes[1].output_generation =
                     provider.output_generation;
                 CHECK(vkAcquireNextImageKHR(device, swapchain, 0u,
@@ -1632,6 +1634,41 @@ int main(void) {
             }
             vkDestroySwapchainKHR(device, swapchain, NULL);
             swapchain = 0u;
+            vkDestroySurfaceKHR(instance, created_surface, NULL);
+            created_surface = 0u;
+            count = 1u;
+            CHECK(vkGetPhysicalDeviceDisplayPropertiesKHR(
+                      physical, &count, display_properties) ==
+                  RIN_VK_SUCCESS);
+            CHECK(count == 1u);
+            count = 2u;
+            CHECK(vkGetDisplayModePropertiesKHR(
+                      physical, display_properties[0].display, &count,
+                      mode_properties) == RIN_VK_SUCCESS);
+            CHECK(count == 2u);
+            surface_create_info.displayMode = mode_properties[1].displayMode;
+            surface_create_info.imageExtent.width = 1280u;
+            surface_create_info.imageExtent.height = 720u;
+            CHECK(vkCreateDisplayPlaneSurfaceKHR(
+                      instance, &surface_create_info, NULL,
+                      &created_surface) == RIN_VK_SUCCESS);
+            swapchain_create_info.surface = created_surface;
+            swapchain_create_info.imageExtent.width = 1280u;
+            swapchain_create_info.imageExtent.height = 720u;
+            for (recycle_index = 0u; recycle_index < 2u; ++recycle_index) {
+                CHECK(vkCreateSwapchainKHR(device, &swapchain_create_info,
+                                          NULL, &swapchain) ==
+                      RIN_VK_SUCCESS);
+                image_count = 2u;
+                CHECK(vkGetSwapchainImagesKHR(device, swapchain, &image_count,
+                                              swapchain_images) ==
+                      RIN_VK_SUCCESS);
+                CHECK(image_count == 2u && swapchain_images[0] != 0u &&
+                      swapchain_images[1] != 0u &&
+                      swapchain_images[0] != swapchain_images[1]);
+                vkDestroySwapchainKHR(device, swapchain, NULL);
+                swapchain = 0u;
+            }
             vkDestroySemaphore(device, semaphore, NULL);
             semaphore = 0u;
             vkDestroyFence(device, fence, NULL);
