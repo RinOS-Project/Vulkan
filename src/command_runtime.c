@@ -719,7 +719,7 @@ int rin_gpu_vulkan_command_buffer_record_event(
     RinGpuVulkanCommandBufferV1* buffer = buffer_slot(runtime, handle);
     if (!buffer || buffer->lifecycle != RIN_GPU_VULKAN_COMMAND_BUFFER_RECORDING ||
         event == 0u || operation < RIN_GPU_VULKAN_EVENT_COMMAND_SET ||
-        operation > RIN_GPU_VULKAN_EVENT_COMMAND_WAIT ||
+        operation > RIN_GPU_VULKAN_EVENT_COMMAND_WAIT_2 ||
         buffer->event_command_count >=
             RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS)
         return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;

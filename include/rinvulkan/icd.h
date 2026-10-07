@@ -2446,6 +2446,20 @@ vkCmdPipelineBarrier2(RinVkCommandBuffer command_buffer,
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkCmdPipelineBarrier2KHR(RinVkCommandBuffer command_buffer,
                          const RinVkDependencyInfo* dependency_info);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdSetEvent2(RinVkCommandBuffer command_buffer, RinVkEvent event,
+               const RinVkDependencyInfo* dependency_info);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdSetEvent2KHR(RinVkCommandBuffer command_buffer, RinVkEvent event,
+                  const RinVkDependencyInfo* dependency_info);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdWaitEvents2(RinVkCommandBuffer command_buffer, uint32_t event_count,
+                 const RinVkEvent* events,
+                 const RinVkDependencyInfo* dependency_infos);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdWaitEvents2KHR(RinVkCommandBuffer command_buffer, uint32_t event_count,
+                    const RinVkEvent* events,
+                    const RinVkDependencyInfo* dependency_infos);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkQueueSubmit(RinVkQueue queue, uint32_t submit_count,
               const RinVkSubmitInfo* submits, uint64_t fence);
