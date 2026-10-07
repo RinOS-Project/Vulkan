@@ -11453,7 +11453,6 @@ static RinVkResult snapshot_compute_submission(
             RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS ||
         command_buffer->barrier_count != 0u ||
         command_buffer->query_command_count != 0u ||
-        command_buffer->event_command_count != 0u ||
         command_buffer->compute_dispatch_count != 1u ||
         command_buffer->bound_compute_pipeline == 0u ||
         command_buffer->compute_pipeline_bound == 0u ||
