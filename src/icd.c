@@ -415,6 +415,13 @@ typedef struct RinVkEventDependencySignatureV1 {
     uint64_t image_barriers[RIN_GPU_VULKAN_COMMAND_MAX_BARRIERS][14];
 } RinVkEventDependencySignatureV1;
 
+typedef struct RinVkEventWaitGroupV1 {
+    /* vkCmdWaitEvents validates one exact signal-stage union per call. */
+    uint32_t first_event_index;
+    uint32_t event_count;
+    uint32_t source_stage_mask;
+} RinVkEventWaitGroupV1;
+
 typedef struct RinVkEventSlot {
     uint32_t state;
     uint32_t generation;
@@ -586,6 +593,9 @@ static RinVkEventDependencySignatureV1
 static uint8_t g_command_event_dependency_valid
     [RIN_GPU_VULKAN_COMMAND_MAX_BUFFERS]
     [RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS];
+static RinVkEventWaitGroupV1
+    g_command_event_wait_groups[RIN_GPU_VULKAN_COMMAND_MAX_BUFFERS]
+                               [RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS];
 
 static int command_buffer_runtime_index(
         const RinGpuVulkanCommandBufferV1* command_buffer,
@@ -623,6 +633,8 @@ static void clear_command_event_dependencies(
            sizeof(g_command_event_dependencies[buffer_index]));
     memset(g_command_event_dependency_valid[buffer_index], 0,
            sizeof(g_command_event_dependency_valid[buffer_index]));
+    memset(g_command_event_wait_groups[buffer_index], 0,
+           sizeof(g_command_event_wait_groups[buffer_index]));
 }
 
 static void clear_command_event_dependency(
@@ -635,6 +647,28 @@ static void clear_command_event_dependency(
     memset(&g_command_event_dependencies[buffer_index][event_command_index],
            0, sizeof(g_command_event_dependencies[buffer_index][0]));
     g_command_event_dependency_valid[buffer_index][event_command_index] = 0u;
+    memset(&g_command_event_wait_groups[buffer_index][event_command_index],
+           0, sizeof(g_command_event_wait_groups[buffer_index][0]));
+}
+
+static int store_command_event_wait_group(
+        RinGpuVulkanCommandBufferV1* command_buffer,
+        uint32_t event_command_index, uint32_t first_event_index,
+        uint32_t event_count, uint32_t source_stage_mask) {
+    uint32_t buffer_index;
+    RinVkEventWaitGroupV1* group;
+    if (event_command_index >= RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS ||
+        first_event_index > event_command_index || event_count == 0u ||
+        event_count > RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS -
+                          first_event_index ||
+        event_command_index - first_event_index >= event_count ||
+        !command_buffer_runtime_index(command_buffer, &buffer_index))
+        return 0;
+    group = &g_command_event_wait_groups[buffer_index][event_command_index];
+    group->first_event_index = first_event_index;
+    group->event_count = event_count;
+    group->source_stage_mask = source_stage_mask;
+    return 1;
 }
 
 static int store_command_event_dependency(
@@ -3863,6 +3897,12 @@ static int validate_submission_query_events(
          ++buffer_index) {
         RinGpuVulkanCommandBufferV1* buffer = command_buffers[buffer_index];
         uint32_t index;
+        uint32_t runtime_buffer_index;
+        uint32_t legacy_wait_first = 0u;
+        uint32_t legacy_wait_count = 0u;
+        uint32_t legacy_wait_seen = 0u;
+        uint32_t legacy_wait_source_stages = 0u;
+        uint32_t legacy_wait_signaled_stages = 0u;
         if (!buffer) return 0;
         for (index = 0u; index < buffer->query_command_count; ++index) {
             const RinGpuVulkanQueryCommandV1* command =
@@ -3912,14 +3952,21 @@ static int validate_submission_query_events(
                 return 0;
             }
         }
+        if (!command_buffer_runtime_index(buffer, &runtime_buffer_index))
+            return 0;
         for (index = 0u; index < buffer->event_command_count; ++index) {
             const RinGpuVulkanEventCommandV1* command =
                 &buffer->event_commands[index];
+            const RinVkEventWaitGroupV1* wait_group =
+                &g_command_event_wait_groups[runtime_buffer_index][index];
             RinVkEventSlot* event = event_slot(
                 (RinVkDevice)device, (RinVkEvent)command->event);
             const uint32_t event_pending = event
                 ? __atomic_load_n(&event->pending, __ATOMIC_ACQUIRE) : 0u;
             uint32_t event_index;
+            if (command->operation != RIN_GPU_VULKAN_EVENT_COMMAND_WAIT &&
+                legacy_wait_count != 0u)
+                return 0;
             if (!event ||
                 (event_pending != 0u &&
                  __atomic_load_n(&event->pending_queue_id,
@@ -3985,11 +4032,44 @@ static int validate_submission_query_events(
                        sizeof(event_signal_dependencies[event_index]));
             } else if (command->operation ==
                        RIN_GPU_VULKAN_EVENT_COMMAND_WAIT) {
-                if (event_signaled[event_index] == 0u ||
-                    event_signal_sync2[event_index] != 0u ||
-                    (event_signal_stage_masks[event_index] &
-                     ~command->stage_mask) != 0u)
+                /* The legacy source scope is shared by the complete event
+                 * array, so validate its union only after all entries. */
+                if (wait_group->event_count == 0u ||
+                    wait_group->first_event_index > index ||
+                    wait_group->event_count >
+                        buffer->event_command_count -
+                            wait_group->first_event_index ||
+                    index - wait_group->first_event_index >=
+                        wait_group->event_count ||
+                    command->stage_mask != wait_group->source_stage_mask)
                     return 0;
+                if (wait_group->first_event_index == index) {
+                    if (legacy_wait_count != 0u) return 0;
+                    legacy_wait_first = index;
+                    legacy_wait_count = wait_group->event_count;
+                    legacy_wait_seen = 0u;
+                    legacy_wait_source_stages =
+                        wait_group->source_stage_mask;
+                    legacy_wait_signaled_stages = 0u;
+                }
+                if (legacy_wait_count == 0u ||
+                    wait_group->first_event_index != legacy_wait_first ||
+                    wait_group->event_count != legacy_wait_count ||
+                    wait_group->source_stage_mask !=
+                        legacy_wait_source_stages ||
+                    index != legacy_wait_first + legacy_wait_seen ||
+                    event_signaled[event_index] == 0u ||
+                    event_signal_sync2[event_index] != 0u)
+                    return 0;
+                legacy_wait_signaled_stages |=
+                    event_signal_stage_masks[event_index];
+                ++legacy_wait_seen;
+                if (legacy_wait_seen == legacy_wait_count) {
+                    if (legacy_wait_signaled_stages !=
+                        legacy_wait_source_stages)
+                        return 0;
+                    legacy_wait_count = 0u;
+                }
             } else if (command->operation ==
                        RIN_GPU_VULKAN_EVENT_COMMAND_WAIT_2) {
                 const RinVkEventDependencySignatureV1* wait_dependency =
@@ -4011,6 +4091,7 @@ static int validate_submission_query_events(
                 return 0;
             }
         }
+        if (legacy_wait_count != 0u) return 0;
     }
     for (uint32_t index = 0u; index < query_count; ++index)
         if (query_active[index] != 0u) return 0;
@@ -10395,6 +10476,7 @@ void RIN_VKAPI_CALL vkCmdWaitEvents(
     uint64_t dst_stage_scope;
     uint32_t operation_count = 0u;
     uint32_t index;
+    uint32_t first_event_index;
     memset(operations, 0, sizeof(operations));
     if (!command_owner_device(core, &owner) || event_count == 0u ||
         event_count > RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS || !events ||
@@ -10481,6 +10563,7 @@ void RIN_VKAPI_CALL vkCmdWaitEvents(
             return;
         }
     }
+    first_event_index = core->event_command_count;
     for (index = 0u; index < event_count; ++index) {
         if (rin_gpu_vulkan_command_buffer_record_event(
                 &g_command_runtime, core, events[index],
@@ -10489,9 +10572,19 @@ void RIN_VKAPI_CALL vkCmdWaitEvents(
             record_query_failure(core);
             return;
         }
-        core->event_commands[core->event_command_count - 1u].stage_mask =
-            src_stage_mask;
-        clear_command_event_dependency(core, core->event_command_count - 1u);
+        {
+            const uint32_t event_command_index =
+                core->event_command_count - 1u;
+            core->event_commands[event_command_index].stage_mask =
+                src_stage_mask;
+            clear_command_event_dependency(core, event_command_index);
+            if (!store_command_event_wait_group(
+                    core, event_command_index, first_event_index,
+                    event_count, src_stage_mask)) {
+                record_query_failure(core);
+                return;
+            }
+        }
     }
     if (operation_count != 0u)
         record_transfer_ops(core, operations, operation_count, NULL, 0u);
