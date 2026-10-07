@@ -2,6 +2,10 @@
 
 #include "sync2_scope.h"
 
+int rin_vk_sync2_dependency_flags_valid(uint32_t public_flags) {
+    return (public_flags & ~RIN_VK_DEPENDENCY_BY_REGION_BIT) == 0u;
+}
+
 int rin_vk_sync2_stage_mask(uint64_t public_mask, uint64_t* runtime_mask_out) {
     const uint64_t transfer_stages =
         RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT |

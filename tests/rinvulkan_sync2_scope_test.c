@@ -6,6 +6,17 @@
 
 #include "sync2_scope.h"
 
+static void test_supported_dependency_flags(void) {
+    assert(rin_vk_sync2_dependency_flags_valid(0u));
+    assert(rin_vk_sync2_dependency_flags_valid(
+        RIN_VK_DEPENDENCY_BY_REGION_BIT));
+    assert(!rin_vk_sync2_dependency_flags_valid(UINT32_C(0x2)));
+    assert(!rin_vk_sync2_dependency_flags_valid(UINT32_C(0x4)));
+    assert(!rin_vk_sync2_dependency_flags_valid(
+        RIN_VK_DEPENDENCY_BY_REGION_BIT | UINT32_C(0x2)));
+    assert(!rin_vk_sync2_dependency_flags_valid(UINT32_C(0x80000000)));
+}
+
 static void test_transfer_stage_aliases(void) {
     const uint64_t transfer_stages =
         RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT |
@@ -168,6 +179,7 @@ static void test_barrier_scope_packet_mapping(void) {
 }
 
 int main(void) {
+    test_supported_dependency_flags();
     test_transfer_stage_aliases();
     test_legacy_wait_stage_projection();
     test_compute_storage_barrier_scope();

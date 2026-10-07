@@ -8802,7 +8802,9 @@ void RIN_VKAPI_CALL vkCmdPipelineBarrier2(
         !command_owner_device(core, &owner) ||
         !owner->synchronization2_enabled ||
         dependency_info->sType != RIN_VK_STRUCTURE_TYPE_DEPENDENCY_INFO ||
-        dependency_info->pNext || dependency_info->dependencyFlags != 0u ||
+        dependency_info->pNext ||
+        !rin_vk_sync2_dependency_flags_valid(
+            dependency_info->dependencyFlags) ||
         (dependency_info->memoryBarrierCount != 0u &&
          !dependency_info->pMemoryBarriers) ||
         (dependency_info->bufferMemoryBarrierCount != 0u &&

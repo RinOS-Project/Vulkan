@@ -8,6 +8,12 @@
 #include <rinvulkan/command_runtime.h>
 #include <rinvulkan/icd.h>
 
+#define RIN_VK_DEPENDENCY_BY_REGION_BIT UINT32_C(0x00000001)
+
+/* The packet contract has queue-global barriers, which conservatively cover
+ * the framebuffer regions requested by BY_REGION. Other dependency modes need
+ * packet fields the current contract does not provide. */
+int rin_vk_sync2_dependency_flags_valid(uint32_t public_flags);
 int rin_vk_sync2_stage_mask(uint64_t public_mask, uint64_t* runtime_mask_out);
 int rin_vk_sync2_legacy_wait_stage_mask(uint64_t public_mask,
                                        uint32_t* legacy_mask_out);
