@@ -442,15 +442,19 @@ typedef struct RinVkEventSlot {
     struct RinVkDevice_T* owner;
     volatile uint32_t signaled;
     volatile uint32_t signal_stage_mask;
+    volatile uint32_t signal_queue_id;
     uint32_t signal_sync2;
     RinVkEventDependencySignatureV1 signal_dependency;
     volatile uint32_t pending_queue_id;
     volatile uint32_t pending_signaled;
     volatile uint32_t pending_signal_stage_mask;
+    volatile uint32_t pending_signal_queue_id;
     uint32_t pending_signal_sync2;
     RinVkEventDependencySignatureV1 pending_signal_dependency;
     volatile uint32_t pending;
 } RinVkEventSlot;
+
+#define RIN_VK_EVENT_SIGNAL_QUEUE_HOST UINT32_MAX
 
 typedef struct RinVkFenceSlot {
     uint32_t state;
@@ -3621,11 +3625,14 @@ static void clear_event_slot(RinVkEventSlot* slot) {
     slot->owner = NULL;
     __atomic_store_n(&slot->signaled, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&slot->signal_stage_mask, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&slot->signal_queue_id, 0u, __ATOMIC_RELEASE);
     slot->signal_sync2 = 0u;
     memset(&slot->signal_dependency, 0, sizeof(slot->signal_dependency));
     __atomic_store_n(&slot->pending_queue_id, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&slot->pending_signaled, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&slot->pending_signal_stage_mask, 0u,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&slot->pending_signal_queue_id, 0u,
                      __ATOMIC_RELEASE);
     slot->pending_signal_sync2 = 0u;
     memset(&slot->pending_signal_dependency, 0,
@@ -3968,12 +3975,16 @@ static void complete_submission_query_events(
                     }
                     __atomic_store_n(&event->signal_stage_mask,
                                      command->stage_mask, __ATOMIC_RELAXED);
+                    __atomic_store_n(&event->signal_queue_id,
+                                     submission->queue_id, __ATOMIC_RELAXED);
                     __atomic_store_n(&event->signaled, 1u, __ATOMIC_RELEASE);
                 }
             } else if (command->operation ==
                        RIN_GPU_VULKAN_EVENT_COMMAND_RESET) {
                 __atomic_store_n(&event->signaled, 0u, __ATOMIC_RELEASE);
                 __atomic_store_n(&event->signal_stage_mask, 0u,
+                                 __ATOMIC_RELEASE);
+                __atomic_store_n(&event->signal_queue_id, 0u,
                                  __ATOMIC_RELEASE);
                 event->signal_sync2 = 0u;
                 memset(&event->signal_dependency, 0,
@@ -3995,6 +4006,7 @@ static int validate_submission_query_events(
     uint8_t event_signaled[64] = {0};
     uint8_t event_signal_sync2[64] = {0};
     uint32_t event_signal_stage_masks[64] = {0};
+    uint32_t event_signal_queue_ids[64] = {0};
     RinVkEventDependencySignatureV1 event_signal_dependencies[64];
     uint32_t buffer_index;
     memset(event_signal_dependencies, 0, sizeof(event_signal_dependencies));
@@ -4092,6 +4104,8 @@ static int validate_submission_query_events(
                                         __ATOMIC_ACQUIRE) != 0u);
                     event_signal_stage_masks[event_count] = __atomic_load_n(
                         &event->pending_signal_stage_mask, __ATOMIC_ACQUIRE);
+                    event_signal_queue_ids[event_count] = __atomic_load_n(
+                        &event->pending_signal_queue_id, __ATOMIC_ACQUIRE);
                     event_signal_sync2[event_count] =
                         (uint8_t)event->pending_signal_sync2;
                     if (event_signal_sync2[event_count] != 0u &&
@@ -4104,6 +4118,8 @@ static int validate_submission_query_events(
                                         __ATOMIC_ACQUIRE) != 0u);
                     event_signal_stage_masks[event_count] = __atomic_load_n(
                         &event->signal_stage_mask, __ATOMIC_ACQUIRE);
+                    event_signal_queue_ids[event_count] = __atomic_load_n(
+                        &event->signal_queue_id, __ATOMIC_ACQUIRE);
                     event_signal_sync2[event_count] =
                         (uint8_t)event->signal_sync2;
                     if (event_signal_sync2[event_count] != 0u &&
@@ -4118,6 +4134,7 @@ static int validate_submission_query_events(
                 if (event_signaled[event_index] == 0u) {
                     event_signaled[event_index] = 1u;
                     event_signal_stage_masks[event_index] = command->stage_mask;
+                    event_signal_queue_ids[event_index] = queue_id;
                     event_signal_sync2[event_index] = (uint8_t)(
                         command->operation ==
                         RIN_GPU_VULKAN_EVENT_COMMAND_SET_2);
@@ -4135,6 +4152,7 @@ static int validate_submission_query_events(
                        RIN_GPU_VULKAN_EVENT_COMMAND_RESET) {
                 event_signaled[event_index] = 0u;
                 event_signal_stage_masks[event_index] = 0u;
+                event_signal_queue_ids[event_index] = 0u;
                 event_signal_sync2[event_index] = 0u;
                 memset(&event_signal_dependencies[event_index], 0,
                        sizeof(event_signal_dependencies[event_index]));
@@ -4167,6 +4185,9 @@ static int validate_submission_query_events(
                         legacy_wait_source_stages ||
                     index != legacy_wait_first + legacy_wait_seen ||
                     event_signaled[event_index] == 0u ||
+                    (event_signal_queue_ids[event_index] !=
+                         RIN_VK_EVENT_SIGNAL_QUEUE_HOST &&
+                     event_signal_queue_ids[event_index] != queue_id) ||
                     event_signal_sync2[event_index] != 0u)
                     return 0;
                 legacy_wait_signaled_stages |=
@@ -4183,6 +4204,10 @@ static int validate_submission_query_events(
                 const RinVkEventDependencySignatureV1* wait_dependency =
                     command_event_dependency(buffer, index);
                 if (!wait_dependency || event_signaled[event_index] == 0u)
+                    return 0;
+                if (event_signal_queue_ids[event_index] !=
+                        RIN_VK_EVENT_SIGNAL_QUEUE_HOST &&
+                    event_signal_queue_ids[event_index] != queue_id)
                     return 0;
                 if (event_signal_sync2[event_index] != 0u) {
                     if (memcmp(&event_signal_dependencies[event_index],
@@ -4248,6 +4273,10 @@ static void mark_submission_query_events(
                                      __atomic_load_n(&event->signal_stage_mask,
                                                      __ATOMIC_ACQUIRE),
                                      __ATOMIC_RELEASE);
+                    __atomic_store_n(&event->pending_signal_queue_id,
+                                     __atomic_load_n(&event->signal_queue_id,
+                                                     __ATOMIC_ACQUIRE),
+                                     __ATOMIC_RELEASE);
                     event->pending_signal_sync2 = event->signal_sync2;
                     event->pending_signal_dependency =
                         event->signal_dependency;
@@ -4262,6 +4291,9 @@ static void mark_submission_query_events(
                                          __ATOMIC_RELEASE);
                         __atomic_store_n(&event->pending_signal_stage_mask,
                                          event_command->stage_mask,
+                                         __ATOMIC_RELEASE);
+                        __atomic_store_n(&event->pending_signal_queue_id,
+                                         submission->queue_id,
                                          __ATOMIC_RELEASE);
                         if (event_command->operation ==
                             RIN_GPU_VULKAN_EVENT_COMMAND_SET_2) {
@@ -4282,6 +4314,8 @@ static void mark_submission_query_events(
                                      __ATOMIC_RELEASE);
                     __atomic_store_n(&event->pending_signal_stage_mask, 0u,
                                      __ATOMIC_RELEASE);
+                    __atomic_store_n(&event->pending_signal_queue_id, 0u,
+                                     __ATOMIC_RELEASE);
                     memset(&event->pending_signal_dependency, 0,
                            sizeof(event->pending_signal_dependency));
                     event->pending_signal_sync2 = 0u;
@@ -4298,6 +4332,10 @@ static void mark_submission_query_events(
                                      __ATOMIC_RELEASE);
                     __atomic_store_n(&event->pending_signal_stage_mask,
                                      __atomic_load_n(&event->signal_stage_mask,
+                                                     __ATOMIC_ACQUIRE),
+                                     __ATOMIC_RELEASE);
+                    __atomic_store_n(&event->pending_signal_queue_id,
+                                     __atomic_load_n(&event->signal_queue_id,
                                                      __ATOMIC_ACQUIRE),
                                      __ATOMIC_RELEASE);
                     event->pending_signal_sync2 = event->signal_sync2;
@@ -10398,6 +10436,8 @@ RinVkResult RIN_VKAPI_CALL vkSetEvent(RinVkDevice device, RinVkEvent event) {
     slot->signal_sync2 = 0u;
     __atomic_store_n(&slot->signal_stage_mask,
                      RIN_VK_PIPELINE_STAGE_HOST_BIT, __ATOMIC_RELAXED);
+    __atomic_store_n(&slot->signal_queue_id,
+                     RIN_VK_EVENT_SIGNAL_QUEUE_HOST, __ATOMIC_RELAXED);
     __atomic_store_n(&slot->signaled, 1u, __ATOMIC_RELEASE);
     return RIN_VK_SUCCESS;
 }
@@ -10408,6 +10448,7 @@ RinVkResult RIN_VKAPI_CALL vkResetEvent(RinVkDevice device, RinVkEvent event) {
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
     __atomic_store_n(&slot->signaled, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&slot->signal_stage_mask, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&slot->signal_queue_id, 0u, __ATOMIC_RELEASE);
     slot->signal_sync2 = 0u;
     memset(&slot->signal_dependency, 0, sizeof(slot->signal_dependency));
     return RIN_VK_SUCCESS;
