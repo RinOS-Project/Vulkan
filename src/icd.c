@@ -9474,8 +9474,8 @@ void RIN_VKAPI_CALL vkCmdPipelineBarrier2(
     barrier_count = (uint64_t)dependency_info->memoryBarrierCount +
                     dependency_info->bufferMemoryBarrierCount +
                     dependency_info->imageMemoryBarrierCount;
-    if (barrier_count == 0u ||
-        barrier_count > RIN_GPU_VULKAN_COMMAND_MAX_BARRIERS) {
+    if (barrier_count == 0u) return;
+    if (barrier_count > RIN_GPU_VULKAN_COMMAND_MAX_BARRIERS) {
         valid = 0;
         goto done;
     }
