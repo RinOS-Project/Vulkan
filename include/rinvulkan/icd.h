@@ -2443,12 +2443,18 @@ vkCmdClearDepthStencilImage(
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkCmdPipelineBarrier2(RinVkCommandBuffer command_buffer,
                       const RinVkDependencyInfo* dependency_info);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdPipelineBarrier2KHR(RinVkCommandBuffer command_buffer,
+                         const RinVkDependencyInfo* dependency_info);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkQueueSubmit(RinVkQueue queue, uint32_t submit_count,
               const RinVkSubmitInfo* submits, uint64_t fence);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkQueueSubmit2(RinVkQueue queue, uint32_t submit_count,
                const RinVkSubmitInfo2* submits, uint64_t fence);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkQueueSubmit2KHR(RinVkQueue queue, uint32_t submit_count,
+                  const RinVkSubmitInfo2* submits, uint64_t fence);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkAllocateMemory(RinVkDevice device,
                  const RinVkMemoryAllocateInfo* allocate_info,

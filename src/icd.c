@@ -9540,6 +9540,12 @@ done:
         rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime, core);
 }
 
+void RIN_VKAPI_CALL vkCmdPipelineBarrier2KHR(
+        RinVkCommandBuffer command_buffer,
+        const RinVkDependencyInfo* dependency_info) {
+    vkCmdPipelineBarrier2(command_buffer, dependency_info);
+}
+
 static uint32_t query_value_count(const RinVkQueryPoolSlot* pool) {
     return pool && pool->query_type == RIN_VK_QUERY_TYPE_TIMESTAMP ? 1u : 0u;
 }
@@ -12216,6 +12222,12 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit2(
     return vkQueueSubmit(queue, 1u, &legacy, fence);
 }
 
+RinVkResult RIN_VKAPI_CALL vkQueueSubmit2KHR(
+        RinVkQueue queue, uint32_t submit_count,
+        const RinVkSubmitInfo2* submits, uint64_t fence) {
+    return vkQueueSubmit2(queue, submit_count, submits, fence);
+}
+
 RinVkResult RIN_VKAPI_CALL vkAllocateMemory(
         RinVkDevice device, const RinVkMemoryAllocateInfo* allocate_info,
         const void* allocator, RinVkDeviceMemory* memory_out) {
@@ -14189,6 +14201,9 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
         return (RinVkVoidFunction)vkQueueSubmit;
     if (name_equal(name, "vkQueueSubmit2"))
         return (RinVkVoidFunction)vkQueueSubmit2;
+    if (device_value->synchronization2_enabled &&
+        name_equal(name, "vkQueueSubmit2KHR"))
+        return (RinVkVoidFunction)vkQueueSubmit2KHR;
     if (name_equal(name, "vkCreateCommandPool"))
         return (RinVkVoidFunction)vkCreateCommandPool;
     if (name_equal(name, "vkDestroyCommandPool"))
@@ -14207,6 +14222,9 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
         return (RinVkVoidFunction)vkResetCommandBuffer;
     if (name_equal(name, "vkCmdPipelineBarrier2"))
         return (RinVkVoidFunction)vkCmdPipelineBarrier2;
+    if (device_value->synchronization2_enabled &&
+        name_equal(name, "vkCmdPipelineBarrier2KHR"))
+        return (RinVkVoidFunction)vkCmdPipelineBarrier2KHR;
     if (name_equal(name, "vkCmdCopyBuffer"))
         return (RinVkVoidFunction)vkCmdCopyBuffer;
     if (name_equal(name, "vkCmdCopyImage"))
