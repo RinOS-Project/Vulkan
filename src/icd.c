@@ -4067,22 +4067,25 @@ static void mark_submission_query_events(
                         RIN_GPU_VULKAN_EVENT_COMMAND_SET ||
                     event_command->operation ==
                         RIN_GPU_VULKAN_EVENT_COMMAND_SET_2) {
-                    __atomic_store_n(&event->pending_signaled, 1u,
-                                     __ATOMIC_RELEASE);
-                    __atomic_store_n(&event->pending_signal_stage_mask,
-                                     event_command->stage_mask,
-                                     __ATOMIC_RELEASE);
-                    if (event_command->operation ==
-                        RIN_GPU_VULKAN_EVENT_COMMAND_SET_2) {
-                        const RinVkEventDependencySignatureV1* signature =
-                            command_event_dependency(buffer, index);
-                        if (!signature) continue;
-                        event->pending_signal_dependency = *signature;
-                        event->pending_signal_sync2 = 1u;
-                    } else {
-                        memset(&event->pending_signal_dependency, 0,
-                               sizeof(event->pending_signal_dependency));
-                        event->pending_signal_sync2 = 0u;
+                    if (__atomic_load_n(&event->pending_signaled,
+                                        __ATOMIC_ACQUIRE) == 0u) {
+                        __atomic_store_n(&event->pending_signaled, 1u,
+                                         __ATOMIC_RELEASE);
+                        __atomic_store_n(&event->pending_signal_stage_mask,
+                                         event_command->stage_mask,
+                                         __ATOMIC_RELEASE);
+                        if (event_command->operation ==
+                            RIN_GPU_VULKAN_EVENT_COMMAND_SET_2) {
+                            const RinVkEventDependencySignatureV1* signature =
+                                command_event_dependency(buffer, index);
+                            if (!signature) continue;
+                            event->pending_signal_dependency = *signature;
+                            event->pending_signal_sync2 = 1u;
+                        } else {
+                            memset(&event->pending_signal_dependency, 0,
+                                   sizeof(event->pending_signal_dependency));
+                            event->pending_signal_sync2 = 0u;
+                        }
                     }
                 } else if (event_command->operation ==
                            RIN_GPU_VULKAN_EVENT_COMMAND_RESET) {
