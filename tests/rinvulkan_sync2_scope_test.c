@@ -68,6 +68,41 @@ static void test_legacy_wait_stage_projection(void) {
         RIN_VK_PIPELINE_STAGE_2_COPY_BIT, NULL));
 }
 
+static void test_legacy_stage_conversion(void) {
+    const uint64_t graphics_scope =
+        RIN_VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+        RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    uint64_t sync2_mask = 0u;
+    assert(rin_vk_sync2_legacy_stage_mask(
+        RIN_VK_PIPELINE_STAGE_TRANSFER_BIT, &sync2_mask));
+    assert(sync2_mask == RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT);
+    assert(rin_vk_sync2_legacy_stage_mask(
+        RIN_VK_PIPELINE_STAGE_HOST_BIT, &sync2_mask));
+    assert(sync2_mask == RIN_VK_PIPELINE_STAGE_2_HOST_BIT);
+    assert(rin_vk_sync2_legacy_stage_mask(
+        RIN_VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, &sync2_mask));
+    assert(sync2_mask == RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+    assert(rin_vk_sync2_legacy_stage_mask(
+        RIN_VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, &sync2_mask));
+    assert(sync2_mask == graphics_scope);
+    assert(rin_vk_sync2_legacy_stage_mask(
+        RIN_VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, &sync2_mask));
+    assert(sync2_mask == graphics_scope);
+    assert(rin_vk_sync2_legacy_stage_mask(
+        RIN_VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, &sync2_mask));
+    assert(sync2_mask == RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+    assert(rin_vk_sync2_legacy_stage_mask(
+        RIN_VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, &sync2_mask));
+    assert(sync2_mask == RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+    assert(rin_vk_sync2_legacy_stage_mask(
+        RIN_VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, &sync2_mask));
+    assert(sync2_mask == RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+    assert(!rin_vk_sync2_legacy_stage_mask(0u, &sync2_mask));
+    assert(!rin_vk_sync2_legacy_stage_mask(UINT32_C(0x80000000), &sync2_mask));
+    assert(!rin_vk_sync2_legacy_stage_mask(
+        RIN_VK_PIPELINE_STAGE_TRANSFER_BIT, NULL));
+}
+
 static void test_compute_storage_barrier_scope(void) {
     RinGpuVulkanTransferOpV2 operation;
     uint64_t runtime_mask = 0u;
@@ -182,6 +217,7 @@ int main(void) {
     test_supported_dependency_flags();
     test_transfer_stage_aliases();
     test_legacy_wait_stage_projection();
+    test_legacy_stage_conversion();
     test_compute_storage_barrier_scope();
     test_generic_memory_access_follows_stage_scope();
     test_access_requires_a_compatible_supported_stage();
