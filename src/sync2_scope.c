@@ -37,6 +37,65 @@ int rin_vk_sync2_stage_mask(uint64_t public_mask, uint64_t* runtime_mask_out) {
     return 1;
 }
 
+int rin_vk_sync2_legacy_stage_mask(uint32_t public_mask,
+                                   uint64_t* sync2_mask_out) {
+    const uint32_t graphics_stages =
+        RIN_VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT |
+        RIN_VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+        RIN_VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+        RIN_VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+        RIN_VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+        RIN_VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+    const uint32_t known = RIN_VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT |
+                           graphics_stages |
+                           RIN_VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                           RIN_VK_PIPELINE_STAGE_TRANSFER_BIT |
+                           RIN_VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT |
+                           RIN_VK_PIPELINE_STAGE_HOST_BIT |
+                           RIN_VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    const uint32_t broad_graphics =
+        RIN_VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT |
+        RIN_VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+        RIN_VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+        RIN_VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+    uint64_t sync2_mask = 0u;
+    /* The packet contract has coarser stage groups; widen masks rather than
+     * dropping a legacy stage when mapping into those groups. */
+    if (!sync2_mask_out || public_mask == 0u ||
+        (public_mask & ~known) != 0u)
+        return 0;
+    if ((public_mask & RIN_VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT) != 0u ||
+        (public_mask & RIN_VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT) != 0u ||
+        (public_mask & RIN_VK_PIPELINE_STAGE_ALL_COMMANDS_BIT) != 0u) {
+        sync2_mask |= RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    }
+    if ((public_mask & (broad_graphics |
+                        RIN_VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+                        RIN_VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)) !=
+        0u)
+        sync2_mask |= RIN_VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+                      RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    if ((public_mask & RIN_VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT) != 0u)
+        sync2_mask |= RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    if ((public_mask & RIN_VK_PIPELINE_STAGE_TRANSFER_BIT) != 0u)
+        sync2_mask |= RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    if ((public_mask & RIN_VK_PIPELINE_STAGE_HOST_BIT) != 0u)
+        sync2_mask |= RIN_VK_PIPELINE_STAGE_2_HOST_BIT;
+    if (sync2_mask == 0u) return 0;
+    *sync2_mask_out = sync2_mask;
+    return 1;
+}
+
 int rin_vk_sync2_legacy_wait_stage_mask(uint64_t public_mask,
                                         uint32_t* legacy_mask_out) {
     const uint32_t legacy_transfer = UINT32_C(0x00001000);

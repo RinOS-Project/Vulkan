@@ -9210,6 +9210,91 @@ static int image_barrier_old_layout_valid(uint32_t layout) {
            image_layout_transfer_valid(layout);
 }
 
+static int build_memory_barrier_operation(
+        uint64_t src_stage_mask, uint64_t src_access_mask,
+        uint64_t dst_stage_mask, uint64_t dst_access_mask,
+        RinGpuVulkanTransferOpV2* operation) {
+    if (!operation) return 0;
+    memset(operation, 0, sizeof(*operation));
+    operation->type = RIN_GPU_VULKAN_TRANSFER_OP_MEMORY_BARRIER;
+    return rin_vk_sync2_barrier_scopes(
+        src_stage_mask, src_access_mask, dst_stage_mask, dst_access_mask,
+        operation);
+}
+
+static int build_buffer_barrier_operation(
+        RinGpuVulkanCommandBufferV1* core, struct RinVkDevice_T* owner,
+        uint32_t src_queue_family, uint32_t dst_queue_family,
+        RinVkBuffer buffer_handle, uint64_t offset, uint64_t size,
+        uint64_t src_stage_mask, uint64_t src_access_mask,
+        uint64_t dst_stage_mask, uint64_t dst_access_mask,
+        RinGpuVulkanTransferOpV2* operation) {
+    RinVkBufferSlot* buffer;
+    uint64_t barrier_size;
+    uint64_t address;
+    if (!core || !owner || !operation ||
+        !synchronization2_queue_families_valid(
+            core, src_queue_family, dst_queue_family) ||
+        !(buffer = buffer_slot((RinVkDevice)owner, buffer_handle)) ||
+        !buffer->memory || offset >= buffer->size)
+        return 0;
+    barrier_size = size == RIN_VK_WHOLE_SIZE ? buffer->size - offset : size;
+    if (barrier_size == 0u || barrier_size > buffer->size - offset ||
+        !checked_buffer_address(buffer, offset, barrier_size, &address))
+        return 0;
+    memset(operation, 0, sizeof(*operation));
+    if (!rin_vk_sync2_barrier_scopes(
+            src_stage_mask, src_access_mask, dst_stage_mask, dst_access_mask,
+            operation))
+        return 0;
+    operation->type = RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_BARRIER;
+    operation->source_allocation = buffer_handle;
+    operation->destination_allocation = buffer->memory->product_allocation;
+    operation->destination_gpu_address = address;
+    operation->size_bytes = barrier_size;
+    operation->source_width = src_queue_family;
+    operation->source_height = dst_queue_family;
+    return 1;
+}
+
+static int build_image_barrier_operation(
+        RinGpuVulkanCommandBufferV1* core, struct RinVkDevice_T* owner,
+        uint32_t src_queue_family, uint32_t dst_queue_family,
+        uint32_t old_layout, uint32_t new_layout, RinVkImage image_handle,
+        const RinVkImageSubresourceRange* subresource_range,
+        uint64_t src_stage_mask, uint64_t src_access_mask,
+        uint64_t dst_stage_mask, uint64_t dst_access_mask,
+        RinGpuVulkanTransferOpV2* operation) {
+    RinVkImageSlot* image;
+    uint64_t address;
+    if (!core || !owner || !operation ||
+        !synchronization2_queue_families_valid(
+            core, src_queue_family, dst_queue_family) ||
+        !(image = image_slot((RinVkDevice)owner, image_handle)) ||
+        !image->memory ||
+        !image_barrier_range_valid(image, subresource_range) ||
+        !image_barrier_old_layout_valid(old_layout) ||
+        !image_layout_transfer_valid(new_layout) ||
+        !checked_image_address(image, 0u, image->memory_size, &address))
+        return 0;
+    memset(operation, 0, sizeof(*operation));
+    if (!rin_vk_sync2_barrier_scopes(
+            src_stage_mask, src_access_mask, dst_stage_mask, dst_access_mask,
+            operation))
+        return 0;
+    operation->type = RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER;
+    operation->source_allocation = image_handle;
+    operation->destination_allocation = image->memory->product_allocation;
+    operation->destination_gpu_address = address;
+    operation->size_bytes = image->memory_size;
+    operation->source_width = old_layout;
+    operation->source_height = new_layout;
+    operation->destination_width = subresource_range->aspectMask;
+    operation->destination_height = src_queue_family;
+    operation->filter = dst_queue_family;
+    return 1;
+}
+
 void RIN_VKAPI_CALL vkCmdPipelineBarrier2(
         RinVkCommandBuffer command_buffer,
         const RinVkDependencyInfo* dependency_info) {
@@ -9253,13 +9338,8 @@ void RIN_VKAPI_CALL vkCmdPipelineBarrier2(
             &dependency_info->pMemoryBarriers[index];
         RinGpuVulkanTransferOpV2* operation = &operations[operation_count];
         if (barrier->sType != RIN_VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 ||
-            barrier->pNext) {
-            valid = 0;
-            goto done;
-        }
-        operation->type =
-            RIN_GPU_VULKAN_TRANSFER_OP_MEMORY_BARRIER;
-        if (!rin_vk_sync2_barrier_scopes(
+            barrier->pNext ||
+            !build_memory_barrier_operation(
                 barrier->srcStageMask, barrier->srcAccessMask,
                 barrier->dstStageMask, barrier->dstAccessMask, operation)) {
             valid = 0;
@@ -9272,40 +9352,18 @@ void RIN_VKAPI_CALL vkCmdPipelineBarrier2(
         const RinVkBufferMemoryBarrier2* barrier =
             &dependency_info->pBufferMemoryBarriers[index];
         RinGpuVulkanTransferOpV2* operation = &operations[operation_count];
-        RinVkBufferSlot* buffer;
-        uint64_t barrier_size;
-        uint64_t address;
         if (barrier->sType !=
                 RIN_VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 ||
             barrier->pNext ||
-            !synchronization2_queue_families_valid(
-                core, barrier->srcQueueFamilyIndex,
-                barrier->dstQueueFamilyIndex) ||
-            !(buffer = buffer_slot((RinVkDevice)owner, barrier->buffer)) ||
-            !buffer->memory || barrier->offset >= buffer->size) {
+            !build_buffer_barrier_operation(
+                core, owner, barrier->srcQueueFamilyIndex,
+                barrier->dstQueueFamilyIndex, barrier->buffer,
+                barrier->offset, barrier->size, barrier->srcStageMask,
+                barrier->srcAccessMask, barrier->dstStageMask,
+                barrier->dstAccessMask, operation)) {
             valid = 0;
             goto done;
         }
-        barrier_size = barrier->size == RIN_VK_WHOLE_SIZE
-                           ? buffer->size - barrier->offset
-                           : barrier->size;
-        if (barrier_size == 0u ||
-            barrier_size > buffer->size - barrier->offset ||
-            !checked_buffer_address(buffer, barrier->offset, barrier_size,
-                                    &address) ||
-            !rin_vk_sync2_barrier_scopes(
-                barrier->srcStageMask, barrier->srcAccessMask,
-                barrier->dstStageMask, barrier->dstAccessMask, operation)) {
-            valid = 0;
-            goto done;
-        }
-        operation->type = RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_BARRIER;
-        operation->source_allocation = barrier->buffer;
-        operation->destination_allocation = buffer->memory->product_allocation;
-        operation->destination_gpu_address = address;
-        operation->size_bytes = barrier_size;
-        operation->source_width = barrier->srcQueueFamilyIndex;
-        operation->source_height = barrier->dstQueueFamilyIndex;
         ++operation_count;
     }
     for (index = 0u; index < dependency_info->imageMemoryBarrierCount;
@@ -9313,35 +9371,19 @@ void RIN_VKAPI_CALL vkCmdPipelineBarrier2(
         const RinVkImageMemoryBarrier2* barrier =
             &dependency_info->pImageMemoryBarriers[index];
         RinGpuVulkanTransferOpV2* operation = &operations[operation_count];
-        RinVkImageSlot* image = image_slot((RinVkDevice)owner, barrier->image);
-        uint64_t address;
         if (barrier->sType !=
                 RIN_VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 ||
             barrier->pNext ||
-            !synchronization2_queue_families_valid(
-                core, barrier->srcQueueFamilyIndex,
-                barrier->dstQueueFamilyIndex) ||
-            !image || !image->memory ||
-            !image_barrier_range_valid(image, &barrier->subresourceRange) ||
-            !image_barrier_old_layout_valid(barrier->oldLayout) ||
-            !image_layout_transfer_valid(barrier->newLayout) ||
-            !checked_image_address(image, 0u, image->memory_size, &address) ||
-            !rin_vk_sync2_barrier_scopes(
-                barrier->srcStageMask, barrier->srcAccessMask,
-                barrier->dstStageMask, barrier->dstAccessMask, operation)) {
+            !build_image_barrier_operation(
+                core, owner, barrier->srcQueueFamilyIndex,
+                barrier->dstQueueFamilyIndex, barrier->oldLayout,
+                barrier->newLayout, barrier->image,
+                &barrier->subresourceRange, barrier->srcStageMask,
+                barrier->srcAccessMask, barrier->dstStageMask,
+                barrier->dstAccessMask, operation)) {
             valid = 0;
             goto done;
         }
-        operation->type = RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER;
-        operation->source_allocation = barrier->image;
-        operation->destination_allocation = image->memory->product_allocation;
-        operation->destination_gpu_address = address;
-        operation->size_bytes = image->memory_size;
-        operation->source_width = barrier->oldLayout;
-        operation->source_height = barrier->newLayout;
-        operation->destination_width = barrier->subresourceRange.aspectMask;
-        operation->destination_height = barrier->srcQueueFamilyIndex;
-        operation->filter = barrier->dstQueueFamilyIndex;
         ++operation_count;
     }
     if (valid)
@@ -9466,8 +9508,10 @@ static void record_query_failure(RinGpuVulkanCommandBufferV1* core) {
     rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime, core);
 }
 
-static int event_stage_mask_valid(uint64_t stage) {
-    return rin_vk_sync2_recorded_stage_mask_valid(stage);
+static int event_stage_mask_valid(RinVkPipelineStageFlags stage) {
+    uint64_t sync2_stage;
+    return rin_vk_sync2_legacy_stage_mask(stage, &sync2_stage) &&
+           rin_vk_sync2_recorded_stage_mask_valid(sync2_stage);
 }
 
 void RIN_VKAPI_CALL vkCmdResetQueryPool(
@@ -9615,7 +9659,8 @@ static void record_event_operation(RinVkCommandBuffer command_buffer,
 }
 
 void RIN_VKAPI_CALL vkCmdSetEvent(RinVkCommandBuffer command_buffer,
-                                  RinVkEvent event, uint64_t stage) {
+                                  RinVkEvent event,
+                                  RinVkPipelineStageFlags stage) {
     if (!event_stage_mask_valid(stage))
         record_query_failure((RinGpuVulkanCommandBufferV1*)(void*)command_buffer);
     else
@@ -9624,7 +9669,8 @@ void RIN_VKAPI_CALL vkCmdSetEvent(RinVkCommandBuffer command_buffer,
 }
 
 void RIN_VKAPI_CALL vkCmdResetEvent(RinVkCommandBuffer command_buffer,
-                                    RinVkEvent event, uint64_t stage) {
+                                    RinVkEvent event,
+                                    RinVkPipelineStageFlags stage) {
     if (!event_stage_mask_valid(stage))
         record_query_failure((RinGpuVulkanCommandBufferV1*)(void*)command_buffer);
     else
@@ -9634,35 +9680,111 @@ void RIN_VKAPI_CALL vkCmdResetEvent(RinVkCommandBuffer command_buffer,
 
 void RIN_VKAPI_CALL vkCmdWaitEvents(
         RinVkCommandBuffer command_buffer, uint32_t event_count,
-        const RinVkEvent* events, uint64_t src_stage_mask,
-        uint64_t dst_stage_mask, uint32_t memory_barrier_count,
-        const void* memory_barriers, uint32_t buffer_barrier_count,
-        const void* buffer_barriers, uint32_t image_barrier_count,
-        const void* image_barriers) {
+        const RinVkEvent* events, RinVkPipelineStageFlags src_stage_mask,
+        RinVkPipelineStageFlags dst_stage_mask, uint32_t memory_barrier_count,
+        const RinVkMemoryBarrier* memory_barriers,
+        uint32_t buffer_barrier_count,
+        const RinVkBufferMemoryBarrier* buffer_barriers,
+        uint32_t image_barrier_count,
+        const RinVkImageMemoryBarrier* image_barriers) {
     RinGpuVulkanCommandBufferV1* core =
         (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
     struct RinVkDevice_T* owner;
+    RinGpuVulkanTransferOpV2 operations[
+        RIN_GPU_VULKAN_COMMAND_MAX_BARRIERS];
+    uint64_t barrier_count;
+    uint64_t src_stage_scope;
+    uint64_t dst_stage_scope;
+    uint32_t operation_count = 0u;
     uint32_t index;
+    memset(operations, 0, sizeof(operations));
     if (!command_owner_device(core, &owner) || event_count == 0u ||
         event_count > RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS || !events ||
-        !event_stage_mask_valid(src_stage_mask) ||
-        !event_stage_mask_valid(dst_stage_mask) ||
-        memory_barrier_count != 0u || memory_barriers ||
-        buffer_barrier_count != 0u || buffer_barriers ||
-        image_barrier_count != 0u || image_barriers) {
+        !rin_vk_sync2_legacy_stage_mask(src_stage_mask, &src_stage_scope) ||
+        !rin_vk_sync2_legacy_stage_mask(dst_stage_mask, &dst_stage_scope) ||
+        !rin_vk_sync2_recorded_stage_mask_valid(src_stage_scope) ||
+        !rin_vk_sync2_recorded_stage_mask_valid(dst_stage_scope) ||
+        (memory_barrier_count != 0u && !memory_barriers) ||
+        (buffer_barrier_count != 0u && !buffer_barriers) ||
+        (image_barrier_count != 0u && !image_barriers) ||
+        core->event_command_count >
+            RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS - event_count ||
+        core->transfer_op_count > RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS) {
         record_query_failure(core);
         return;
     }
+    barrier_count = (uint64_t)memory_barrier_count + buffer_barrier_count +
+                    image_barrier_count;
+    if (barrier_count > RIN_GPU_VULKAN_COMMAND_MAX_BARRIERS ||
+        barrier_count > RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS -
+                            core->transfer_op_count) {
+        record_query_failure(core);
+        return;
+    }
+    for (index = 0u; index < memory_barrier_count; ++index) {
+        const RinVkMemoryBarrier* barrier = &memory_barriers[index];
+        RinGpuVulkanTransferOpV2* operation = &operations[operation_count];
+        if (barrier->sType != RIN_VK_STRUCTURE_TYPE_MEMORY_BARRIER ||
+            barrier->pNext ||
+            !build_memory_barrier_operation(
+                src_stage_scope, barrier->srcAccessMask, dst_stage_scope,
+                barrier->dstAccessMask, operation)) {
+            record_query_failure(core);
+            return;
+        }
+        ++operation_count;
+    }
+    for (index = 0u; index < buffer_barrier_count; ++index) {
+        const RinVkBufferMemoryBarrier* barrier = &buffer_barriers[index];
+        RinGpuVulkanTransferOpV2* operation = &operations[operation_count];
+        if (barrier->sType !=
+                RIN_VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER ||
+            barrier->pNext ||
+            !build_buffer_barrier_operation(
+                core, owner, barrier->srcQueueFamilyIndex,
+                barrier->dstQueueFamilyIndex, barrier->buffer,
+                barrier->offset, barrier->size, src_stage_scope,
+                barrier->srcAccessMask, dst_stage_scope,
+                barrier->dstAccessMask, operation)) {
+            record_query_failure(core);
+            return;
+        }
+        ++operation_count;
+    }
+    for (index = 0u; index < image_barrier_count; ++index) {
+        const RinVkImageMemoryBarrier* barrier = &image_barriers[index];
+        RinGpuVulkanTransferOpV2* operation = &operations[operation_count];
+        if (barrier->sType != RIN_VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER ||
+            barrier->pNext ||
+            !build_image_barrier_operation(
+                core, owner, barrier->srcQueueFamilyIndex,
+                barrier->dstQueueFamilyIndex, barrier->oldLayout,
+                barrier->newLayout, barrier->image,
+                &barrier->subresourceRange, src_stage_scope,
+                barrier->srcAccessMask, dst_stage_scope,
+                barrier->dstAccessMask, operation)) {
+            record_query_failure(core);
+            return;
+        }
+        ++operation_count;
+    }
     for (index = 0u; index < event_count; ++index) {
-        if (!event_slot((RinVkDevice)owner, events[index]) ||
-            rin_gpu_vulkan_command_buffer_record_event(
-                &g_command_runtime, core, events[index],
-                RIN_GPU_VULKAN_EVENT_COMMAND_WAIT) !=
-                RIN_GPU_VULKAN_COMMAND_OK) {
+        if (!event_slot((RinVkDevice)owner, events[index])) {
             record_query_failure(core);
             return;
         }
     }
+    for (index = 0u; index < event_count; ++index) {
+        if (rin_gpu_vulkan_command_buffer_record_event(
+                &g_command_runtime, core, events[index],
+                RIN_GPU_VULKAN_EVENT_COMMAND_WAIT) !=
+            RIN_GPU_VULKAN_COMMAND_OK) {
+            record_query_failure(core);
+            return;
+        }
+    }
+    if (operation_count != 0u)
+        record_transfer_ops(core, operations, operation_count, NULL, 0u);
 }
 
 void RIN_VKAPI_CALL vkCmdCopyImage(

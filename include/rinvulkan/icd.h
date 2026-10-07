@@ -66,6 +66,9 @@
 #define RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO 40
 #define RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO 42
 #define RIN_VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO 16
+#define RIN_VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER 44
+#define RIN_VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER 45
+#define RIN_VK_STRUCTURE_TYPE_MEMORY_BARRIER 46
 #define RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES 50
 #define RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES 51
 #define RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES 52
@@ -169,6 +172,25 @@
 #define RIN_VK_PIPELINE_STAGE_2_RESOLVE_BIT UINT64_C(0x0000000200000000)
 #define RIN_VK_PIPELINE_STAGE_2_BLIT_BIT UINT64_C(0x0000000400000000)
 #define RIN_VK_PIPELINE_STAGE_2_CLEAR_BIT UINT64_C(0x0000000800000000)
+#define RIN_VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT UINT32_C(0x00000001)
+#define RIN_VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT UINT32_C(0x00000002)
+#define RIN_VK_PIPELINE_STAGE_VERTEX_INPUT_BIT UINT32_C(0x00000004)
+#define RIN_VK_PIPELINE_STAGE_VERTEX_SHADER_BIT UINT32_C(0x00000008)
+#define RIN_VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT \
+    UINT32_C(0x00000010)
+#define RIN_VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT \
+    UINT32_C(0x00000020)
+#define RIN_VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT UINT32_C(0x00000040)
+#define RIN_VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT UINT32_C(0x00000080)
+#define RIN_VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT UINT32_C(0x00000100)
+#define RIN_VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT UINT32_C(0x00000200)
+#define RIN_VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT \
+    UINT32_C(0x00000400)
+#define RIN_VK_PIPELINE_STAGE_TRANSFER_BIT UINT32_C(0x00001000)
+#define RIN_VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT UINT32_C(0x00002000)
+#define RIN_VK_PIPELINE_STAGE_HOST_BIT UINT32_C(0x00004000)
+#define RIN_VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT UINT32_C(0x00008000)
+#define RIN_VK_PIPELINE_STAGE_ALL_COMMANDS_BIT UINT32_C(0x00010000)
 #define RIN_VK_ACCESS_2_TRANSFER_READ_BIT UINT64_C(0x0000000000000800)
 #define RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT UINT64_C(0x0000000000001000)
 #define RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT UINT64_C(0x0000000000000002)
@@ -256,6 +278,8 @@
 typedef int32_t RinVkResult;
 typedef int32_t RinVkStructureType;
 typedef int32_t RinVkPhysicalDeviceType;
+typedef uint32_t RinVkPipelineStageFlags;
+typedef uint32_t RinVkAccessFlags;
 typedef void (RIN_VKAPI_CALL *RinVkVoidFunction)(void);
 typedef struct RinVkInstance_T* RinVkInstance;
 typedef struct RinVkPhysicalDevice_T* RinVkPhysicalDevice;
@@ -1070,6 +1094,13 @@ typedef struct RinVkMemoryBarrier2 {
     uint64_t dstAccessMask;
 } RinVkMemoryBarrier2;
 
+typedef struct RinVkMemoryBarrier {
+    RinVkStructureType sType;
+    const void* pNext;
+    RinVkAccessFlags srcAccessMask;
+    RinVkAccessFlags dstAccessMask;
+} RinVkMemoryBarrier;
+
 typedef struct RinVkImageSubresourceRange {
     uint32_t aspectMask;
     uint32_t baseMipLevel;
@@ -1077,6 +1108,31 @@ typedef struct RinVkImageSubresourceRange {
     uint32_t baseArrayLayer;
     uint32_t layerCount;
 } RinVkImageSubresourceRange;
+
+typedef struct RinVkBufferMemoryBarrier {
+    RinVkStructureType sType;
+    const void* pNext;
+    RinVkAccessFlags srcAccessMask;
+    RinVkAccessFlags dstAccessMask;
+    uint32_t srcQueueFamilyIndex;
+    uint32_t dstQueueFamilyIndex;
+    RinVkBuffer buffer;
+    uint64_t offset;
+    uint64_t size;
+} RinVkBufferMemoryBarrier;
+
+typedef struct RinVkImageMemoryBarrier {
+    RinVkStructureType sType;
+    const void* pNext;
+    RinVkAccessFlags srcAccessMask;
+    RinVkAccessFlags dstAccessMask;
+    uint32_t oldLayout;
+    uint32_t newLayout;
+    uint32_t srcQueueFamilyIndex;
+    uint32_t dstQueueFamilyIndex;
+    RinVkImage image;
+    RinVkImageSubresourceRange subresourceRange;
+} RinVkImageMemoryBarrier;
 
 typedef struct RinVkBufferMemoryBarrier2 {
     RinVkStructureType sType;
@@ -2575,17 +2631,21 @@ RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkResetEvent(RinVkDevice device, RinVkEvent event);
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkCmdSetEvent(RinVkCommandBuffer command_buffer, RinVkEvent event,
-              uint64_t stage);
+              RinVkPipelineStageFlags stage);
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkCmdResetEvent(RinVkCommandBuffer command_buffer, RinVkEvent event,
-                uint64_t stage);
+                RinVkPipelineStageFlags stage);
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkCmdWaitEvents(RinVkCommandBuffer command_buffer, uint32_t event_count,
-                const RinVkEvent* events, uint64_t src_stage_mask,
-                uint64_t dst_stage_mask, uint32_t memory_barrier_count,
-                const void* memory_barriers, uint32_t buffer_barrier_count,
-                const void* buffer_barriers, uint32_t image_barrier_count,
-                const void* image_barriers);
+                const RinVkEvent* events,
+                RinVkPipelineStageFlags src_stage_mask,
+                RinVkPipelineStageFlags dst_stage_mask,
+                uint32_t memory_barrier_count,
+                const RinVkMemoryBarrier* memory_barriers,
+                uint32_t buffer_barrier_count,
+                const RinVkBufferMemoryBarrier* buffer_barriers,
+                uint32_t image_barrier_count,
+                const RinVkImageMemoryBarrier* image_barriers);
 RIN_VKAPI_ATTR RinVkVoidFunction RIN_VKAPI_CALL
 vkGetDeviceProcAddr(RinVkDevice device, const char* name);
 RIN_VKAPI_ATTR RinVkVoidFunction RIN_VKAPI_CALL
