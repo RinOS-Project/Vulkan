@@ -9744,6 +9744,74 @@ void RIN_VKAPI_CALL vkCmdWriteTimestamp(
         record_query_failure(core);
 }
 
+static int timestamp2_stage_supported(
+        const struct RinVkDevice_T* owner,
+        const RinGpuVulkanCommandBufferV1* core, uint64_t stage) {
+    const RinGpuVulkanQueueFamilyV1* family;
+    const uint64_t graphics_stages =
+        RIN_VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+        RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    const uint64_t transfer_stages =
+        RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT |
+        RIN_VK_PIPELINE_STAGE_2_COPY_BIT |
+        RIN_VK_PIPELINE_STAGE_2_RESOLVE_BIT |
+        RIN_VK_PIPELINE_STAGE_2_BLIT_BIT |
+        RIN_VK_PIPELINE_STAGE_2_CLEAR_BIT;
+    uint64_t runtime_stage;
+    uint32_t queue_flags;
+
+    if (!owner || !core || !core->pool ||
+        core->pool->queue_family_index >=
+            owner->physical_profile.queue_family_count ||
+        (stage != 0u && (stage & (stage - 1u)) != 0u) ||
+        (stage & RIN_VK_PIPELINE_STAGE_2_HOST_BIT) != 0u ||
+        !rin_vk_sync2_stage_mask(stage, &runtime_stage))
+        return 0;
+    family = &owner->physical_profile.queue_families[
+        core->pool->queue_family_index];
+    if (family->timestamp_valid_bits == 0u) return 0;
+    if (stage == 0u) return 1;
+    queue_flags = family->flags;
+    if ((stage & graphics_stages) != 0u &&
+        (queue_flags & RIN_GPU_VK_QUEUE_GRAPHICS) == 0u)
+        return 0;
+    if (stage == RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT &&
+        (queue_flags & RIN_GPU_VK_QUEUE_COMPUTE) == 0u)
+        return 0;
+    if ((stage & transfer_stages) != 0u &&
+        (queue_flags & (RIN_GPU_VK_QUEUE_TRANSFER |
+                        RIN_GPU_VK_QUEUE_GRAPHICS |
+                        RIN_GPU_VK_QUEUE_COMPUTE)) == 0u)
+        return 0;
+    return 1;
+}
+
+void RIN_VKAPI_CALL vkCmdWriteTimestamp2(
+        RinVkCommandBuffer command_buffer, uint64_t stage,
+        RinVkQueryPool query_pool, uint32_t query) {
+    RinGpuVulkanCommandBufferV1* core =
+        (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
+    struct RinVkDevice_T* owner;
+    RinVkQueryPoolSlot* pool;
+
+    if (!command_owner_device(core, &owner) ||
+        !owner->synchronization2_enabled ||
+        !timestamp2_stage_supported(owner, core, stage) ||
+        !(pool = query_pool_slot((RinVkDevice)owner, query_pool)) ||
+        query >= pool->query_count ||
+        pool->query_type != RIN_VK_QUERY_TYPE_TIMESTAMP ||
+        rin_gpu_vulkan_command_buffer_record_query(
+            &g_command_runtime, core, query_pool, query, 0u,
+            RIN_GPU_VULKAN_QUERY_COMMAND_TIMESTAMP) != RIN_GPU_VULKAN_COMMAND_OK)
+        record_query_failure(core);
+}
+
+void RIN_VKAPI_CALL vkCmdWriteTimestamp2KHR(
+        RinVkCommandBuffer command_buffer, uint64_t stage,
+        RinVkQueryPool query_pool, uint32_t query) {
+    vkCmdWriteTimestamp2(command_buffer, stage, query_pool, query);
+}
+
 RinVkResult RIN_VKAPI_CALL vkCreateEvent(
         RinVkDevice device, const RinVkEventCreateInfo* create_info,
         const void* allocator, RinVkEvent* event_out) {
@@ -14255,6 +14323,11 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
         return (RinVkVoidFunction)vkCmdEndQuery;
     if (name_equal(name, "vkCmdWriteTimestamp"))
         return (RinVkVoidFunction)vkCmdWriteTimestamp;
+    if (name_equal(name, "vkCmdWriteTimestamp2"))
+        return (RinVkVoidFunction)vkCmdWriteTimestamp2;
+    if (device_value->synchronization2_enabled &&
+        name_equal(name, "vkCmdWriteTimestamp2KHR"))
+        return (RinVkVoidFunction)vkCmdWriteTimestamp2KHR;
     if (name_equal(name, "vkCreateEvent"))
         return (RinVkVoidFunction)vkCreateEvent;
     if (name_equal(name, "vkDestroyEvent"))

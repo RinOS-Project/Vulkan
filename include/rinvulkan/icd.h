@@ -2624,6 +2624,12 @@ vkCmdEndQuery(RinVkCommandBuffer command_buffer, RinVkQueryPool query_pool,
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkCmdWriteTimestamp(RinVkCommandBuffer command_buffer, uint64_t stage,
                     RinVkQueryPool query_pool, uint32_t query);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdWriteTimestamp2(RinVkCommandBuffer command_buffer, uint64_t stage,
+                     RinVkQueryPool query_pool, uint32_t query);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdWriteTimestamp2KHR(RinVkCommandBuffer command_buffer, uint64_t stage,
+                        RinVkQueryPool query_pool, uint32_t query);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkCreateEvent(RinVkDevice device, const RinVkEventCreateInfo* create_info,
               const void* allocator, RinVkEvent* event_out);
