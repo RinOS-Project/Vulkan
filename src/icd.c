@@ -9923,6 +9923,15 @@ void RIN_VKAPI_CALL vkCmdWaitEvents(
         }
         ++operation_count;
     }
+    if (operation_count == 0u) {
+        if (!build_memory_barrier_operation(
+                src_stage_scope, 0u, dst_stage_scope, 0u,
+                &operations[0])) {
+            record_query_failure(core);
+            return;
+        }
+        ++operation_count;
+    }
     for (index = 0u; index < event_count; ++index) {
         if (!event_slot((RinVkDevice)owner, events[index])) {
             record_query_failure(core);
