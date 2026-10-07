@@ -5,9 +5,13 @@
 #include <stdint.h>
 
 #define RIN_VULKAN_PRODUCT_PLATFORM_VERSION 1u
+#define RIN_VULKAN_PRODUCT_PLATFORM_V2_VERSION 2u
 #define RIN_VULKAN_PRODUCT_MEMORY_VERSION 1u
 #define RIN_VULKAN_PRODUCT_MAX_QUEUES 8u
 #define RIN_VULKAN_PRODUCT_MAX_RESOURCES_PER_SUBMISSION 8u
+#define RIN_VULKAN_PRODUCT_SUBMISSION_V2_VERSION 2u
+#define RIN_VULKAN_PRODUCT_SUBMISSION_WAIT_VERSION 1u
+#define RIN_VULKAN_PRODUCT_MAX_SUBMISSION_WAITS 8u
 
 #define RIN_VULKAN_PRODUCT_STATUS_READY UINT32_C(0x00000001)
 #define RIN_VULKAN_PRODUCT_STATUS_SUSPENDED UINT32_C(0x00000002)
@@ -41,6 +45,7 @@ typedef enum RinVulkanProductResult {
     RIN_VULKAN_PRODUCT_LOST = -6,
     RIN_VULKAN_PRODUCT_TIMEOUT = -7,
     RIN_VULKAN_PRODUCT_LIMIT = -8,
+    RIN_VULKAN_PRODUCT_UNSUPPORTED = -9,
     RIN_VULKAN_PRODUCT_NO_SPACE = -10,
     RIN_VULKAN_PRODUCT_RECOVERY_REQUIRED = -11
 } RinVulkanProductResult;
@@ -127,6 +132,27 @@ typedef struct RinVulkanProductSubmissionV1 {
     uint64_t reserved;
 } RinVulkanProductSubmissionV1;
 
+typedef struct RinVulkanProductSubmissionWaitV1 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint32_t queue_id;
+    uint32_t flags;
+    uint64_t completion_value;
+} RinVulkanProductSubmissionWaitV1;
+
+/* The V2 payload carries API-neutral queue timeline dependencies. The ICD
+ * translates Vulkan semaphore state to these already-admitted queue points;
+ * native owners lower the points to their own hardware wait records. */
+typedef struct RinVulkanProductSubmissionV2 {
+    uint32_t struct_size;
+    uint32_t version;
+    RinVulkanProductSubmissionV1 base;
+    uint32_t wait_count;
+    uint32_t reserved0;
+    RinVulkanProductSubmissionWaitV1
+        waits[RIN_VULKAN_PRODUCT_MAX_SUBMISSION_WAITS];
+} RinVulkanProductSubmissionV2;
+
 typedef int (*RinVulkanProductGetStatusFn)(
     void* context, RinVulkanProductStatusV1* status_out);
 typedef int (*RinVulkanProductPollFn)(
@@ -145,6 +171,13 @@ typedef int (*RinVulkanProductAllocateFn)(
 typedef int (*RinVulkanProductQueryAllocationFn)(
     void* context, uint64_t allocation_handle,
     RinVulkanProductAllocationInfoV1* info_out);
+typedef int (*RinVulkanProductPrepareSubmissionV2Fn)(
+    void* context, uint32_t queue_id, uint64_t command_cookie,
+    uint32_t wait_count, const RinVulkanProductSubmissionWaitV1* waits,
+    RinVulkanProductSubmissionV2* submission_out);
+typedef int (*RinVulkanProductSubmitV2Fn)(
+    void* context, const RinVulkanProductSubmissionV2* submission,
+    const RinVulkanProductResourceV1* resources, uint32_t resource_count);
 
 /* OS-Core owns the adapter object and all physical execution.  The Vulkan
  * library sees only this fixed, API-neutral product contract.  A missing
@@ -164,6 +197,18 @@ typedef struct RinVulkanProductPlatformV1 {
     uint64_t reserved[4];
 } RinVulkanProductPlatformV1;
 
+/* V2 is a separate extension object so the V1 table and its layout remain
+ * byte-for-byte stable. `base` must remain alive until this extension is
+ * unbound. */
+typedef struct RinVulkanProductPlatformV2 {
+    uint32_t struct_size;
+    uint32_t version;
+    RinVulkanProductPlatformV1* base;
+    RinVulkanProductPrepareSubmissionV2Fn prepare_submission_v2;
+    RinVulkanProductSubmitV2Fn submit_v2;
+    uint64_t reserved[2];
+} RinVulkanProductPlatformV2;
+
 #ifdef __cplusplus
 static_assert(sizeof(RinVulkanProductResourceV1) == 16u,
               "Vulkan product resource ABI drift");
@@ -171,6 +216,10 @@ static_assert(sizeof(RinVulkanProductReportV1) == 128u,
               "Vulkan product report ABI drift");
 static_assert(sizeof(RinVulkanProductStatusV1) == 128u,
               "Vulkan product status ABI drift");
+static_assert(sizeof(RinVulkanProductSubmissionWaitV1) == 24u,
+              "Vulkan product submission wait ABI drift");
+static_assert(sizeof(RinVulkanProductSubmissionV2) == 288u,
+              "Vulkan product submission V2 ABI drift");
 #else
 _Static_assert(sizeof(RinVulkanProductResourceV1) == 16u,
                "Vulkan product resource ABI drift");
@@ -178,6 +227,10 @@ _Static_assert(sizeof(RinVulkanProductReportV1) == 128u,
                "Vulkan product report ABI drift");
 _Static_assert(sizeof(RinVulkanProductStatusV1) == 128u,
                "Vulkan product status ABI drift");
+_Static_assert(sizeof(RinVulkanProductSubmissionWaitV1) == 24u,
+               "Vulkan product submission wait ABI drift");
+_Static_assert(sizeof(RinVulkanProductSubmissionV2) == 288u,
+               "Vulkan product submission V2 ABI drift");
 #endif
 
 #endif /* RINVULKAN_PUBLIC_PLATFORM_H */

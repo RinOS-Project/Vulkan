@@ -115,6 +115,7 @@ static void zero_vulkan13_properties(
 static void sync_lock(void);
 static void sync_unlock(void);
 static void yield_thread(void);
+static int wsi_zero_words(const uint64_t* values, uint32_t count);
 static int finite_graphics_float(float value);
 static int device_has_swapchains(const struct RinVkDevice_T* device);
 static int instance_has_swapchains(const struct RinVkInstance_T* instance);
@@ -429,6 +430,8 @@ typedef struct RinVkSemaphoreSlot {
     volatile uint32_t signaled;
     volatile uint32_t pending;
     volatile uint32_t waiter_count;
+    volatile uint32_t native_waiter_count;
+    volatile uint32_t native_wait_consumed;
     volatile uint64_t value;
     uint64_t pending_value;
 } RinVkSemaphoreSlot;
@@ -473,7 +476,9 @@ typedef struct RinVkSubmissionSlot {
     uint32_t wait_semaphore_count;
     uint32_t signal_semaphore_count;
     uint32_t resource_count;
-    uint32_t waits_reserved;
+    uint32_t wait_reservation_mask;
+    uint32_t native_wait_mask;
+    uint32_t native_wait_unsupported;
     RinVkSemaphore wait_semaphores[RIN_VK_MAX_SUBMIT_SEMAPHORES];
     uint64_t wait_semaphore_values[RIN_VK_MAX_SUBMIT_SEMAPHORES];
     RinVkSemaphore signal_semaphores[RIN_VK_MAX_SUBMIT_SEMAPHORES];
@@ -525,6 +530,7 @@ struct RinVkBufferOwnershipUpdate {
 static uintptr_t g_runtime_binding;
 static uint32_t g_active_calls;
 static uintptr_t g_product_binding;
+static uintptr_t g_product_binding_v2;
 static uint32_t g_active_product_calls;
 static uintptr_t g_wsi_binding;
 static uint32_t g_active_wsi_calls;
@@ -1026,6 +1032,17 @@ static RinVulkanProductPlatformV1* acquire_product(void) {
 
 static void release_product(void) {
     __atomic_sub_fetch(&g_active_product_calls, 1u, __ATOMIC_RELEASE);
+}
+
+static RinVulkanProductPlatformV2* product_v2_for_base(
+        const RinVulkanProductPlatformV1* base) {
+    const uintptr_t binding =
+        __atomic_load_n(&g_product_binding_v2, __ATOMIC_ACQUIRE);
+    RinVulkanProductPlatformV2* platform;
+    if (binding == 0u || binding == RIN_VK_ICD_BINDING_TRANSITION)
+        return NULL;
+    platform = (RinVulkanProductPlatformV2*)binding;
+    return platform->base == base ? platform : NULL;
 }
 
 static RinVulkanWsiPlatformV1* acquire_wsi(void) {
@@ -1803,6 +1820,8 @@ static void clear_semaphore_slot(RinVkSemaphoreSlot* slot) {
     __atomic_store_n(&slot->signaled, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&slot->pending, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&slot->waiter_count, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&slot->native_waiter_count, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&slot->native_wait_consumed, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&slot->value, 0u, __ATOMIC_RELEASE);
     slot->pending_value = 0u;
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
@@ -2743,48 +2762,247 @@ static int queue_has_earlier_uncompleted_submission(
 static void release_submission_wait_reservations(
         RinVkSubmissionSlot* slot) {
     uint32_t index;
-    if (!slot || slot->waits_reserved == 0u) return;
+    if (!slot || slot->wait_reservation_mask == 0u) return;
     for (index = 0u; index < slot->wait_semaphore_count; ++index) {
+        const uint32_t bit = UINT32_C(1) << index;
         RinVkSemaphoreSlot* semaphore = semaphore_slot(
             (RinVkDevice)slot->owner, slot->wait_semaphores[index]);
-        if (semaphore && semaphore->type == RIN_VK_SEMAPHORE_TYPE_BINARY) {
+        if ((slot->wait_reservation_mask & bit) != 0u && semaphore &&
+            semaphore->type == RIN_VK_SEMAPHORE_TYPE_BINARY) {
             const uint32_t waiter_count = __atomic_load_n(
                 &semaphore->waiter_count, __ATOMIC_ACQUIRE);
             if (waiter_count != 0u)
                 __atomic_store_n(&semaphore->waiter_count, waiter_count - 1u,
                                  __ATOMIC_RELEASE);
+            if ((slot->native_wait_mask & bit) != 0u) {
+                const uint32_t native_waiter_count = __atomic_load_n(
+                    &semaphore->native_waiter_count, __ATOMIC_ACQUIRE);
+                if (native_waiter_count != 0u)
+                    __atomic_store_n(&semaphore->native_waiter_count,
+                                     native_waiter_count - 1u,
+                                     __ATOMIC_RELEASE);
+            }
         }
     }
-    slot->waits_reserved = 0u;
+    slot->wait_reservation_mask = 0u;
+    slot->native_wait_mask = 0u;
 }
 
 static void consume_submission_waits(RinVkSubmissionSlot* slot) {
     uint32_t index;
     if (!slot || !slot->owner) return;
     for (index = 0u; index < slot->wait_semaphore_count; ++index) {
+        const uint32_t bit = UINT32_C(1) << index;
         RinVkSemaphoreSlot* semaphore = semaphore_slot(
             (RinVkDevice)slot->owner, slot->wait_semaphores[index]);
         if (!semaphore ||
             semaphore->type != RIN_VK_SEMAPHORE_TYPE_BINARY)
             continue;
+        if ((slot->native_wait_mask & bit) != 0u) {
+            const uint32_t native_waiter_count = __atomic_load_n(
+                &semaphore->native_waiter_count, __ATOMIC_ACQUIRE);
+            if (native_waiter_count != UINT32_MAX)
+                __atomic_store_n(&semaphore->native_waiter_count,
+                                 native_waiter_count + 1u,
+                                 __ATOMIC_RELEASE);
+            continue;
+        }
         __atomic_store_n(&semaphore->signaled, 0u, __ATOMIC_RELEASE);
-        if (slot->waits_reserved) {
+        if ((slot->wait_reservation_mask & bit) != 0u) {
             const uint32_t waiter_count = __atomic_load_n(
                 &semaphore->waiter_count, __ATOMIC_ACQUIRE);
             if (waiter_count != 0u)
                 __atomic_store_n(&semaphore->waiter_count, waiter_count - 1u,
                                  __ATOMIC_RELEASE);
+            slot->wait_reservation_mask &= ~bit;
         }
     }
-    slot->waits_reserved = 0u;
+}
+
+static int find_native_wait_point(
+        const struct RinVkDevice_T* device, RinVkSemaphore semaphore_handle,
+        uint32_t semaphore_type, uint64_t wait_value,
+        RinVulkanProductSubmissionWaitV1* wait_out) {
+    const RinVkSubmissionSlot* best = NULL;
+    uint64_t best_signal_value = UINT64_MAX;
+    uint32_t submission_index;
+    if (!device || semaphore_handle == 0u || !wait_out) return 0;
+    for (submission_index = 0u; submission_index < RIN_VK_MAX_SUBMISSIONS;
+         ++submission_index) {
+        const RinVkSubmissionSlot* producer =
+            &g_submissions[submission_index];
+        uint32_t signal_index;
+        if (__atomic_load_n(&producer->state, __ATOMIC_ACQUIRE) !=
+                RIN_VK_SUBMISSION_ACTIVE ||
+            producer->owner != device || producer->completion_value == 0u ||
+            producer->queue_id >= RIN_VULKAN_PRODUCT_MAX_QUEUES)
+            continue;
+        for (signal_index = 0u;
+             signal_index < producer->signal_semaphore_count;
+             ++signal_index) {
+            const uint64_t signal_value =
+                producer->signal_semaphore_values[signal_index];
+            if (producer->signal_semaphores[signal_index] !=
+                    semaphore_handle ||
+                (semaphore_type == RIN_VK_SEMAPHORE_TYPE_TIMELINE &&
+                 signal_value < wait_value))
+                continue;
+            if (!best ||
+                (semaphore_type == RIN_VK_SEMAPHORE_TYPE_TIMELINE &&
+                 (signal_value < best_signal_value ||
+                  (signal_value == best_signal_value &&
+                   producer->order < best->order)))) {
+                best = producer;
+                best_signal_value = signal_value;
+            }
+        }
+    }
+    if (!best) return 0;
+    memset(wait_out, 0, sizeof(*wait_out));
+    wait_out->struct_size = sizeof(*wait_out);
+    wait_out->version = RIN_VULKAN_PRODUCT_SUBMISSION_WAIT_VERSION;
+    wait_out->queue_id = best->queue_id;
+    wait_out->completion_value = best->completion_value;
+    return 1;
+}
+
+static RinVulkanProductPlatformV2* bound_product_v2(void) {
+    const uintptr_t base_binding =
+        __atomic_load_n(&g_product_binding, __ATOMIC_ACQUIRE);
+    const uintptr_t extension_binding =
+        __atomic_load_n(&g_product_binding_v2, __ATOMIC_ACQUIRE);
+    RinVulkanProductPlatformV2* extension;
+    if (base_binding == 0u ||
+        base_binding == RIN_VK_ICD_BINDING_TRANSITION ||
+        extension_binding == 0u ||
+        extension_binding == RIN_VK_ICD_BINDING_TRANSITION)
+        return NULL;
+    extension = (RinVulkanProductPlatformV2*)extension_binding;
+    return extension->base == (RinVulkanProductPlatformV1*)base_binding
+               ? extension
+               : NULL;
+}
+
+static int build_native_wait_list(
+        const RinVkSubmissionSlot* slot,
+        const RinVulkanProductPlatformV2* product_v2,
+        RinVulkanProductSubmissionWaitV1 waits[
+            RIN_VULKAN_PRODUCT_MAX_SUBMISSION_WAITS],
+        uint32_t* wait_count_out, uint32_t* wait_mask_out) {
+    uint32_t index;
+    uint32_t wait_count = 0u;
+    uint32_t wait_mask = 0u;
+    if (!slot || !slot->owner || !product_v2 || !waits ||
+        !wait_count_out || !wait_mask_out || slot->command_buffer_count == 0u ||
+        slot->native_wait_unsupported != 0u ||
+        slot->wait_semaphore_count > RIN_VULKAN_PRODUCT_MAX_SUBMISSION_WAITS)
+        return 0;
+    memset(waits, 0, sizeof(RinVulkanProductSubmissionWaitV1) *
+                            RIN_VULKAN_PRODUCT_MAX_SUBMISSION_WAITS);
+    for (index = 0u; index < slot->wait_semaphore_count; ++index) {
+        RinVkSemaphoreSlot* semaphore = semaphore_slot(
+            (RinVkDevice)slot->owner, slot->wait_semaphores[index]);
+        uint64_t wait_value;
+        if (!semaphore) return 0;
+        wait_value = slot->wait_semaphore_values[index];
+        if (semaphore->type == RIN_VK_SEMAPHORE_TYPE_TIMELINE) {
+            if (__atomic_load_n(&semaphore->value, __ATOMIC_ACQUIRE) >=
+                wait_value)
+                continue;
+        } else if (__atomic_load_n(&semaphore->pending, __ATOMIC_ACQUIRE) ==
+                       0u &&
+                   __atomic_load_n(&semaphore->signaled, __ATOMIC_ACQUIRE) !=
+                       0u) {
+            continue;
+        }
+        if (semaphore->type == RIN_VK_SEMAPHORE_TYPE_BINARY) {
+            if (__atomic_load_n(&semaphore->waiter_count,
+                                __ATOMIC_ACQUIRE) != 1u ||
+                __atomic_load_n(&semaphore->native_waiter_count,
+                                __ATOMIC_ACQUIRE) != 0u)
+                return 0;
+        }
+        if (wait_count >= RIN_VULKAN_PRODUCT_MAX_SUBMISSION_WAITS ||
+            !find_native_wait_point(slot->owner, slot->wait_semaphores[index],
+                                    semaphore->type, wait_value,
+                                    &waits[wait_count]))
+            return 0;
+        if (semaphore->type == RIN_VK_SEMAPHORE_TYPE_BINARY)
+            wait_mask |= UINT32_C(1) << index;
+        wait_count++;
+    }
+    if (wait_count == 0u) return 0;
+    *wait_count_out = wait_count;
+    *wait_mask_out = wait_mask;
+    return 1;
+}
+
+static int submission_native_waits_available(
+        const RinVkSubmissionSlot* slot) {
+    RinVulkanProductSubmissionWaitV1 waits[
+        RIN_VULKAN_PRODUCT_MAX_SUBMISSION_WAITS];
+    uint32_t wait_count = 0u;
+    uint32_t wait_mask = 0u;
+    return build_native_wait_list(slot, bound_product_v2(), waits,
+                                  &wait_count, &wait_mask);
+}
+
+static void complete_submission_waits(RinVkSubmissionSlot* slot) {
+    uint32_t index;
+    if (!slot || !slot->owner) return;
+    for (index = 0u; index < slot->wait_semaphore_count; ++index) {
+        const uint32_t bit = UINT32_C(1) << index;
+        RinVkSemaphoreSlot* semaphore;
+        if ((slot->native_wait_mask & bit) == 0u) continue;
+        semaphore = semaphore_slot((RinVkDevice)slot->owner,
+                                   slot->wait_semaphores[index]);
+        if (!semaphore ||
+            semaphore->type != RIN_VK_SEMAPHORE_TYPE_BINARY)
+            continue;
+        {
+            const uint32_t native_waiter_count = __atomic_load_n(
+                &semaphore->native_waiter_count, __ATOMIC_ACQUIRE);
+            if (native_waiter_count != 0u)
+                __atomic_store_n(&semaphore->native_waiter_count,
+                                 native_waiter_count - 1u,
+                                 __ATOMIC_RELEASE);
+        }
+        if (__atomic_load_n(&semaphore->pending, __ATOMIC_ACQUIRE) != 0u) {
+            __atomic_store_n(&semaphore->native_wait_consumed, 1u,
+                             __ATOMIC_RELEASE);
+        } else {
+            __atomic_store_n(&semaphore->native_wait_consumed, 0u,
+                             __ATOMIC_RELEASE);
+            __atomic_store_n(&semaphore->signaled, 0u, __ATOMIC_RELEASE);
+        }
+        if ((slot->wait_reservation_mask & bit) != 0u) {
+            const uint32_t waiter_count = __atomic_load_n(
+                &semaphore->waiter_count, __ATOMIC_ACQUIRE);
+            if (waiter_count != 0u)
+                __atomic_store_n(&semaphore->waiter_count, waiter_count - 1u,
+                                 __ATOMIC_RELEASE);
+            slot->wait_reservation_mask &= ~bit;
+        }
+        slot->native_wait_mask &= ~bit;
+    }
 }
 
 static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
     RinVulkanProductPlatformV1* product;
     RinVulkanProductSubmissionV1 submission;
+    RinVulkanProductPlatformV2* product_v2;
+    RinVulkanProductSubmissionV2 submission_v2;
+    RinVulkanProductSubmissionV2 immutable_submission_v2;
+    RinVulkanProductSubmissionWaitV1 waits[
+        RIN_VULKAN_PRODUCT_MAX_SUBMISSION_WAITS];
+    RinVulkanProductSubmissionWaitV1 immutable_waits[
+        RIN_VULKAN_PRODUCT_MAX_SUBMISSION_WAITS];
+    uint32_t wait_count = 0u;
+    uint32_t wait_mask = 0u;
+    uint64_t command_cookie;
+    int use_v2 = 0;
     int product_result;
-    if (!slot || !slot->owner || !submission_waits_satisfied(slot))
-        return RIN_VK_NOT_READY;
+    if (!slot || !slot->owner) return RIN_VK_NOT_READY;
     if (slot->compute_packet &&
         (slot->compute_packet_size <
              offsetof(RinGpuVulkanComputePacketV2, shader_ir) ||
@@ -2801,25 +3019,113 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
         if (product) release_product();
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
     }
+    product_v2 = product_v2_for_base(product);
+    if (!submission_waits_satisfied(slot)) {
+        if (!product_v2 ||
+            !build_native_wait_list(slot, product_v2, waits, &wait_count,
+                                    &wait_mask)) {
+            release_product();
+            return RIN_VK_NOT_READY;
+        }
+        use_v2 = 1;
+    }
+    command_cookie = (uint64_t)(uintptr_t)(
+        slot->graphics_packet
+            ? (const void*)slot->graphics_packet
+            : (slot->compute_packet
+                   ? (const void*)slot->compute_packet
+                   : (const void*)&slot->routed_packet));
     memset(&submission, 0, sizeof(submission));
-    product_result = product->prepare_submission(
-        product->context, slot->queue_id,
-        (uint64_t)(uintptr_t)(slot->graphics_packet
-                                  ? (const void*)slot->graphics_packet
-                                  : (slot->compute_packet
-                                         ? (const void*)slot->compute_packet
-                                         : (const void*)&slot->routed_packet)),
-        &submission);
-    if (product_result == RIN_VULKAN_PRODUCT_OK)
-        product_result = product->submit(
-            product->context, &submission,
-            slot->resource_count == 0u ? NULL : slot->resources,
-            slot->resource_count);
+    memset(&submission_v2, 0, sizeof(submission_v2));
+    if (use_v2) {
+        memcpy(immutable_waits, waits, sizeof(waits));
+        product_result = product_v2->prepare_submission_v2(
+            product->context, slot->queue_id, command_cookie, wait_count,
+            waits, &submission_v2);
+        if (memcmp(waits, immutable_waits, sizeof(waits)) != 0) {
+            release_product();
+            return RIN_VK_ERROR_DEVICE_LOST;
+        }
+        if (product_result == RIN_VULKAN_PRODUCT_UNSUPPORTED) {
+            slot->native_wait_unsupported = 1u;
+            release_product();
+            return RIN_VK_NOT_READY;
+        }
+        if (product_result == RIN_VULKAN_PRODUCT_OK) {
+            const RinVulkanProductSubmissionV1* base =
+                &submission_v2.base;
+            uint32_t wait_index;
+            if (submission_v2.struct_size != sizeof(submission_v2) ||
+                submission_v2.version !=
+                    RIN_VULKAN_PRODUCT_SUBMISSION_V2_VERSION ||
+                submission_v2.reserved0 != 0u ||
+                submission_v2.wait_count != wait_count ||
+                base->struct_size != sizeof(*base) ||
+                base->version != RIN_VULKAN_PRODUCT_PLATFORM_VERSION ||
+                base->queue_id != slot->queue_id || base->flags != 0u ||
+                base->sequence == 0u || base->command_cookie != command_cookie ||
+                base->completion_value == 0u ||
+                base->iommu_domain_cookie !=
+                    slot->owner->plan.iommu_domain_cookie ||
+                base->device_epoch != slot->owner->plan.device_epoch ||
+                base->deadline_ns == 0u || base->reserved != 0u) {
+                release_product();
+                return RIN_VK_ERROR_DEVICE_LOST;
+            }
+            for (wait_index = 0u; wait_index < wait_count; ++wait_index) {
+                if (memcmp(&submission_v2.waits[wait_index],
+                           &waits[wait_index], sizeof(waits[wait_index])) != 0) {
+                    release_product();
+                    return RIN_VK_ERROR_DEVICE_LOST;
+                }
+            }
+            for (wait_index = wait_count;
+                 wait_index < RIN_VULKAN_PRODUCT_MAX_SUBMISSION_WAITS;
+                 ++wait_index) {
+                const uint8_t* bytes =
+                    (const uint8_t*)(const void*)&submission_v2.waits[wait_index];
+                size_t byte_index;
+                for (byte_index = 0u;
+                     byte_index < sizeof(submission_v2.waits[wait_index]);
+                     ++byte_index) {
+                    if (bytes[byte_index] != 0u) {
+                        release_product();
+                        return RIN_VK_ERROR_DEVICE_LOST;
+                    }
+                }
+            }
+            immutable_submission_v2 = submission_v2;
+            product_result = product_v2->submit_v2(
+                product->context, &submission_v2,
+                slot->resource_count == 0u ? NULL : slot->resources,
+                slot->resource_count);
+            if (memcmp(&submission_v2, &immutable_submission_v2,
+                       sizeof(submission_v2)) != 0) {
+                release_product();
+                return RIN_VK_ERROR_DEVICE_LOST;
+            }
+            submission = submission_v2.base;
+        }
+    } else {
+        product_result = product->prepare_submission(
+            product->context, slot->queue_id, command_cookie, &submission);
+        if (product_result == RIN_VULKAN_PRODUCT_OK)
+            product_result = product->submit(
+                product->context, &submission,
+                slot->resource_count == 0u ? NULL : slot->resources,
+                slot->resource_count);
+    }
+    if (use_v2 && product_result == RIN_VULKAN_PRODUCT_UNSUPPORTED) {
+        slot->native_wait_unsupported = 1u;
+        release_product();
+        return RIN_VK_NOT_READY;
+    }
     release_product();
     if (product_result != RIN_VULKAN_PRODUCT_OK)
         return map_product_result(product_result);
     slot->sequence = submission.sequence;
     slot->completion_value = submission.completion_value;
+    slot->native_wait_mask = use_v2 ? wait_mask : 0u;
     if (slot->compute_packet || slot->graphics_packet) {
         uint32_t index;
         for (index = 0u;
@@ -2836,7 +3142,7 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
 }
 
 static void abort_device_submissions(struct RinVkDevice_T* device);
-static void complete_submission_sync(const RinVkSubmissionSlot* submission);
+static void complete_submission_sync(RinVkSubmissionSlot* submission);
 
 static RinVkResult dispatch_ready_waiting_submissions(
         struct RinVkDevice_T* device) {
@@ -2847,7 +3153,9 @@ static RinVkResult dispatch_ready_waiting_submissions(
             RinVkSubmissionSlot* slot = &g_submissions[index];
             if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) !=
                     RIN_VK_SUBMISSION_WAITING ||
-                slot->owner != device || !submission_waits_satisfied(slot))
+                slot->owner != device ||
+                (!submission_waits_satisfied(slot) &&
+                 !submission_native_waits_available(slot)))
                 continue;
             if (slot->command_buffer_count == 0u) {
                 if (queue_has_earlier_uncompleted_submission(slot)) continue;
@@ -3242,7 +3550,7 @@ static void refresh_timeline_semaphore_pending(
     }
 }
 
-static void complete_submission_sync(const RinVkSubmissionSlot* submission) {
+static void complete_submission_sync(RinVkSubmissionSlot* submission) {
     RinVkFenceSlot* fence;
     uint32_t index;
 
@@ -3273,11 +3581,22 @@ static void complete_submission_sync(const RinVkSubmissionSlot* submission) {
                     submission);
             } else {
                 __atomic_store_n(&semaphore->pending, 0u, __ATOMIC_RELEASE);
-                __atomic_store_n(&semaphore->signaled, 1u,
-                                 __ATOMIC_RELEASE);
+                if (__atomic_load_n(&semaphore->native_waiter_count,
+                                    __ATOMIC_ACQUIRE) != 0u ||
+                    __atomic_load_n(&semaphore->native_wait_consumed,
+                                    __ATOMIC_ACQUIRE) != 0u) {
+                    __atomic_store_n(&semaphore->signaled, 0u,
+                                     __ATOMIC_RELEASE);
+                    __atomic_store_n(&semaphore->native_wait_consumed, 0u,
+                                     __ATOMIC_RELEASE);
+                } else {
+                    __atomic_store_n(&semaphore->signaled, 1u,
+                                     __ATOMIC_RELEASE);
+                }
             }
         }
     }
+    complete_submission_waits((RinVkSubmissionSlot*)submission);
 }
 
 static void complete_submission_query_events(
@@ -3873,17 +4192,10 @@ int rin_gpu_vulkan_icd_unbind_runtime(RinGpuVulkanRuntimeV1* runtime) {
     return RIN_GPU_VULKAN_OK;
 }
 
-int rin_gpu_vulkan_icd_bind_product_platform(
-    RinVulkanProductPlatformV1* platform) {
+static int product_platform_ready(RinVulkanProductPlatformV1* platform) {
     RinVulkanProductStatusV1 status;
-    uintptr_t expected = 0u;
-    uintptr_t binding = (uintptr_t)platform;
-    uintptr_t runtime_binding =
-        __atomic_load_n(&g_runtime_binding, __ATOMIC_ACQUIRE);
-    if (!platform || binding == RIN_VK_ICD_BINDING_TRANSITION ||
-        runtime_binding == 0u ||
-        runtime_binding == RIN_VK_ICD_BINDING_TRANSITION ||
-        __atomic_load_n(&g_wsi_binding, __ATOMIC_ACQUIRE) != 0u ||
+    memset(&status, 0, sizeof(status));
+    if (!platform ||
         platform->struct_size != sizeof(*platform) ||
         platform->version != RIN_VULKAN_PRODUCT_PLATFORM_VERSION ||
         !platform->context || !platform->get_status || !platform->poll ||
@@ -3898,6 +4210,21 @@ int rin_gpu_vulkan_icd_bind_product_platform(
         status.queue_count == 0u || status.pending_submission_count != 0u ||
         status.active_resource_lease_count != 0u ||
         status.completed_values[0] != 0u)
+        return 0;
+    return 1;
+}
+
+int rin_gpu_vulkan_icd_bind_product_platform(
+    RinVulkanProductPlatformV1* platform) {
+    uintptr_t expected = 0u;
+    uintptr_t binding = (uintptr_t)platform;
+    uintptr_t runtime_binding =
+        __atomic_load_n(&g_runtime_binding, __ATOMIC_ACQUIRE);
+    if (!platform || binding == RIN_VK_ICD_BINDING_TRANSITION ||
+        runtime_binding == 0u ||
+        runtime_binding == RIN_VK_ICD_BINDING_TRANSITION ||
+        __atomic_load_n(&g_wsi_binding, __ATOMIC_ACQUIRE) != 0u ||
+        !product_platform_ready(platform))
         return RIN_GPU_VULKAN_INVALID_ARGUMENT;
     if (!__atomic_compare_exchange_n(&g_product_binding, &expected, binding,
                                      0, __ATOMIC_RELEASE,
@@ -3910,6 +4237,8 @@ int rin_gpu_vulkan_icd_unbind_product_platform(
     RinVulkanProductPlatformV1* platform) {
     uintptr_t expected;
     if (!platform) return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    if (__atomic_load_n(&g_product_binding_v2, __ATOMIC_ACQUIRE) != 0u)
+        return RIN_GPU_VULKAN_BUSY;
     expected = (uintptr_t)platform;
     if (!__atomic_compare_exchange_n(
             &g_product_binding, &expected, RIN_VK_ICD_BINDING_TRANSITION, 0,
@@ -3928,6 +4257,99 @@ int rin_gpu_vulkan_icd_unbind_product_platform(
         return RIN_GPU_VULKAN_BUSY;
     }
     __atomic_store_n(&g_product_binding, 0u, __ATOMIC_RELEASE);
+    return RIN_GPU_VULKAN_OK;
+}
+
+int rin_gpu_vulkan_icd_bind_product_platform_v2(
+    RinVulkanProductPlatformV2* platform) {
+    uintptr_t expected = 0u;
+    uintptr_t base_binding;
+    uintptr_t runtime_binding;
+    int result;
+    if (!platform || (uintptr_t)platform == RIN_VK_ICD_BINDING_TRANSITION ||
+        platform->struct_size != sizeof(*platform) ||
+        platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V2_VERSION ||
+        !platform->base || !platform->prepare_submission_v2 ||
+        !platform->submit_v2 ||
+        !wsi_zero_words(platform->reserved, 2u))
+        return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    if (!__atomic_compare_exchange_n(&g_product_binding_v2, &expected,
+                                     RIN_VK_ICD_BINDING_TRANSITION, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        return RIN_GPU_VULKAN_BUSY;
+    runtime_binding =
+        __atomic_load_n(&g_runtime_binding, __ATOMIC_ACQUIRE);
+    base_binding =
+        __atomic_load_n(&g_product_binding, __ATOMIC_ACQUIRE);
+    if (runtime_binding == 0u ||
+        runtime_binding == RIN_VK_ICD_BINDING_TRANSITION ||
+        !product_platform_ready(platform->base)) {
+        result = RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    } else if (base_binding == (uintptr_t)platform->base) {
+        /* Attach only the extension to an already-admitted V1 base. This is
+         * used by the OS-Core V2 lifecycle owner without changing V1 storage. */
+        result = RIN_GPU_VULKAN_OK;
+    } else if (base_binding != 0u) {
+        result = RIN_GPU_VULKAN_BUSY;
+    } else {
+        result = rin_gpu_vulkan_icd_bind_product_platform(platform->base);
+    }
+    if (result != RIN_GPU_VULKAN_OK) {
+        __atomic_store_n(&g_product_binding_v2, 0u, __ATOMIC_RELEASE);
+        return result;
+    }
+    __atomic_store_n(&g_product_binding_v2, (uintptr_t)platform,
+                     __ATOMIC_RELEASE);
+    return RIN_GPU_VULKAN_OK;
+}
+
+int rin_gpu_vulkan_icd_unbind_product_platform_v2(
+    RinVulkanProductPlatformV2* platform) {
+    uintptr_t expected;
+    if (!platform) return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    expected = (uintptr_t)platform;
+    if (!__atomic_compare_exchange_n(
+            &g_product_binding_v2, &expected,
+            RIN_VK_ICD_BINDING_TRANSITION, 0, __ATOMIC_ACQ_REL,
+            __ATOMIC_RELAXED))
+        return expected == 0u ? RIN_GPU_VULKAN_NOT_INITIALIZED
+                              : RIN_GPU_VULKAN_BUSY;
+    if (platform->struct_size != sizeof(*platform) ||
+        platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V2_VERSION ||
+        !platform->base) {
+        __atomic_store_n(&g_product_binding_v2, (uintptr_t)platform,
+                         __ATOMIC_RELEASE);
+        return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    }
+    expected = (uintptr_t)platform->base;
+    if (!__atomic_compare_exchange_n(
+            &g_product_binding, &expected, RIN_VK_ICD_BINDING_TRANSITION, 0,
+            __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+    {
+        __atomic_store_n(&g_product_binding_v2, (uintptr_t)platform,
+                         __ATOMIC_RELEASE);
+        return expected == 0u ? RIN_GPU_VULKAN_NOT_INITIALIZED
+                              : RIN_GPU_VULKAN_BUSY;
+    }
+    if (__atomic_load_n(&g_wsi_binding, __ATOMIC_ACQUIRE) != 0u) {
+        __atomic_store_n(&g_product_binding,
+                         (uintptr_t)platform->base,
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&g_product_binding_v2, (uintptr_t)platform,
+                         __ATOMIC_RELEASE);
+        return RIN_GPU_VULKAN_BUSY;
+    }
+    if (__atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
+        resource_slots_active() || submission_slots_active()) {
+        __atomic_store_n(&g_product_binding,
+                         (uintptr_t)platform->base,
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&g_product_binding_v2, (uintptr_t)platform,
+                         __ATOMIC_RELEASE);
+        return RIN_GPU_VULKAN_BUSY;
+    }
+    __atomic_store_n(&g_product_binding, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_product_binding_v2, 0u, __ATOMIC_RELEASE);
     return RIN_GPU_VULKAN_OK;
 }
 
@@ -8103,6 +8525,10 @@ RinVkResult RIN_VKAPI_CALL vkCreateSemaphore(
     semaphore->type = semaphore_type;
     __atomic_store_n(&semaphore->signaled, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&semaphore->pending, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&semaphore->native_waiter_count, 0u,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&semaphore->native_wait_consumed, 0u,
+                     __ATOMIC_RELEASE);
     __atomic_store_n(&semaphore->value, initial_value, __ATOMIC_RELEASE);
     semaphore->pending_value = 0u;
     __atomic_store_n(&semaphore->state, 1u, __ATOMIC_RELEASE);
@@ -11016,6 +11442,13 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         RinVkSemaphoreSlot* semaphore =
             semaphore_slot(device, signal_semaphores[index]);
         if (semaphore->type == RIN_VK_SEMAPHORE_TYPE_BINARY) {
+            if (__atomic_load_n(&semaphore->native_waiter_count,
+                                __ATOMIC_ACQUIRE) != 0u ||
+                __atomic_load_n(&semaphore->native_wait_consumed,
+                                __ATOMIC_ACQUIRE) != 0u) {
+                result = RIN_VK_NOT_READY;
+                goto done;
+            }
             if (__atomic_load_n(&semaphore->pending, __ATOMIC_ACQUIRE) != 0u) {
                 result = RIN_VK_NOT_READY;
                 goto done;
@@ -11079,7 +11512,7 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
                     &semaphore->waiter_count, __ATOMIC_ACQUIRE);
                 __atomic_store_n(&semaphore->waiter_count, waiter_count + 1u,
                                  __ATOMIC_RELEASE);
-                slot->waits_reserved = 1u;
+                slot->wait_reservation_mask |= UINT32_C(1) << index;
             }
         }
         if (fence != 0u) {
@@ -11321,7 +11754,6 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         }
     }
     {
-        slot->waits_reserved = 1u;
         for (index = 0u; index < request.waitSemaphoreCount; ++index) {
             RinVkSemaphoreSlot* semaphore =
                 semaphore_slot(device, wait_semaphores[index]);
@@ -11330,6 +11762,7 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
                     &semaphore->waiter_count, __ATOMIC_ACQUIRE);
                 __atomic_store_n(&semaphore->waiter_count, waiter_count + 1u,
                                  __ATOMIC_RELEASE);
+                slot->wait_reservation_mask |= UINT32_C(1) << index;
             }
         }
         if (fence != 0u) {
@@ -11352,7 +11785,8 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         mark_submission_query_events(slot, 1u);
         __atomic_store_n(&slot->state, RIN_VK_SUBMISSION_WAITING,
                          __ATOMIC_RELEASE);
-        result = RIN_VK_SUCCESS;
+        result = waits_ready ? RIN_VK_SUCCESS
+                             : dispatch_ready_waiting_submissions(device);
         goto done;
     }
 

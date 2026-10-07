@@ -2084,6 +2084,10 @@ int rin_gpu_vulkan_icd_bind_product_platform(
     RinVulkanProductPlatformV1* platform);
 int rin_gpu_vulkan_icd_unbind_product_platform(
     RinVulkanProductPlatformV1* platform);
+int rin_gpu_vulkan_icd_bind_product_platform_v2(
+    RinVulkanProductPlatformV2* platform);
+int rin_gpu_vulkan_icd_unbind_product_platform_v2(
+    RinVulkanProductPlatformV2* platform);
 int rin_gpu_vulkan_icd_bind_wsi_platform(RinVulkanWsiPlatformV1* platform);
 int rin_gpu_vulkan_icd_unbind_wsi_platform(RinVulkanWsiPlatformV1* platform);
 int rin_gpu_vulkan_icd_bind_wsi_platform_v2(

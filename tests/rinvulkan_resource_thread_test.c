@@ -25,8 +25,16 @@
 #define RESOURCE_THREAD_ITERATIONS 2000u
 
 static RinVulkanProductSubmitFn g_software_submit;
+static RinVulkanProductPollFn g_software_poll;
+static RinGpuVulkanSoftwarePlatformV1* g_software_platform;
+static RinVulkanProductPlatformV1* g_v2_product_base;
 static uint32_t g_busy_submit_responses;
 static uint32_t g_submit_call_count;
+static uint32_t g_hold_software_completions;
+static uint32_t g_v2_submit_call_count;
+static uint32_t g_v2_wait_count;
+static RinVulkanProductSubmissionWaitV1
+    g_v2_waits[RIN_VULKAN_PRODUCT_MAX_SUBMISSION_WAITS];
 
 typedef struct DebugCapture {
     uint32_t callback_count;
@@ -118,6 +126,66 @@ static int submit_busy_once(void* context,
         return RIN_VULKAN_PRODUCT_BUSY;
     }
     return g_software_submit(context, submission, resources, resource_count);
+}
+
+static int prepare_submission_v2(
+        void* context, uint32_t queue_id, uint64_t command_cookie,
+        uint32_t wait_count, const RinVulkanProductSubmissionWaitV1* waits,
+        RinVulkanProductSubmissionV2* submission_out) {
+    int result;
+    if (!g_v2_product_base || !submission_out ||
+        wait_count > RIN_VULKAN_PRODUCT_MAX_SUBMISSION_WAITS ||
+        (wait_count != 0u && !waits))
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    memset(submission_out, 0, sizeof(*submission_out));
+    submission_out->struct_size = sizeof(*submission_out);
+    submission_out->version = RIN_VULKAN_PRODUCT_SUBMISSION_V2_VERSION;
+    submission_out->wait_count = wait_count;
+    if (wait_count != 0u)
+        memcpy(submission_out->waits, waits,
+               sizeof(*waits) * wait_count);
+    result = g_v2_product_base->prepare_submission(
+        context, queue_id, command_cookie, &submission_out->base);
+    if (result == RIN_VULKAN_PRODUCT_OK)
+        submission_out->base.deadline_ns = UINT64_C(1);
+    return result;
+}
+
+static int submit_v2(
+        void* context, const RinVulkanProductSubmissionV2* submission,
+        const RinVulkanProductResourceV1* resources,
+        uint32_t resource_count) {
+    if (!g_v2_product_base || !submission ||
+        submission->struct_size != sizeof(*submission) ||
+        submission->version != RIN_VULKAN_PRODUCT_SUBMISSION_V2_VERSION ||
+        submission->wait_count > RIN_VULKAN_PRODUCT_MAX_SUBMISSION_WAITS ||
+        submission->reserved0 != 0u)
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    g_v2_wait_count = submission->wait_count;
+    memset(g_v2_waits, 0, sizeof(g_v2_waits));
+    if (g_v2_wait_count != 0u)
+        memcpy(g_v2_waits, submission->waits,
+               sizeof(g_v2_waits[0]) * g_v2_wait_count);
+    ++g_v2_submit_call_count;
+    return g_v2_product_base->submit(
+        context, &submission->base, resources, resource_count);
+}
+
+static int poll_software_withhold_completions(
+        void* context, RinVulkanProductReportV1* report_out) {
+    if (g_hold_software_completions == 0u)
+        return g_software_poll(context, report_out);
+    if (!g_software_platform || context != g_software_platform || !report_out)
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    memset(report_out, 0, sizeof(*report_out));
+    report_out->struct_size = sizeof(*report_out);
+    report_out->version = RIN_VULKAN_PRODUCT_PLATFORM_VERSION;
+    report_out->iommu_domain_cookie =
+        g_software_platform->iommu_domain_cookie;
+    report_out->iommu_map_generation =
+        g_software_platform->iommu_map_generation;
+    report_out->device_epoch = g_software_platform->device_epoch;
+    return RIN_VULKAN_PRODUCT_OK;
 }
 
 typedef struct ResourceThreadState {
@@ -364,6 +432,7 @@ int main(void) {
     RinGpuVulkanPhysicalDeviceV2 profile;
     RinGpuVulkanRuntimeV1 runtime;
     RinGpuVulkanSoftwarePlatformV1 software_platform;
+    RinVulkanProductPlatformV2 product_platform_v2;
     RinVkApplicationInfo application;
     RinVkInstanceCreateInfo instance_create;
     RinVkInstanceCreateInfo no_debug_instance_create;
@@ -392,6 +461,7 @@ int main(void) {
     RinVkSemaphore deferred_semaphore = 0u;
     RinVkSemaphore timeline_gate = 0u;
     RinVkSemaphore timeline_output = 0u;
+    RinVkSemaphore native_wait_semaphore = 0u;
     RinVkFenceCreateInfo fence_create;
     RinVkSemaphoreCreateInfo semaphore_create;
     RinVkSemaphoreTypeCreateInfo timeline_type;
@@ -405,6 +475,8 @@ int main(void) {
     RinVkSubmitInfo timeline_signal_submit;
     RinVkSubmitInfo2 empty_submit2;
     RinVkSubmitInfo busy_product_submit;
+    RinVkSubmitInfo native_wait_producer_submit;
+    RinVkSubmitInfo native_wait_consumer_submit;
     RinVkSemaphoreSubmitInfo semaphore_submit_info;
     RinVkCommandBufferSubmitInfo ignored_command_info;
     RinVkCommandBuffer ignored_command_buffer = NULL;
@@ -412,6 +484,7 @@ int main(void) {
     RinVkCommandPoolCreateInfo command_pool_create;
     RinVkCommandBufferAllocateInfo command_buffer_allocate;
     RinVkCommandBuffer command_buffer = NULL;
+    RinVkCommandBuffer native_wait_command_buffer = NULL;
     RinVkCommandBufferBeginInfo command_buffer_begin;
     const char* synchronization2_extension =
         RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION;
@@ -459,10 +532,25 @@ int main(void) {
               UINT64_C(1024) * 1024u) == RIN_VULKAN_PRODUCT_OK);
     software_platform_initialized = 1;
     g_software_submit = software_platform.platform.submit;
+    g_software_poll = software_platform.platform.poll;
+    g_software_platform = &software_platform;
     software_platform.platform.submit = submit_busy_once;
-    CHECK(rin_gpu_vulkan_icd_bind_product_platform(
-              &software_platform.platform) == RIN_GPU_VULKAN_OK);
+    software_platform.platform.poll = poll_software_withhold_completions;
+    memset(&product_platform_v2, 0, sizeof(product_platform_v2));
+    product_platform_v2.struct_size = sizeof(product_platform_v2);
+    product_platform_v2.version = RIN_VULKAN_PRODUCT_PLATFORM_V2_VERSION;
+    product_platform_v2.base = &software_platform.platform;
+    product_platform_v2.prepare_submission_v2 = prepare_submission_v2;
+    product_platform_v2.submit_v2 = submit_v2;
+    g_v2_product_base = &software_platform.platform;
+    g_v2_submit_call_count = 0u;
+    g_v2_wait_count = 0u;
+    memset(g_v2_waits, 0, sizeof(g_v2_waits));
+    CHECK(rin_gpu_vulkan_icd_bind_product_platform_v2(
+              &product_platform_v2) == RIN_GPU_VULKAN_OK);
     product_platform_bound = 1;
+    CHECK(rin_gpu_vulkan_icd_unbind_product_platform(
+              &software_platform.platform) == RIN_GPU_VULKAN_BUSY);
 
     memset(&application, 0, sizeof(application));
     application.sType = RIN_VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -514,8 +602,8 @@ int main(void) {
               "vkCreateDebugUtilsMessengerEXT") == NULL);
     vkDestroyInstance(no_debug_instance, NULL);
     no_debug_instance = NULL;
-    CHECK(rin_gpu_vulkan_icd_unbind_product_platform(
-              &software_platform.platform) == RIN_GPU_VULKAN_OK);
+    CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v2(
+              &product_platform_v2) == RIN_GPU_VULKAN_OK);
     product_platform_bound = 0;
     CHECK(rin_gpu_vulkan_icd_unbind_runtime(&runtime) == RIN_GPU_VULKAN_OK);
     runtime_bound = 0;
@@ -525,8 +613,8 @@ int main(void) {
           debug_capture.malformed == 0);
     CHECK(rin_gpu_vulkan_icd_bind_runtime(&runtime) == RIN_GPU_VULKAN_OK);
     runtime_bound = 1;
-    CHECK(rin_gpu_vulkan_icd_bind_product_platform(
-              &software_platform.platform) == RIN_GPU_VULKAN_OK);
+    CHECK(rin_gpu_vulkan_icd_bind_product_platform_v2(
+              &product_platform_v2) == RIN_GPU_VULKAN_OK);
     product_platform_bound = 1;
     CHECK(vkCreateInstance(&instance_create, NULL, &instance) == RIN_VK_SUCCESS);
     CHECK(debug_capture.callback_count == 2u &&
@@ -681,6 +769,87 @@ int main(void) {
     CHECK(vkGetFenceStatus(device, fence) == RIN_VK_SUCCESS);
     CHECK(g_submit_call_count == 3u);
     CHECK(software_platform.completed_values[0] != 0u);
+
+    CHECK(vkAllocateCommandBuffers(device, &command_buffer_allocate,
+                                   &native_wait_command_buffer) ==
+          RIN_VK_SUCCESS);
+    CHECK(vkBeginCommandBuffer(native_wait_command_buffer,
+                               &command_buffer_begin) == RIN_VK_SUCCESS);
+    CHECK(vkEndCommandBuffer(native_wait_command_buffer) == RIN_VK_SUCCESS);
+    CHECK(vkCreateSemaphore(device, &semaphore_create, NULL,
+                            &native_wait_semaphore) == RIN_VK_SUCCESS);
+    g_hold_software_completions = 1u;
+    memset(&native_wait_producer_submit, 0,
+           sizeof(native_wait_producer_submit));
+    native_wait_producer_submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    native_wait_producer_submit.commandBufferCount = 1u;
+    native_wait_producer_submit.pCommandBuffers = &command_buffer;
+    native_wait_producer_submit.signalSemaphoreCount = 1u;
+    native_wait_producer_submit.pSignalSemaphores = &native_wait_semaphore;
+    CHECK(vkQueueSubmit(queue, 1u, &native_wait_producer_submit, 0u) ==
+          RIN_VK_SUCCESS);
+    memset(&native_wait_consumer_submit, 0,
+           sizeof(native_wait_consumer_submit));
+    native_wait_consumer_submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    native_wait_consumer_submit.waitSemaphoreCount = 1u;
+    native_wait_consumer_submit.pWaitSemaphores = &native_wait_semaphore;
+    native_wait_consumer_submit.pWaitDstStageMask = &wait_stage;
+    native_wait_consumer_submit.commandBufferCount = 1u;
+    native_wait_consumer_submit.pCommandBuffers =
+        &native_wait_command_buffer;
+    {
+        const RinVkResult native_submit_result = vkQueueSubmit(
+            second_queue, 1u, &native_wait_consumer_submit, 0u);
+        if (native_submit_result != RIN_VK_SUCCESS)
+            fprintf(stderr,
+                    "native wait submit result=%d calls=%u count=%u queue=%u value=%llu\n",
+                    native_submit_result, g_v2_submit_call_count,
+                    g_v2_wait_count, g_v2_waits[0].queue_id,
+                    (unsigned long long)g_v2_waits[0].completion_value);
+        CHECK(native_submit_result == RIN_VK_SUCCESS);
+    }
+    if (!(g_v2_submit_call_count == 1u && g_v2_wait_count == 1u &&
+          g_v2_waits[0].struct_size == sizeof(g_v2_waits[0]) &&
+          g_v2_waits[0].version ==
+              RIN_VULKAN_PRODUCT_SUBMISSION_WAIT_VERSION &&
+          g_v2_waits[0].queue_id == 0u &&
+          g_v2_waits[0].completion_value != 0u))
+        fprintf(stderr,
+                "native waits: calls=%u count=%u size=%u version=%u queue=%u value=%llu\n",
+                g_v2_submit_call_count, g_v2_wait_count,
+                g_v2_waits[0].struct_size, g_v2_waits[0].version,
+                g_v2_waits[0].queue_id,
+                (unsigned long long)g_v2_waits[0].completion_value);
+    CHECK(g_v2_submit_call_count == 1u && g_v2_wait_count == 1u &&
+          g_v2_waits[0].struct_size == sizeof(g_v2_waits[0]) &&
+          g_v2_waits[0].version ==
+              RIN_VULKAN_PRODUCT_SUBMISSION_WAIT_VERSION &&
+          g_v2_waits[0].queue_id == 0u &&
+          g_v2_waits[0].completion_value != 0u);
+    CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v2(
+              &product_platform_v2) == RIN_GPU_VULKAN_BUSY);
+    g_hold_software_completions = 0u;
+    CHECK(vkDeviceWaitIdle(device) == RIN_VK_SUCCESS);
+    memset(&native_wait_producer_submit, 0,
+           sizeof(native_wait_producer_submit));
+    native_wait_producer_submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    native_wait_producer_submit.signalSemaphoreCount = 1u;
+    native_wait_producer_submit.pSignalSemaphores = &native_wait_semaphore;
+    memset(&native_wait_consumer_submit, 0,
+           sizeof(native_wait_consumer_submit));
+    native_wait_consumer_submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    native_wait_consumer_submit.waitSemaphoreCount = 1u;
+    native_wait_consumer_submit.pWaitSemaphores = &native_wait_semaphore;
+    native_wait_consumer_submit.pWaitDstStageMask = &wait_stage;
+    CHECK(vkQueueSubmit(queue, 1u, &native_wait_producer_submit, 0u) ==
+          RIN_VK_SUCCESS);
+    CHECK(vkQueueSubmit(second_queue, 1u, &native_wait_consumer_submit, 0u) ==
+          RIN_VK_SUCCESS);
+    CHECK(vkQueueSubmit(queue, 1u, &native_wait_producer_submit, 0u) ==
+          RIN_VK_SUCCESS);
+    CHECK(vkQueueSubmit(second_queue, 1u, &native_wait_consumer_submit, 0u) ==
+          RIN_VK_SUCCESS);
+    CHECK(g_v2_submit_call_count == 1u);
     vkDestroyCommandPool(device, command_pool, NULL);
     command_pool = 0u;
     command_buffer = NULL;
@@ -878,20 +1047,24 @@ int main(void) {
                           RIN_VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     buffer_create.sharingMode = RIN_VK_SHARING_MODE_EXCLUSIVE;
     CHECK(run_resource_stress(device, &buffer_create));
-    CHECK(rin_gpu_vulkan_icd_unbind_product_platform(
-              &software_platform.platform) == RIN_GPU_VULKAN_OK);
+    CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v2(
+              &product_platform_v2) == RIN_GPU_VULKAN_OK);
     product_platform_bound = 0;
+    g_v2_product_base = NULL;
     CHECK(rin_gpu_vulkan_software_platform_shutdown(&software_platform) ==
           RIN_VULKAN_PRODUCT_OK);
     software_platform_initialized = 0;
     result = 0;
 
 cleanup:
+    g_hold_software_completions = 0u;
     if (no_debug_instance) vkDestroyInstance(no_debug_instance, NULL);
     if (deferred_semaphore)
         vkDestroySemaphore(device, deferred_semaphore, NULL);
     if (timeline_gate) vkDestroySemaphore(device, timeline_gate, NULL);
     if (timeline_output) vkDestroySemaphore(device, timeline_output, NULL);
+    if (native_wait_semaphore)
+        vkDestroySemaphore(device, native_wait_semaphore, NULL);
     if (queue_order_fence) vkDestroyFence(device, queue_order_fence, NULL);
     if (second_fence) vkDestroyFence(device, second_fence, NULL);
     if (semaphore) vkDestroySemaphore(device, semaphore, NULL);
@@ -901,8 +1074,8 @@ cleanup:
         vkDestroyDebugUtilsMessengerEXT(instance, debug_messenger, NULL);
     if (instance) vkDestroyInstance(instance, NULL);
     if (product_platform_bound)
-        (void)rin_gpu_vulkan_icd_unbind_product_platform(
-            &software_platform.platform);
+        (void)rin_gpu_vulkan_icd_unbind_product_platform_v2(
+            &product_platform_v2);
     if (software_platform_initialized)
         (void)rin_gpu_vulkan_software_platform_shutdown(&software_platform);
     if (runtime_bound)

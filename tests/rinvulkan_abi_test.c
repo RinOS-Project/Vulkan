@@ -25,6 +25,15 @@ _Static_assert(offsetof(RinVulkanWsiPlatformV4, query_surface_properties) ==
 _Static_assert(sizeof(RinVulkanWsiPlatformV4) ==
                    (sizeof(void*) == 8u ? 224u : 180u),
                "Vulkan WSI V4 ABI drift");
+_Static_assert(offsetof(RinVulkanProductSubmissionV2, base) == 8u,
+               "Vulkan product V2 base prefix drift");
+_Static_assert(offsetof(RinVulkanProductPlatformV2, base) == 8u,
+               "Vulkan product platform V2 prefix drift");
+_Static_assert(sizeof(RinVulkanProductSubmissionV1) == 80u,
+               "Vulkan product V1 submission ABI drift");
+_Static_assert(sizeof(RinVulkanProductPlatformV1) ==
+                   (sizeof(void*) == 8u ? 104u : 72u),
+               "Vulkan product V1 platform ABI drift");
 
 #if UINTPTR_MAX == UINT64_MAX
 _Static_assert(sizeof(RinVkDisplayPropertiesKHR) == 48u,
@@ -46,6 +55,8 @@ int main(void) {
     return sizeof(platform) == 104u &&
                    sizeof(RinVulkanProductStatusV1) == 128u &&
                    sizeof(RinVulkanProductReportV1) == 128u &&
+                   sizeof(RinVulkanProductSubmissionWaitV1) == 24u &&
+                   sizeof(RinVulkanProductSubmissionV2) == 288u &&
                    RIN_VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR ==
                        1000001000 &&
                    RIN_VK_STRUCTURE_TYPE_PRESENT_INFO_KHR == 1000001001
