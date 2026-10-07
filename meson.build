@@ -1,4 +1,5 @@
-project('RinVulkan', 'c', version: '1.0.0', default_options: ['warning_level=3'])
+project('RinVulkan', 'c', version: '1.0.0', meson_version: '>=1.3.0',
+        default_options: ['warning_level=3'])
 
 ringpu_dep = dependency('ringpu', required: true)
 rinvulkan_inc = include_directories('include')
@@ -26,6 +27,51 @@ rinvulkan_dep = declare_dependency(
   include_directories: rinvulkan_inc,
   dependencies: ringpu_dep,
 )
+
+if host_machine.system() == 'linux'
+  rinvulkan_icd = shared_library(
+    'rin-vulkan-icd', rinvulkan_sources,
+    include_directories: rinvulkan_inc,
+    dependencies: ringpu_dep,
+    link_args: ['-Wl,-Bsymbolic'],
+    install: true,
+  )
+
+  fs = import('fs')
+  icd_install_dir = join_paths(get_option('datadir'), 'vulkan', 'icd.d')
+  icd_library_relative_dir = fs.relative_to(
+    get_option('libdir'), icd_install_dir)
+  icd_configuration = configuration_data()
+  icd_configuration.set('RIN_VULKAN_ICD_LIBRARY',
+                        'librin-vulkan-icd.so')
+  icd_configuration.set('RIN_VULKAN_ICD_LIBRARY_RELATIVE_DIR',
+                        icd_library_relative_dir)
+  configure_file(
+    input: 'icd.d/rin-vulkan.json.in',
+    output: 'rin-vulkan.json',
+    configuration: icd_configuration,
+    install_dir: icd_install_dir,
+  )
+
+  icd_build_configuration = configuration_data()
+  icd_build_configuration.set('RIN_VULKAN_ICD_LIBRARY',
+                              'librin-vulkan-icd.so')
+  icd_build_configuration.set('RIN_VULKAN_ICD_LIBRARY_RELATIVE_DIR', '.')
+  configure_file(
+    input: 'icd.d/rin-vulkan.json.in',
+    output: 'rin-vulkan-build.json',
+    configuration: icd_build_configuration,
+  )
+
+  python3 = find_program('python3')
+  test('rinvulkan-icd-manifest-template', python3,
+       args: files('scripts/check_manifest.py'))
+  test('rinvulkan-icd-build-manifest', python3,
+       args: [files('scripts/check_manifest.py'),
+              join_paths(meson.current_build_dir(), 'rin-vulkan-build.json'),
+              rinvulkan_icd.full_path()],
+       depends: [rinvulkan_icd])
+endif
 
 rinvulkan_abi_test = executable(
   'rinvulkan-abi-test',
