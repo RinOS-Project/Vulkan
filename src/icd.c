@@ -419,8 +419,22 @@ typedef struct RinVkEventWaitGroupV1 {
     /* vkCmdWaitEvents validates one exact signal-stage union per call. */
     uint32_t first_event_index;
     uint32_t event_count;
-    uint32_t source_stage_mask;
+    uint64_t source_stage_mask;
+    uint64_t destination_stage_mask;
+    uint32_t first_transfer_op;
+    uint32_t transfer_op_count;
+    uint32_t flags;
+    uint32_t packet_group_index;
 } RinVkEventWaitGroupV1;
+
+typedef struct RinVkEventCommandMetadataV1 {
+    uint64_t stage_mask2;
+    uint64_t destination_stage_mask2;
+    uint32_t first_transfer_op;
+    uint32_t transfer_op_count;
+    uint32_t wait_group_index;
+    uint32_t reserved;
+} RinVkEventCommandMetadataV1;
 
 typedef struct RinVkEventSlot {
     uint32_t state;
@@ -512,6 +526,7 @@ typedef struct RinVkSubmissionSlot {
         command_buffers[RIN_VK_MAX_SUBMIT_COMMAND_BUFFERS];
     RinGpuVulkanTransferPacketV2 extended_packet;
     RinGpuVulkanTransferPacketV3 routed_packet;
+    RinGpuVulkanCommandStreamPacketV1* command_stream_packet;
     RinGpuVulkanComputePacketV2* compute_packet;
     size_t compute_packet_size;
     RinGpuVulkanGraphicsPacketV1* graphics_packet;
@@ -596,6 +611,16 @@ static uint8_t g_command_event_dependency_valid
 static RinVkEventWaitGroupV1
     g_command_event_wait_groups[RIN_GPU_VULKAN_COMMAND_MAX_BUFFERS]
                                [RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS];
+static RinVkEventCommandMetadataV1
+    g_command_event_packet_metadata[RIN_GPU_VULKAN_COMMAND_MAX_BUFFERS]
+                                   [RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS];
+static uint32_t g_command_event_wait_group_counts[
+    RIN_GPU_VULKAN_COMMAND_MAX_BUFFERS];
+static RinGpuVulkanCommandStreamStepV1
+    g_command_stream_steps[RIN_GPU_VULKAN_COMMAND_MAX_BUFFERS]
+                          [RIN_GPU_VULKAN_COMMAND_STREAM_MAX_STEPS];
+static uint32_t g_command_stream_step_counts[
+    RIN_GPU_VULKAN_COMMAND_MAX_BUFFERS];
 
 static int command_buffer_runtime_index(
         const RinGpuVulkanCommandBufferV1* command_buffer,
@@ -611,6 +636,55 @@ static int command_buffer_runtime_index(
     if (offset % sizeof(g_command_runtime.buffers[0]) != 0u) return 0;
     *index_out = (uint32_t)(offset / sizeof(g_command_runtime.buffers[0]));
     return 1;
+}
+
+static void record_command_stream_step(
+        RinGpuVulkanCommandBufferV1* command_buffer, uint32_t type,
+        uint32_t first_index, uint32_t count, uint32_t wait_group_index) {
+    uint32_t buffer_index;
+    uint32_t step_index;
+    if (!command_buffer || count == 0u ||
+        !command_buffer_runtime_index(command_buffer, &buffer_index)) {
+        rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime,
+                                                    command_buffer);
+        return;
+    }
+    step_index = g_command_stream_step_counts[buffer_index];
+    if (step_index >= RIN_GPU_VULKAN_COMMAND_STREAM_MAX_STEPS) {
+        rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime,
+                                                    command_buffer);
+        return;
+    }
+    memset(&g_command_stream_steps[buffer_index][step_index], 0,
+           sizeof(g_command_stream_steps[buffer_index][step_index]));
+    g_command_stream_steps[buffer_index][step_index].type = type;
+    g_command_stream_steps[buffer_index][step_index].first_index = first_index;
+    g_command_stream_steps[buffer_index][step_index].count = count;
+    g_command_stream_steps[buffer_index][step_index].wait_group_index =
+        wait_group_index;
+    g_command_stream_step_counts[buffer_index] = step_index + 1u;
+}
+
+static void record_event_packet_metadata(
+        RinGpuVulkanCommandBufferV1* command_buffer,
+        uint32_t event_command_index, uint64_t stage_mask2,
+        uint64_t destination_stage_mask2,
+        uint32_t first_transfer_op, uint32_t transfer_op_count) {
+    uint32_t buffer_index;
+    if (event_command_index >= RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS ||
+        !command_buffer_runtime_index(command_buffer, &buffer_index)) {
+        rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime,
+                                                    command_buffer);
+        return;
+    }
+    g_command_event_packet_metadata[buffer_index][event_command_index].stage_mask2 =
+        stage_mask2;
+    g_command_event_packet_metadata[buffer_index][event_command_index]
+        .destination_stage_mask2 = destination_stage_mask2;
+    g_command_event_packet_metadata[buffer_index][event_command_index]
+        .first_transfer_op = first_transfer_op;
+    g_command_event_packet_metadata[buffer_index][event_command_index]
+        .transfer_op_count = transfer_op_count;
 }
 
 static RinVkEventDependencySignatureV1* command_event_dependency(
@@ -635,6 +709,12 @@ static void clear_command_event_dependencies(
            sizeof(g_command_event_dependency_valid[buffer_index]));
     memset(g_command_event_wait_groups[buffer_index], 0,
            sizeof(g_command_event_wait_groups[buffer_index]));
+    memset(g_command_event_packet_metadata[buffer_index], 0,
+           sizeof(g_command_event_packet_metadata[buffer_index]));
+    memset(g_command_stream_steps[buffer_index], 0,
+           sizeof(g_command_stream_steps[buffer_index]));
+    g_command_event_wait_group_counts[buffer_index] = 0u;
+    g_command_stream_step_counts[buffer_index] = 0u;
 }
 
 static void clear_command_event_dependency(
@@ -649,25 +729,50 @@ static void clear_command_event_dependency(
     g_command_event_dependency_valid[buffer_index][event_command_index] = 0u;
     memset(&g_command_event_wait_groups[buffer_index][event_command_index],
            0, sizeof(g_command_event_wait_groups[buffer_index][0]));
+    memset(&g_command_event_packet_metadata[buffer_index][event_command_index],
+           0, sizeof(g_command_event_packet_metadata[buffer_index][0]));
+    g_command_event_packet_metadata[buffer_index][event_command_index]
+        .wait_group_index = UINT32_MAX;
 }
 
 static int store_command_event_wait_group(
         RinGpuVulkanCommandBufferV1* command_buffer,
-        uint32_t event_command_index, uint32_t first_event_index,
-        uint32_t event_count, uint32_t source_stage_mask) {
+        uint32_t first_event_index, uint32_t event_count,
+        uint64_t source_stage_mask, uint64_t destination_stage_mask,
+        uint32_t first_transfer_op,
+        uint32_t transfer_op_count, uint32_t flags) {
     uint32_t buffer_index;
-    RinVkEventWaitGroupV1* group;
-    if (event_command_index >= RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS ||
-        first_event_index > event_command_index || event_count == 0u ||
+    uint32_t group_index;
+    uint32_t index;
+    if (!command_buffer ||
+        !command_buffer_runtime_index(command_buffer, &buffer_index) ||
+        event_count == 0u ||
+        first_event_index > RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS ||
         event_count > RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS -
                           first_event_index ||
-        event_command_index - first_event_index >= event_count ||
-        !command_buffer_runtime_index(command_buffer, &buffer_index))
+        first_event_index > command_buffer->event_command_count ||
+        event_count > command_buffer->event_command_count - first_event_index ||
+        (flags != RIN_GPU_VULKAN_EVENT_WAIT_GROUP_LEGACY &&
+         flags != RIN_GPU_VULKAN_EVENT_WAIT_GROUP_SYNCHRONIZATION2))
         return 0;
-    group = &g_command_event_wait_groups[buffer_index][event_command_index];
-    group->first_event_index = first_event_index;
-    group->event_count = event_count;
-    group->source_stage_mask = source_stage_mask;
+    group_index = g_command_event_wait_group_counts[buffer_index];
+    if (group_index >= RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS) return 0;
+    ++g_command_event_wait_group_counts[buffer_index];
+    for (index = first_event_index;
+         index < first_event_index + event_count; ++index) {
+        RinVkEventWaitGroupV1* group =
+            &g_command_event_wait_groups[buffer_index][index];
+        group->first_event_index = first_event_index;
+        group->event_count = event_count;
+        group->source_stage_mask = source_stage_mask;
+        group->destination_stage_mask = destination_stage_mask;
+        group->first_transfer_op = first_transfer_op;
+        group->transfer_op_count = transfer_op_count;
+        group->flags = flags;
+        group->packet_group_index = group_index;
+        g_command_event_packet_metadata[buffer_index][index]
+            .wait_group_index = group_index;
+    }
     return 1;
 }
 
@@ -2826,6 +2931,7 @@ static RinVkSubmissionSlot* reserve_submission_slot(void) {
 
 static void clear_submission_slot(RinVkSubmissionSlot* slot) {
     if (!slot) return;
+    free(slot->command_stream_packet);
     free(slot->compute_packet);
     free(slot->graphics_packet);
     free(slot->compute_buffer_ownership_updates);
@@ -3217,11 +3323,13 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
         use_v2 = 1;
     }
     command_cookie = (uint64_t)(uintptr_t)(
-        slot->graphics_packet
+        slot->command_stream_packet
+            ? (const void*)slot->command_stream_packet
+            : (slot->graphics_packet
             ? (const void*)slot->graphics_packet
             : (slot->compute_packet
                    ? (const void*)slot->compute_packet
-                   : (const void*)&slot->routed_packet));
+                   : (const void*)&slot->routed_packet)));
     memset(&submission, 0, sizeof(submission));
     memset(&submission_v2, 0, sizeof(submission_v2));
     if (use_v2) {
@@ -9333,6 +9441,10 @@ static void record_transfer_ops(RinGpuVulkanCommandBufferV1* core,
                                uint32_t operation_count,
                                const RinVkCommandResourceUse uses[],
                                uint32_t use_count);
+static void record_event_dependency_ops(
+    RinGpuVulkanCommandBufferV1* core,
+    const RinGpuVulkanTransferOpV2* operations, uint32_t operation_count,
+    const RinVkCommandResourceUse uses[], uint32_t use_count);
 
 void RIN_VKAPI_CALL vkCmdCopyBuffer(
     RinVkCommandBuffer command_buffer, RinVkBuffer src_buffer,
@@ -9554,11 +9666,11 @@ static int command_owner_device(RinGpuVulkanCommandBufferV1* core,
     return *owner_out != NULL;
 }
 
-static void record_transfer_ops(RinGpuVulkanCommandBufferV1* core,
-                                const RinGpuVulkanTransferOpV2* operations,
-                                uint32_t operation_count,
-                                const RinVkCommandResourceUse uses[],
-                                uint32_t use_count) {
+static void record_transfer_ops_internal(
+        RinGpuVulkanCommandBufferV1* core,
+        const RinGpuVulkanTransferOpV2* operations,
+        uint32_t operation_count, const RinVkCommandResourceUse uses[],
+        uint32_t use_count, int add_command_stream_step) {
     RinVkCommandResourceUse adjusted_uses[RIN_VK_MAX_COMMAND_RESOURCE_USES];
     uint32_t operation_base;
     uint32_t index;
@@ -9590,6 +9702,28 @@ static void record_transfer_ops(RinGpuVulkanCommandBufferV1* core,
     }
     if (!append_command_resource_uses(core, adjusted_uses, use_count))
         rin_gpu_vulkan_command_buffer_record_failure(&g_command_runtime, core);
+    if (add_command_stream_step && core->record_error == 0u)
+        record_command_stream_step(
+            core, RIN_GPU_VULKAN_COMMAND_STREAM_TRANSFER_OPS,
+            operation_base, operation_count, UINT32_MAX);
+}
+
+static void record_transfer_ops(RinGpuVulkanCommandBufferV1* core,
+                                const RinGpuVulkanTransferOpV2* operations,
+                                uint32_t operation_count,
+                                const RinVkCommandResourceUse uses[],
+                                uint32_t use_count) {
+    record_transfer_ops_internal(core, operations, operation_count, uses,
+                                 use_count, 1);
+}
+
+static void record_event_dependency_ops(
+        RinGpuVulkanCommandBufferV1* core,
+        const RinGpuVulkanTransferOpV2* operations,
+        uint32_t operation_count, const RinVkCommandResourceUse uses[],
+        uint32_t use_count) {
+    record_transfer_ops_internal(core, operations, operation_count, uses,
+                                 use_count, 0);
 }
 
 static int synchronization2_queue_families_valid(
@@ -9719,13 +9853,16 @@ static int build_event_dependency_info(
         const RinVkDependencyInfo* dependency_info, int reject_host_stage,
         RinGpuVulkanTransferOpV2 operations[], uint32_t* operation_count,
         RinVkEventDependencySignatureV1* signature,
-        uint64_t* source_stage_union_out) {
+        uint64_t* source_stage_union_out,
+        uint64_t* destination_stage_union_out) {
     uint64_t barrier_count;
     uint64_t source_stage_union = 0u;
+    uint64_t destination_stage_union = 0u;
     uint32_t index;
 
     if (!core || !owner || !dependency_info || !operations ||
         !operation_count || !signature || !source_stage_union_out ||
+        !destination_stage_union_out ||
         dependency_info->sType != RIN_VK_STRUCTURE_TYPE_DEPENDENCY_INFO ||
         dependency_info->pNext || dependency_info->dependencyFlags != 0u ||
         (dependency_info->memoryBarrierCount != 0u &&
@@ -9767,6 +9904,7 @@ static int build_event_dependency_info(
         signature->memory_barriers[index][2] = barrier->dstStageMask;
         signature->memory_barriers[index][3] = barrier->dstAccessMask;
         source_stage_union |= barrier->srcStageMask;
+        destination_stage_union |= barrier->dstStageMask;
         ++*operation_count;
     }
     for (index = 0u; index < dependency_info->bufferMemoryBarrierCount;
@@ -9798,6 +9936,7 @@ static int build_event_dependency_info(
         signature->buffer_barriers[index][7] = barrier->offset;
         signature->buffer_barriers[index][8] = barrier->size;
         source_stage_union |= barrier->srcStageMask;
+        destination_stage_union |= barrier->dstStageMask;
         ++*operation_count;
     }
     for (index = 0u; index < dependency_info->imageMemoryBarrierCount;
@@ -9835,9 +9974,11 @@ static int build_event_dependency_info(
         signature->image_barriers[index][12] = range->baseArrayLayer;
         signature->image_barriers[index][13] = range->layerCount;
         source_stage_union |= barrier->srcStageMask;
+        destination_stage_union |= barrier->dstStageMask;
         ++*operation_count;
     }
     *source_stage_union_out = source_stage_union;
+    *destination_stage_union_out = destination_stage_union;
     return 1;
 }
 
@@ -10274,7 +10415,8 @@ RinVkResult RIN_VKAPI_CALL vkResetEvent(RinVkDevice device, RinVkEvent event) {
 
 static void record_event_operation(RinVkCommandBuffer command_buffer,
                                    RinVkEvent event, uint32_t operation,
-                                   uint32_t stage_mask) {
+                                   uint32_t stage_mask,
+                                   uint64_t stage_mask2) {
     RinGpuVulkanCommandBufferV1* core =
         (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
     struct RinVkDevice_T* owner;
@@ -10285,9 +10427,15 @@ static void record_event_operation(RinVkCommandBuffer command_buffer,
             RIN_GPU_VULKAN_COMMAND_OK)
         record_query_failure(core);
     else {
-        clear_command_event_dependency(core, core->event_command_count - 1u);
-        core->event_commands[core->event_command_count - 1u].stage_mask =
-            stage_mask;
+        const uint32_t event_command_index = core->event_command_count - 1u;
+        clear_command_event_dependency(core, event_command_index);
+        core->event_commands[event_command_index].stage_mask = stage_mask;
+        record_event_packet_metadata(core, event_command_index, stage_mask2,
+                                     0u,
+                                     core->transfer_op_count, 0u);
+        record_command_stream_step(
+            core, RIN_GPU_VULKAN_COMMAND_STREAM_EVENT,
+            event_command_index, 1u, UINT32_MAX);
     }
 }
 
@@ -10299,7 +10447,7 @@ void RIN_VKAPI_CALL vkCmdSetEvent(RinVkCommandBuffer command_buffer,
         record_query_failure((RinGpuVulkanCommandBufferV1*)(void*)command_buffer);
     else
         record_event_operation(command_buffer, event,
-                               RIN_GPU_VULKAN_EVENT_COMMAND_SET, stage);
+                               RIN_GPU_VULKAN_EVENT_COMMAND_SET, stage, 0u);
 }
 
 void RIN_VKAPI_CALL vkCmdResetEvent(RinVkCommandBuffer command_buffer,
@@ -10310,7 +10458,7 @@ void RIN_VKAPI_CALL vkCmdResetEvent(RinVkCommandBuffer command_buffer,
         record_query_failure((RinGpuVulkanCommandBufferV1*)(void*)command_buffer);
     else
         record_event_operation(command_buffer, event,
-                               RIN_GPU_VULKAN_EVENT_COMMAND_RESET, stage);
+                               RIN_GPU_VULKAN_EVENT_COMMAND_RESET, stage, 0u);
 }
 
 void RIN_VKAPI_CALL vkCmdResetEvent2(
@@ -10331,7 +10479,7 @@ void RIN_VKAPI_CALL vkCmdResetEvent2(
     }
     record_event_operation(command_buffer, event,
                            RIN_GPU_VULKAN_EVENT_COMMAND_RESET,
-                           legacy_stage_mask);
+                           legacy_stage_mask, stage_mask);
 }
 
 void RIN_VKAPI_CALL vkCmdResetEvent2KHR(
@@ -10350,8 +10498,11 @@ void RIN_VKAPI_CALL vkCmdSetEvent2(
         RIN_GPU_VULKAN_COMMAND_MAX_BARRIERS];
     RinVkEventDependencySignatureV1 signature;
     uint64_t source_stage_union;
+    uint64_t destination_stage_union;
     uint32_t operation_count = 0u;
     uint32_t legacy_stage_mask;
+    uint32_t event_command_index;
+    uint32_t first_transfer_op;
 
     memset(operations, 0, sizeof(operations));
     if (!command_owner_device(core, &owner) ||
@@ -10359,7 +10510,8 @@ void RIN_VKAPI_CALL vkCmdSetEvent2(
         !event_slot((RinVkDevice)owner, event) ||
         !build_event_dependency_info(
             core, owner, dependency_info, 1, operations, &operation_count,
-            &signature, &source_stage_union) ||
+            &signature, &source_stage_union,
+            &destination_stage_union) ||
         !rin_vk_sync2_legacy_wait_stage_mask(source_stage_union,
                                               &legacy_stage_mask) ||
         rin_gpu_vulkan_command_buffer_record_event(
@@ -10369,12 +10521,23 @@ void RIN_VKAPI_CALL vkCmdSetEvent2(
         record_query_failure(core);
         return;
     }
-    core->event_commands[core->event_command_count - 1u].stage_mask =
-        legacy_stage_mask;
-    clear_command_event_dependency(core, core->event_command_count - 1u);
+    event_command_index = core->event_command_count - 1u;
+    first_transfer_op = core->transfer_op_count;
+    core->event_commands[event_command_index].stage_mask = legacy_stage_mask;
+    clear_command_event_dependency(core, event_command_index);
+    record_event_packet_metadata(core, event_command_index,
+                                 source_stage_union,
+                                 destination_stage_union,
+                                 first_transfer_op, operation_count);
+    record_command_stream_step(
+        core, RIN_GPU_VULKAN_COMMAND_STREAM_EVENT,
+        event_command_index, 1u, UINT32_MAX);
     if (!store_command_event_dependency(
-            core, core->event_command_count - 1u, &signature))
+            core, event_command_index, &signature))
         record_query_failure(core);
+    else if (operation_count != 0u)
+        record_event_dependency_ops(core, operations, operation_count,
+                                    NULL, 0u);
 }
 
 void RIN_VKAPI_CALL vkCmdSetEvent2KHR(
@@ -10396,11 +10559,25 @@ void RIN_VKAPI_CALL vkCmdWaitEvents2(
         RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS];
     uint32_t legacy_stage_masks[
         RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS];
+    uint64_t source_stage_masks[
+        RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS];
+    uint64_t destination_stage_masks[
+        RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS];
+    uint32_t first_dependency_operations[
+        RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS];
+    uint32_t dependency_operation_counts[
+        RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS];
+    uint32_t first_event_index;
+    uint32_t first_transfer_op;
     uint32_t operation_count = 0u;
+    uint64_t group_source_stage_mask = 0u;
+    uint64_t group_destination_stage_mask = 0u;
     uint32_t index;
 
     memset(operations, 0, sizeof(operations));
     memset(signatures, 0, sizeof(signatures));
+    memset(source_stage_masks, 0, sizeof(source_stage_masks));
+    memset(destination_stage_masks, 0, sizeof(destination_stage_masks));
     if (!command_owner_device(core, &owner) ||
         !owner->synchronization2_enabled || event_count == 0u || !events ||
         !dependency_infos ||
@@ -10411,17 +10588,28 @@ void RIN_VKAPI_CALL vkCmdWaitEvents2(
         record_query_failure(core);
         return;
     }
+    first_event_index = core->event_command_count;
+    first_transfer_op = core->transfer_op_count;
     for (index = 0u; index < event_count; ++index) {
         uint64_t source_stage_union;
+        uint64_t destination_stage_union;
+        first_dependency_operations[index] = operation_count;
         if (!event_slot((RinVkDevice)owner, events[index]) ||
             !build_event_dependency_info(
                 core, owner, &dependency_infos[index], 0, operations,
-                &operation_count, &signatures[index], &source_stage_union) ||
+                &operation_count, &signatures[index], &source_stage_union,
+                &destination_stage_union) ||
             !rin_vk_sync2_legacy_wait_stage_mask(
                 source_stage_union, &legacy_stage_masks[index])) {
             record_query_failure(core);
             return;
         }
+        source_stage_masks[index] = source_stage_union;
+        destination_stage_masks[index] = destination_stage_union;
+        group_source_stage_mask |= source_stage_union;
+        group_destination_stage_mask |= destination_stage_union;
+        dependency_operation_counts[index] =
+            operation_count - first_dependency_operations[index];
     }
     if (operation_count > RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS -
                               core->transfer_op_count) {
@@ -10440,14 +10628,30 @@ void RIN_VKAPI_CALL vkCmdWaitEvents2(
         clear_command_event_dependency(core, event_command_index);
         core->event_commands[event_command_index].stage_mask =
             legacy_stage_masks[index];
+        record_event_packet_metadata(
+            core, event_command_index, source_stage_masks[index],
+            destination_stage_masks[index],
+            first_transfer_op + first_dependency_operations[index],
+            dependency_operation_counts[index]);
+        record_command_stream_step(
+            core, RIN_GPU_VULKAN_COMMAND_STREAM_EVENT,
+            event_command_index, 1u, UINT32_MAX);
         if (!store_command_event_dependency(
                 core, event_command_index, &signatures[index])) {
             record_query_failure(core);
             return;
         }
     }
+    if (!store_command_event_wait_group(
+            core, first_event_index, event_count, group_source_stage_mask,
+            group_destination_stage_mask, first_transfer_op,
+            operation_count, RIN_GPU_VULKAN_EVENT_WAIT_GROUP_SYNCHRONIZATION2)) {
+        record_query_failure(core);
+        return;
+    }
     if (operation_count != 0u)
-        record_transfer_ops(core, operations, operation_count, NULL, 0u);
+        record_event_dependency_ops(core, operations, operation_count,
+                                    NULL, 0u);
 }
 
 void RIN_VKAPI_CALL vkCmdWaitEvents2KHR(
@@ -10477,6 +10681,7 @@ void RIN_VKAPI_CALL vkCmdWaitEvents(
     uint32_t operation_count = 0u;
     uint32_t index;
     uint32_t first_event_index;
+    uint32_t first_transfer_op;
     memset(operations, 0, sizeof(operations));
     if (!command_owner_device(core, &owner) || event_count == 0u ||
         event_count > RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS || !events ||
@@ -10564,6 +10769,7 @@ void RIN_VKAPI_CALL vkCmdWaitEvents(
         }
     }
     first_event_index = core->event_command_count;
+    first_transfer_op = core->transfer_op_count;
     for (index = 0u; index < event_count; ++index) {
         if (rin_gpu_vulkan_command_buffer_record_event(
                 &g_command_runtime, core, events[index],
@@ -10578,16 +10784,25 @@ void RIN_VKAPI_CALL vkCmdWaitEvents(
             core->event_commands[event_command_index].stage_mask =
                 src_stage_mask;
             clear_command_event_dependency(core, event_command_index);
-            if (!store_command_event_wait_group(
-                    core, event_command_index, first_event_index,
-                    event_count, src_stage_mask)) {
-                record_query_failure(core);
-                return;
-            }
+            record_event_packet_metadata(
+                core, event_command_index, 0u, 0u,
+                first_transfer_op, operation_count);
+            record_command_stream_step(
+                core, RIN_GPU_VULKAN_COMMAND_STREAM_EVENT,
+                event_command_index, 1u, UINT32_MAX);
         }
     }
+    if (!store_command_event_wait_group(
+            core, first_event_index, event_count, src_stage_mask,
+            dst_stage_mask,
+            first_transfer_op, operation_count,
+            RIN_GPU_VULKAN_EVENT_WAIT_GROUP_LEGACY)) {
+        record_query_failure(core);
+        return;
+    }
     if (operation_count != 0u)
-        record_transfer_ops(core, operations, operation_count, NULL, 0u);
+        record_event_dependency_ops(core, operations, operation_count,
+                                    NULL, 0u);
 }
 
 void RIN_VKAPI_CALL vkCmdCopyImage(
@@ -12182,6 +12397,332 @@ static void commit_buffer_ownership_updates(
         updates[index].buffer->ownership = updates[index].state;
 }
 
+static RinVkResult build_command_stream_packet(
+        RinVkSubmissionSlot* slot, uint32_t queue_family_index,
+        uint32_t family_queue_index) {
+    RinGpuVulkanCommandStreamPacketV1* packet;
+    const void* payload;
+    uint32_t payload_version;
+    size_t payload_size;
+    uint32_t event_count = 0u;
+    uint32_t wait_group_count = 0u;
+    uint32_t payload_operation_base = 0u;
+    uint32_t buffer_index;
+
+    if (!slot || !slot->owner || slot->command_buffer_count == 0u ||
+        slot->command_buffer_count > RIN_GPU_VULKAN_COMMAND_STREAM_MAX_BUFFERS)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    if (slot->compute_packet) {
+        payload = slot->compute_packet;
+        payload_size = slot->compute_packet_size;
+        payload_version = RIN_GPU_VULKAN_COMPUTE_PACKET_VERSION_2;
+    } else if (slot->graphics_packet) {
+        payload = slot->graphics_packet;
+        payload_size = slot->graphics_packet_size;
+        payload_version = RIN_GPU_VULKAN_GRAPHICS_PACKET_VERSION;
+    } else {
+        payload = &slot->routed_packet;
+        payload_size = sizeof(slot->routed_packet);
+        payload_version = RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_3;
+    }
+    if (!payload || payload_size == 0u || payload_size > UINT32_MAX)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+
+    for (buffer_index = 0u; buffer_index < slot->command_buffer_count;
+         ++buffer_index) {
+        RinGpuVulkanCommandBufferV1* command_buffer =
+            slot->command_buffers[buffer_index];
+        uint32_t runtime_index;
+        if (!command_buffer || command_buffer->record_error != 0u ||
+            command_buffer->event_command_count >
+                RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS ||
+            !command_buffer_runtime_index(command_buffer, &runtime_index) ||
+            g_command_stream_step_counts[runtime_index] >
+                RIN_GPU_VULKAN_COMMAND_STREAM_MAX_STEPS ||
+            g_command_event_wait_group_counts[runtime_index] >
+                RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS ||
+            event_count > RIN_GPU_VULKAN_COMMAND_STREAM_MAX_EVENTS -
+                              command_buffer->event_command_count ||
+            wait_group_count > RIN_GPU_VULKAN_COMMAND_STREAM_MAX_WAIT_GROUPS -
+                                   g_command_event_wait_group_counts[runtime_index])
+            return RIN_VK_ERROR_INITIALIZATION_FAILED;
+        event_count += command_buffer->event_command_count;
+        wait_group_count += g_command_event_wait_group_counts[runtime_index];
+    }
+    if (event_count == 0u) return RIN_VK_SUCCESS;
+
+    packet = (RinGpuVulkanCommandStreamPacketV1*)calloc(1u, sizeof(*packet));
+    if (!packet) return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+    packet->struct_size = sizeof(*packet);
+    packet->version = RIN_GPU_VULKAN_COMMAND_STREAM_PACKET_VERSION;
+    packet->payload_version = payload_version;
+    packet->payload_size = (uint32_t)payload_size;
+    packet->payload_cookie = (uint64_t)(uintptr_t)payload;
+    packet->queue_family_index = queue_family_index;
+    packet->queue_index = family_queue_index;
+    packet->product_queue_id = slot->queue_id;
+    packet->command_buffer_count = slot->command_buffer_count;
+    packet->event_command_count = event_count;
+    packet->wait_group_count = wait_group_count;
+
+    event_count = 0u;
+    wait_group_count = 0u;
+    for (buffer_index = 0u; buffer_index < slot->command_buffer_count;
+         ++buffer_index) {
+        RinGpuVulkanCommandBufferV1* command_buffer =
+            slot->command_buffers[buffer_index];
+        uint32_t runtime_index;
+        uint32_t local_index;
+        uint32_t event_base = event_count;
+        uint32_t group_base = wait_group_count;
+        uint32_t buffer_payload_operation_base;
+        RinGpuVulkanCommandStreamBufferV1* buffer_packet =
+            &packet->command_buffers[buffer_index];
+        if (!command_buffer_runtime_index(command_buffer, &runtime_index)) {
+            free(packet);
+            return RIN_VK_ERROR_INITIALIZATION_FAILED;
+        }
+        if (payload_version == RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_3) {
+            uint32_t buffer_payload_operation_count;
+            if (command_buffer->copy_count >
+                    RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS ||
+                command_buffer->transfer_op_count >
+                    RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS -
+                        command_buffer->copy_count) {
+                free(packet);
+                return RIN_VK_ERROR_INITIALIZATION_FAILED;
+            }
+            buffer_payload_operation_count = command_buffer->copy_count +
+                                            command_buffer->transfer_op_count;
+            if (payload_operation_base >
+                    slot->routed_packet.op_count ||
+                buffer_payload_operation_count >
+                    slot->routed_packet.op_count - payload_operation_base) {
+                free(packet);
+                return RIN_VK_ERROR_INITIALIZATION_FAILED;
+            }
+            buffer_payload_operation_base = payload_operation_base;
+            buffer_packet->copy_count = command_buffer->copy_count;
+            buffer_packet->transfer_operation_count =
+                command_buffer->transfer_op_count;
+            buffer_packet->payload_operation_count =
+                buffer_payload_operation_count;
+            payload_operation_base += buffer_payload_operation_count;
+        } else if (payload_version ==
+                   RIN_GPU_VULKAN_COMPUTE_PACKET_VERSION_2) {
+            const RinGpuVulkanComputePacketV2* compute_packet =
+                (const RinGpuVulkanComputePacketV2*)payload;
+            if (buffer_index != 0u || command_buffer->copy_count != 0u ||
+                command_buffer->transfer_op_count !=
+                    compute_packet->barrier_count) {
+                free(packet);
+                return RIN_VK_ERROR_INITIALIZATION_FAILED;
+            }
+            buffer_payload_operation_base = 0u;
+            buffer_packet->copy_count = 0u;
+            buffer_packet->transfer_operation_count =
+                command_buffer->transfer_op_count;
+            buffer_packet->payload_operation_count =
+                compute_packet->barrier_count;
+        } else {
+            free(packet);
+            return RIN_VK_ERROR_INITIALIZATION_FAILED;
+        }
+        buffer_packet->payload_operation_base = buffer_payload_operation_base;
+
+        for (local_index = 0u;
+             local_index < command_buffer->event_command_count;
+             ++local_index) {
+            const RinGpuVulkanEventCommandV1* command =
+                &command_buffer->event_commands[local_index];
+            const RinVkEventCommandMetadataV1* metadata =
+                &g_command_event_packet_metadata[runtime_index][local_index];
+            RinGpuVulkanEventCommandPacketV1* event_packet =
+                &packet->event_commands[event_base + local_index];
+            if (metadata->first_transfer_op >
+                    command_buffer->transfer_op_count ||
+                metadata->transfer_op_count >
+                    command_buffer->transfer_op_count -
+                        metadata->first_transfer_op ||
+                (metadata->wait_group_index != UINT32_MAX &&
+                 metadata->wait_group_index >=
+                     g_command_event_wait_group_counts[runtime_index])) {
+                free(packet);
+                return RIN_VK_ERROR_INITIALIZATION_FAILED;
+            }
+            event_packet->event = command->event;
+            event_packet->stage_mask2 = metadata->stage_mask2;
+            event_packet->destination_stage_mask2 =
+                metadata->destination_stage_mask2;
+            event_packet->operation = command->operation;
+            event_packet->stage_mask = command->stage_mask;
+            event_packet->command_buffer_index = buffer_index;
+            event_packet->first_dependency_operation =
+                buffer_payload_operation_base +
+                (payload_version ==
+                         RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_3
+                     ? command_buffer->copy_count
+                     : 0u) +
+                metadata->first_transfer_op;
+            event_packet->dependency_operation_count =
+                metadata->transfer_op_count;
+            event_packet->wait_group_index =
+                metadata->wait_group_index == UINT32_MAX
+                    ? UINT32_MAX
+                    : group_base + metadata->wait_group_index;
+        }
+
+        for (local_index = 0u;
+             local_index < g_command_event_wait_group_counts[runtime_index];
+             ++local_index) {
+            const RinVkEventWaitGroupV1* source_group = NULL;
+            RinGpuVulkanEventWaitGroupPacketV1* group_packet;
+            uint32_t event_index;
+            for (event_index = 0u;
+                 event_index < command_buffer->event_command_count;
+                 ++event_index) {
+                const RinVkEventWaitGroupV1* candidate =
+                    &g_command_event_wait_groups[runtime_index][event_index];
+                if (candidate->event_count != 0u &&
+                    candidate->packet_group_index == local_index) {
+                    source_group = candidate;
+                    break;
+                }
+            }
+            if (!source_group || source_group->event_count == 0u ||
+                source_group->first_event_index >=
+                    command_buffer->event_command_count ||
+                source_group->event_count > command_buffer->event_command_count -
+                    source_group->first_event_index ||
+                source_group->first_transfer_op >
+                    command_buffer->transfer_op_count ||
+                source_group->transfer_op_count >
+                    command_buffer->transfer_op_count -
+                        source_group->first_transfer_op) {
+                free(packet);
+                return RIN_VK_ERROR_INITIALIZATION_FAILED;
+            }
+            group_packet = &packet->wait_groups[group_base + local_index];
+            group_packet->source_stage_mask = source_group->source_stage_mask;
+            group_packet->destination_stage_mask =
+                source_group->destination_stage_mask;
+            group_packet->command_buffer_index = buffer_index;
+            group_packet->first_event_index =
+                event_base + source_group->first_event_index;
+            group_packet->event_count = source_group->event_count;
+            group_packet->flags = source_group->flags;
+            group_packet->first_dependency_operation =
+                buffer_payload_operation_base +
+                (payload_version ==
+                         RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_3
+                     ? command_buffer->copy_count
+                     : 0u) +
+                source_group->first_transfer_op;
+            group_packet->dependency_operation_count =
+                source_group->transfer_op_count;
+            for (event_index = source_group->first_event_index;
+                 event_index < source_group->first_event_index +
+                                   source_group->event_count;
+                 ++event_index) {
+                const RinVkEventWaitGroupV1* member =
+                    &g_command_event_wait_groups[runtime_index][event_index];
+                if (member->packet_group_index != local_index ||
+                    g_command_event_packet_metadata[runtime_index][event_index]
+                            .wait_group_index != local_index) {
+                    free(packet);
+                    return RIN_VK_ERROR_INITIALIZATION_FAILED;
+                }
+            }
+        }
+
+        for (local_index = 0u;
+             local_index < g_command_stream_step_counts[runtime_index];
+             ++local_index) {
+            const RinGpuVulkanCommandStreamStepV1* source_step =
+                &g_command_stream_steps[runtime_index][local_index];
+            RinGpuVulkanCommandStreamStepV1* step;
+            uint32_t first = source_step->first_index;
+            uint32_t count = source_step->count;
+            uint32_t type = source_step->type;
+            uint32_t wait_group_index = UINT32_MAX;
+            if (type == RIN_GPU_VULKAN_COMMAND_STREAM_EVENT) {
+                const RinVkEventCommandMetadataV1* metadata;
+                if (count != 1u || first >= command_buffer->event_command_count) {
+                    free(packet);
+                    return RIN_VK_ERROR_INITIALIZATION_FAILED;
+                }
+                metadata = &g_command_event_packet_metadata[runtime_index][first];
+                if (metadata->wait_group_index != UINT32_MAX) {
+                    const RinVkEventWaitGroupV1* group =
+                        &g_command_event_wait_groups[runtime_index][first];
+                    if (group->first_event_index != first) continue;
+                    type = RIN_GPU_VULKAN_COMMAND_STREAM_EVENT_WAIT_GROUP;
+                    first = group_base + metadata->wait_group_index;
+                    count = group->event_count;
+                    wait_group_index = first;
+                } else {
+                    first += event_base;
+                }
+            } else if (type == RIN_GPU_VULKAN_COMMAND_STREAM_COPY) {
+                if (first > command_buffer->copy_count ||
+                    count > command_buffer->copy_count - first) {
+                    free(packet);
+                    return RIN_VK_ERROR_INITIALIZATION_FAILED;
+                }
+                first += buffer_payload_operation_base;
+            } else if (type == RIN_GPU_VULKAN_COMMAND_STREAM_TRANSFER_OPS) {
+                if (first > command_buffer->transfer_op_count ||
+                    count > command_buffer->transfer_op_count - first) {
+                    free(packet);
+                    return RIN_VK_ERROR_INITIALIZATION_FAILED;
+                }
+                first += buffer_payload_operation_base +
+                    (payload_version ==
+                             RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_3
+                         ? command_buffer->copy_count
+                         : 0u);
+            } else if (type == RIN_GPU_VULKAN_COMMAND_STREAM_COMPUTE_DISPATCH) {
+                if (first != 0u || count != 1u ||
+                    command_buffer->compute_dispatch_count != 1u) {
+                    free(packet);
+                    return RIN_VK_ERROR_INITIALIZATION_FAILED;
+                }
+            } else if (type == RIN_GPU_VULKAN_COMMAND_STREAM_GRAPHICS_DRAW) {
+                if (first != 0u || count != 1u ||
+                    command_buffer->graphics_draw_count != 1u) {
+                    free(packet);
+                    return RIN_VK_ERROR_INITIALIZATION_FAILED;
+                }
+            } else {
+                free(packet);
+                return RIN_VK_ERROR_INITIALIZATION_FAILED;
+            }
+            if (packet->step_count >= RIN_GPU_VULKAN_COMMAND_STREAM_MAX_STEPS) {
+                free(packet);
+                return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+            }
+            step = &packet->steps[packet->step_count++];
+            *step = *source_step;
+            step->command_buffer_index = buffer_index;
+            step->type = type;
+            step->first_index = first;
+            step->count = count;
+            step->wait_group_index = wait_group_index;
+        }
+        event_count += command_buffer->event_command_count;
+        wait_group_count += g_command_event_wait_group_counts[runtime_index];
+    }
+    if ((payload_version == RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_3 &&
+         payload_operation_base != slot->routed_packet.op_count) ||
+        (payload_version == RIN_GPU_VULKAN_COMPUTE_PACKET_VERSION_2 &&
+         payload_operation_base != 0u)) {
+        free(packet);
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    }
+    slot->command_stream_packet = packet;
+    return RIN_VK_SUCCESS;
+}
+
 RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     RinVkQueue queue, uint32_t submit_count, const RinVkSubmitInfo* submits,
     uint64_t fence) {
@@ -12612,13 +13153,6 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         result = RIN_VK_ERROR_INITIALIZATION_FAILED;
         goto done;
     }
-    if (rin_gpu_vulkan_command_buffers_mark_submitted(
-            &g_command_runtime, request.commandBufferCount,
-            command_buffers) != RIN_GPU_VULKAN_COMMAND_OK) {
-        clear_submission_slot(slot);
-        result = RIN_VK_ERROR_INITIALIZATION_FAILED;
-        goto done;
-    }
     if (!compute_submission && !graphics_submission) {
         memset(&slot->routed_packet, 0, sizeof(slot->routed_packet));
         slot->routed_packet.struct_size = sizeof(slot->routed_packet);
@@ -12632,6 +13166,20 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
                slot->extended_packet.operations,
                sizeof(slot->routed_packet.operations[0]) *
                    slot->extended_packet.op_count);
+    }
+    result = build_command_stream_packet(
+        slot, queue_slot_value->queue_family_index,
+        queue_slot_value->family_queue_index);
+    if (result != RIN_VK_SUCCESS) {
+        clear_submission_slot(slot);
+        goto done;
+    }
+    if (rin_gpu_vulkan_command_buffers_mark_submitted(
+            &g_command_runtime, request.commandBufferCount,
+            command_buffers) != RIN_GPU_VULKAN_COMMAND_OK) {
+        clear_submission_slot(slot);
+        result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        goto done;
     }
     slot->wait_semaphore_count = request.waitSemaphoreCount;
     slot->signal_semaphore_count = request.signalSemaphoreCount;
@@ -13959,6 +14507,9 @@ void RIN_VKAPI_CALL vkCmdDraw(
     command->graphics_instance_count = instance_count;
     command->graphics_first_vertex = first_vertex;
     command->graphics_first_instance = first_instance;
+    record_command_stream_step(
+        command, RIN_GPU_VULKAN_COMMAND_STREAM_GRAPHICS_DRAW, 0u, 1u,
+        UINT32_MAX);
 }
 
 void RIN_VKAPI_CALL vkCmdDispatch(
@@ -13994,6 +14545,9 @@ void RIN_VKAPI_CALL vkCmdDispatch(
     command->compute_group_count_y = group_count_y;
     command->compute_group_count_z = group_count_z;
     command->compute_dispatch_count = 1u;
+    record_command_stream_step(
+        command, RIN_GPU_VULKAN_COMMAND_STREAM_COMPUTE_DISPATCH,
+        0u, 1u, UINT32_MAX);
 }
 
 typedef struct RinVkPipelineCacheBlobHeader {

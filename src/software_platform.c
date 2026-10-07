@@ -973,6 +973,628 @@ static int software_prepare_submission(
     return RIN_VULKAN_PRODUCT_OK;
 }
 
+static int software_command_stream_append(
+        const RinGpuVulkanTransferOpV2 source_operations[],
+        uint32_t source_operation_count, uint32_t first_operation,
+        uint32_t operation_count, uint32_t required_kind,
+        uint8_t seen_operations[RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS],
+        RinGpuVulkanTransferOpV2 destination_operations[],
+        uint32_t* destination_operation_count, uint32_t destination_capacity,
+        uint32_t after_dispatch, uint32_t* after_dispatch_mask) {
+    uint32_t index;
+    if (!source_operations || !seen_operations || !destination_operations ||
+        !destination_operation_count ||
+        first_operation > source_operation_count ||
+        operation_count > source_operation_count - first_operation ||
+        *destination_operation_count > destination_capacity ||
+        operation_count > destination_capacity - *destination_operation_count)
+        return 0;
+    for (index = 0u; index < operation_count; ++index) {
+        const uint32_t source_index = first_operation + index;
+        const RinGpuVulkanTransferOpV2* operation =
+            &source_operations[source_index];
+        if (seen_operations[source_index] != 0u || operation->reserved != 0u ||
+            (required_kind == 1u &&
+             operation->type != RIN_GPU_VULKAN_TRANSFER_OP_MEMORY_BARRIER &&
+             operation->type != RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_BARRIER &&
+             operation->type != RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER) ||
+            (required_kind == 2u &&
+             operation->type != RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_COPY))
+            return 0;
+        destination_operations[*destination_operation_count + index] =
+            *operation;
+        if (after_dispatch != 0u) {
+            if (!after_dispatch_mask ||
+                *destination_operation_count + index >= 32u)
+                return 0;
+            *after_dispatch_mask |=
+                UINT32_C(1) << (*destination_operation_count + index);
+        }
+        seen_operations[source_index] = 1u;
+    }
+    *destination_operation_count += operation_count;
+    return 1;
+}
+
+static int software_command_stream_dependency_range_valid(
+        const RinGpuVulkanCommandStreamPacketV1* command_stream,
+        uint32_t command_buffer_index, uint32_t first_operation,
+        uint32_t operation_count, uint32_t payload_operation_count,
+        uint32_t transfer_operation_base,
+        uint32_t transfer_operation_count) {
+    const RinGpuVulkanCommandStreamBufferV1* buffer;
+    if (!command_stream || command_buffer_index >=
+                               command_stream->command_buffer_count)
+        return 0;
+    buffer = &command_stream->command_buffers[command_buffer_index];
+    if (buffer->payload_operation_base > payload_operation_count ||
+        buffer->payload_operation_count > payload_operation_count -
+                                             buffer->payload_operation_base ||
+        transfer_operation_base > buffer->payload_operation_count ||
+        transfer_operation_count > buffer->payload_operation_count -
+                                       transfer_operation_base ||
+        first_operation < buffer->payload_operation_base +
+                              transfer_operation_base ||
+        first_operation - (buffer->payload_operation_base +
+                           transfer_operation_base) >
+            transfer_operation_count ||
+        operation_count > transfer_operation_count -
+                              (first_operation -
+                               (buffer->payload_operation_base +
+                                transfer_operation_base)))
+        return 0;
+    return 1;
+}
+
+static int software_build_command_stream_payload(
+        const RinGpuVulkanCommandStreamPacketV1* command_stream,
+        const RinVulkanProductSubmissionV1* submission, void** payload_out) {
+    const RinGpuVulkanTransferPacketV1* payload_header;
+    uint8_t seen_events[RIN_GPU_VULKAN_COMMAND_STREAM_MAX_EVENTS] = {0};
+    uint8_t seen_wait_groups[RIN_GPU_VULKAN_COMMAND_STREAM_MAX_WAIT_GROUPS] =
+        {0};
+    uint32_t reserved_index;
+    uint32_t event_index;
+    uint32_t group_index;
+    uint32_t step_index;
+    uint32_t next_command_buffer = 0u;
+    if (payload_out) *payload_out = NULL;
+    if (!command_stream || !submission || !payload_out ||
+        command_stream->struct_size != sizeof(*command_stream) ||
+        command_stream->version !=
+            RIN_GPU_VULKAN_COMMAND_STREAM_PACKET_VERSION ||
+        command_stream->payload_cookie == 0u ||
+        command_stream->payload_cookie == submission->command_cookie ||
+        command_stream->payload_size < sizeof(uint32_t) * 2u ||
+        command_stream->queue_family_index >=
+            RIN_GPU_VULKAN_MAX_QUEUE_FAMILIES ||
+        command_stream->queue_index >= RIN_VULKAN_PRODUCT_MAX_QUEUES ||
+        command_stream->product_queue_id != submission->queue_id ||
+        command_stream->reserved_route != 0u ||
+        command_stream->command_buffer_count == 0u ||
+        command_stream->command_buffer_count >
+            RIN_GPU_VULKAN_COMMAND_STREAM_MAX_BUFFERS ||
+        command_stream->event_command_count == 0u ||
+        command_stream->event_command_count >
+            RIN_GPU_VULKAN_COMMAND_STREAM_MAX_EVENTS ||
+        command_stream->wait_group_count >
+            RIN_GPU_VULKAN_COMMAND_STREAM_MAX_WAIT_GROUPS ||
+        command_stream->step_count == 0u ||
+        command_stream->step_count > RIN_GPU_VULKAN_COMMAND_STREAM_MAX_STEPS)
+        return RIN_VULKAN_PRODUCT_PROTOCOL;
+    for (reserved_index = 0u;
+         reserved_index < sizeof(command_stream->reserved) /
+                              sizeof(command_stream->reserved[0]);
+         ++reserved_index)
+        if (command_stream->reserved[reserved_index] != 0u)
+            return RIN_VULKAN_PRODUCT_PROTOCOL;
+    payload_header = (const RinGpuVulkanTransferPacketV1*)(uintptr_t)
+        command_stream->payload_cookie;
+    if (!payload_header || payload_header->struct_size !=
+                               command_stream->payload_size ||
+        payload_header->version != command_stream->payload_version)
+        return RIN_VULKAN_PRODUCT_PROTOCOL;
+
+    if (command_stream->payload_version ==
+        RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_3) {
+        const RinGpuVulkanTransferPacketV3* source =
+            (const RinGpuVulkanTransferPacketV3*)(uintptr_t)
+                command_stream->payload_cookie;
+        RinGpuVulkanTransferPacketV2* normalized;
+        uint8_t seen_operations[RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS] = {0};
+        uint32_t operation_count = 0u;
+        if (command_stream->payload_size != sizeof(*source) ||
+            source->struct_size != sizeof(*source) ||
+            source->op_count > RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS ||
+            source->queue_family_index !=
+                command_stream->queue_family_index ||
+            source->queue_index != command_stream->queue_index ||
+            source->product_queue_id != submission->queue_id ||
+            source->reserved != 0u ||
+            source->reserved_route != 0u)
+            return RIN_VULKAN_PRODUCT_PROTOCOL;
+        normalized = (RinGpuVulkanTransferPacketV2*)calloc(
+            1u, sizeof(*normalized));
+        if (!normalized) return RIN_VULKAN_PRODUCT_NO_SPACE;
+        normalized->struct_size = sizeof(*normalized);
+        normalized->version = RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_2;
+        for (reserved_index = 0u;
+             reserved_index < command_stream->command_buffer_count;
+             ++reserved_index) {
+            const RinGpuVulkanCommandStreamBufferV1* buffer =
+                &command_stream->command_buffers[reserved_index];
+            if (buffer->payload_operation_base != next_command_buffer ||
+                buffer->copy_count >
+                    RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS ||
+                buffer->transfer_operation_count >
+                    RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS -
+                        buffer->copy_count ||
+                buffer->payload_operation_count != buffer->copy_count +
+                    buffer->transfer_operation_count ||
+                next_command_buffer > source->op_count ||
+                buffer->payload_operation_count >
+                    source->op_count - next_command_buffer)
+                goto transfer_protocol_error;
+            next_command_buffer += buffer->payload_operation_count;
+        }
+        if (next_command_buffer != source->op_count)
+            goto transfer_protocol_error;
+
+        for (event_index = 0u;
+             event_index < command_stream->event_command_count;
+             ++event_index) {
+            const RinGpuVulkanEventCommandPacketV1* event =
+                &command_stream->event_commands[event_index];
+            const RinGpuVulkanCommandStreamBufferV1* buffer;
+            uint32_t transfer_base;
+            if (event->event == 0u || event->command_buffer_index >=
+                                         command_stream->command_buffer_count ||
+                event->operation < RIN_GPU_VULKAN_EVENT_COMMAND_SET ||
+                event->operation > RIN_GPU_VULKAN_EVENT_COMMAND_WAIT_2 ||
+                event->reserved[0] != 0u || event->reserved[1] != 0u ||
+                (event->wait_group_index != UINT32_MAX &&
+                 event->wait_group_index >= command_stream->wait_group_count))
+                goto transfer_protocol_error;
+            buffer = &command_stream->command_buffers[
+                event->command_buffer_index];
+            transfer_base = buffer->copy_count;
+            if (!software_command_stream_dependency_range_valid(
+                    command_stream, event->command_buffer_index,
+                    event->first_dependency_operation,
+                    event->dependency_operation_count, source->op_count,
+                    transfer_base, buffer->transfer_operation_count))
+                goto transfer_protocol_error;
+            if (event->wait_group_index == UINT32_MAX) {
+                if (event->operation !=
+                        RIN_GPU_VULKAN_EVENT_COMMAND_SET_2 &&
+                    event->dependency_operation_count != 0u)
+                    goto transfer_protocol_error;
+            } else if (event->operation !=
+                           RIN_GPU_VULKAN_EVENT_COMMAND_WAIT &&
+                       event->operation !=
+                           RIN_GPU_VULKAN_EVENT_COMMAND_WAIT_2) {
+                goto transfer_protocol_error;
+            }
+        }
+        for (group_index = 0u;
+             group_index < command_stream->wait_group_count; ++group_index) {
+            const RinGpuVulkanEventWaitGroupPacketV1* group =
+                &command_stream->wait_groups[group_index];
+            const RinGpuVulkanCommandStreamBufferV1* buffer;
+            uint32_t member_index;
+            if (group->command_buffer_index >=
+                    command_stream->command_buffer_count ||
+                group->event_count == 0u ||
+                group->first_event_index >
+                    command_stream->event_command_count ||
+                group->event_count > command_stream->event_command_count -
+                                         group->first_event_index ||
+                (group->flags != RIN_GPU_VULKAN_EVENT_WAIT_GROUP_LEGACY &&
+                 group->flags !=
+                    RIN_GPU_VULKAN_EVENT_WAIT_GROUP_SYNCHRONIZATION2) ||
+                group->reserved[0] != 0u || group->reserved[1] != 0u)
+                goto transfer_protocol_error;
+            buffer = &command_stream->command_buffers[
+                group->command_buffer_index];
+            if (!software_command_stream_dependency_range_valid(
+                    command_stream, group->command_buffer_index,
+                    group->first_dependency_operation,
+                    group->dependency_operation_count, source->op_count,
+                    buffer->copy_count,
+                    buffer->transfer_operation_count))
+                goto transfer_protocol_error;
+            for (member_index = group->first_event_index;
+                 member_index < group->first_event_index + group->event_count;
+                 ++member_index) {
+                const RinGpuVulkanEventCommandPacketV1* event =
+                    &command_stream->event_commands[member_index];
+                if (event->command_buffer_index !=
+                        group->command_buffer_index ||
+                    event->wait_group_index != group_index ||
+                    (event->operation != RIN_GPU_VULKAN_EVENT_COMMAND_WAIT &&
+                     event->operation !=
+                        RIN_GPU_VULKAN_EVENT_COMMAND_WAIT_2) ||
+                    event->first_dependency_operation <
+                        group->first_dependency_operation ||
+                    event->first_dependency_operation -
+                            group->first_dependency_operation >
+                        group->dependency_operation_count ||
+                    event->dependency_operation_count >
+                        group->dependency_operation_count -
+                            (event->first_dependency_operation -
+                             group->first_dependency_operation) ||
+                    (group->flags ==
+                         RIN_GPU_VULKAN_EVENT_WAIT_GROUP_LEGACY &&
+                     event->operation !=
+                         RIN_GPU_VULKAN_EVENT_COMMAND_WAIT) ||
+                    (group->flags ==
+                         RIN_GPU_VULKAN_EVENT_WAIT_GROUP_SYNCHRONIZATION2 &&
+                     event->operation !=
+                         RIN_GPU_VULKAN_EVENT_COMMAND_WAIT_2))
+                    goto transfer_protocol_error;
+            }
+        }
+        for (step_index = 0u; step_index < command_stream->step_count;
+             ++step_index) {
+            const RinGpuVulkanCommandStreamStepV1* step =
+                &command_stream->steps[step_index];
+            const RinGpuVulkanCommandStreamBufferV1* buffer;
+            uint32_t first;
+            uint32_t last;
+            if (step->command_buffer_index >=
+                    command_stream->command_buffer_count ||
+                step->count == 0u || step->reserved[0] != 0u ||
+                step->reserved[1] != 0u || step->reserved[2] != 0u ||
+                step->command_buffer_index <
+                    (step_index == 0u ? 0u :
+                     command_stream->steps[step_index - 1u]
+                         .command_buffer_index))
+                goto transfer_protocol_error;
+            buffer = &command_stream->command_buffers[
+                step->command_buffer_index];
+            if (step->type == RIN_GPU_VULKAN_COMMAND_STREAM_COPY ||
+                step->type == RIN_GPU_VULKAN_COMMAND_STREAM_TRANSFER_OPS) {
+                const uint32_t range_base = buffer->payload_operation_base +
+                    (step->type == RIN_GPU_VULKAN_COMMAND_STREAM_COPY
+                         ? 0u : buffer->copy_count);
+                const uint32_t range_count =
+                    step->type == RIN_GPU_VULKAN_COMMAND_STREAM_COPY
+                        ? buffer->copy_count
+                        : buffer->transfer_operation_count;
+                if (step->first_index < range_base ||
+                    step->first_index - range_base > range_count ||
+                    step->count > range_count -
+                                      (step->first_index - range_base))
+                    goto transfer_protocol_error;
+                first = step->first_index;
+                last = step->count;
+                if ((step->type == RIN_GPU_VULKAN_COMMAND_STREAM_COPY &&
+                     !software_command_stream_append(
+                         source->operations, source->op_count, first, last,
+                         2u, seen_operations, normalized->operations,
+                         &operation_count,
+                         RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS, 0u, NULL)) ||
+                    (step->type ==
+                         RIN_GPU_VULKAN_COMMAND_STREAM_TRANSFER_OPS &&
+                     !software_command_stream_append(
+                         source->operations, source->op_count, first, last,
+                         0u, seen_operations, normalized->operations,
+                         &operation_count,
+                         RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS, 0u, NULL)))
+                    goto transfer_protocol_error;
+            } else if (step->type == RIN_GPU_VULKAN_COMMAND_STREAM_EVENT) {
+                const RinGpuVulkanEventCommandPacketV1* event;
+                if (step->count != 1u || step->wait_group_index != UINT32_MAX ||
+                    step->first_index >= command_stream->event_command_count ||
+                    seen_events[step->first_index] != 0u)
+                    goto transfer_protocol_error;
+                event = &command_stream->event_commands[step->first_index];
+                if (event->command_buffer_index !=
+                        step->command_buffer_index ||
+                    event->wait_group_index != UINT32_MAX ||
+                    (event->operation != RIN_GPU_VULKAN_EVENT_COMMAND_SET &&
+                     event->operation != RIN_GPU_VULKAN_EVENT_COMMAND_RESET &&
+                     event->operation !=
+                        RIN_GPU_VULKAN_EVENT_COMMAND_SET_2))
+                    goto transfer_protocol_error;
+                if (event->operation == RIN_GPU_VULKAN_EVENT_COMMAND_SET_2 &&
+                    !software_command_stream_append(
+                        source->operations, source->op_count,
+                        event->first_dependency_operation,
+                        event->dependency_operation_count, 1u,
+                        seen_operations, normalized->operations,
+                        &operation_count,
+                        RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS, 0u, NULL))
+                    goto transfer_protocol_error;
+                seen_events[step->first_index] = 1u;
+            } else if (step->type ==
+                       RIN_GPU_VULKAN_COMMAND_STREAM_EVENT_WAIT_GROUP) {
+                const RinGpuVulkanEventWaitGroupPacketV1* group;
+                uint32_t member_index;
+                if (step->first_index >= command_stream->wait_group_count ||
+                    step->wait_group_index != step->first_index ||
+                    seen_wait_groups[step->first_index] != 0u)
+                    goto transfer_protocol_error;
+                group = &command_stream->wait_groups[step->first_index];
+                if (group->command_buffer_index !=
+                        step->command_buffer_index ||
+                    group->event_count != step->count)
+                    goto transfer_protocol_error;
+                if (!software_command_stream_append(
+                        source->operations, source->op_count,
+                        group->first_dependency_operation,
+                        group->dependency_operation_count, 1u,
+                        seen_operations, normalized->operations,
+                        &operation_count,
+                        RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS, 0u, NULL))
+                    goto transfer_protocol_error;
+                for (member_index = group->first_event_index;
+                     member_index < group->first_event_index + group->event_count;
+                     ++member_index) {
+                    if (seen_events[member_index] != 0u)
+                        goto transfer_protocol_error;
+                    seen_events[member_index] = 1u;
+                }
+                seen_wait_groups[step->first_index] = 1u;
+            } else {
+                goto transfer_protocol_error;
+            }
+        }
+        for (event_index = 0u;
+             event_index < command_stream->event_command_count;
+             ++event_index)
+            if (seen_events[event_index] == 0u) goto transfer_protocol_error;
+        for (group_index = 0u;
+             group_index < command_stream->wait_group_count; ++group_index)
+            if (seen_wait_groups[group_index] == 0u)
+                goto transfer_protocol_error;
+        for (reserved_index = 0u; reserved_index < source->op_count;
+             ++reserved_index)
+            if (seen_operations[reserved_index] == 0u)
+                goto transfer_protocol_error;
+        normalized->op_count = operation_count;
+        *payload_out = normalized;
+        return RIN_VULKAN_PRODUCT_OK;
+
+transfer_protocol_error:
+        free(normalized);
+        return RIN_VULKAN_PRODUCT_PROTOCOL;
+    }
+
+    if (command_stream->payload_version ==
+        RIN_GPU_VULKAN_COMPUTE_PACKET_VERSION_2) {
+        const RinGpuVulkanComputePacketV2* source =
+            (const RinGpuVulkanComputePacketV2*)(uintptr_t)
+                command_stream->payload_cookie;
+        RinGpuVulkanComputePacketV2* normalized;
+        uint8_t seen_operations[RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS] = {0};
+        uint32_t operation_count = 0u;
+        uint32_t after_dispatch_mask = 0u;
+        uint32_t dispatch_seen = 0u;
+        if (command_stream->command_buffer_count != 1u ||
+            command_stream->payload_size <
+                offsetof(RinGpuVulkanComputePacketV2, shader_ir) ||
+            source->struct_size != command_stream->payload_size ||
+            source->version != RIN_GPU_VULKAN_COMPUTE_PACKET_VERSION_2 ||
+            source->product_queue_id != submission->queue_id ||
+            source->queue_family_index !=
+                command_stream->queue_family_index ||
+            source->queue_index != command_stream->queue_index ||
+            source->barrier_count > RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS ||
+            source->barrier_count > RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS ||
+            source->shader_size_bytes != command_stream->payload_size -
+                offsetof(RinGpuVulkanComputePacketV2, shader_ir))
+            return RIN_VULKAN_PRODUCT_PROTOCOL;
+        {
+            const RinGpuVulkanCommandStreamBufferV1* buffer =
+                &command_stream->command_buffers[0];
+            if (buffer->payload_operation_base != 0u ||
+                buffer->copy_count != 0u ||
+                buffer->payload_operation_count != source->barrier_count ||
+                buffer->transfer_operation_count != source->barrier_count)
+                return RIN_VULKAN_PRODUCT_PROTOCOL;
+        }
+        normalized = (RinGpuVulkanComputePacketV2*)malloc(
+            command_stream->payload_size);
+        if (!normalized) return RIN_VULKAN_PRODUCT_NO_SPACE;
+        memcpy(normalized, source, command_stream->payload_size);
+        normalized->barrier_count = 0u;
+        normalized->barrier_after_dispatch_mask = 0u;
+        memset(normalized->barriers, 0, sizeof(normalized->barriers));
+        for (event_index = 0u;
+             event_index < command_stream->event_command_count;
+             ++event_index) {
+            const RinGpuVulkanEventCommandPacketV1* event =
+                &command_stream->event_commands[event_index];
+            if (event->event == 0u || event->command_buffer_index != 0u ||
+                event->operation < RIN_GPU_VULKAN_EVENT_COMMAND_SET ||
+                event->operation > RIN_GPU_VULKAN_EVENT_COMMAND_WAIT_2 ||
+                event->reserved[0] != 0u || event->reserved[1] != 0u ||
+                (event->wait_group_index != UINT32_MAX &&
+                 event->wait_group_index >= command_stream->wait_group_count) ||
+                !software_command_stream_dependency_range_valid(
+                    command_stream, 0u,
+                    event->first_dependency_operation,
+                    event->dependency_operation_count,
+                    source->barrier_count, 0u, source->barrier_count))
+                goto compute_protocol_error;
+            if (event->wait_group_index == UINT32_MAX) {
+                if (event->operation !=
+                        RIN_GPU_VULKAN_EVENT_COMMAND_SET_2 &&
+                    event->dependency_operation_count != 0u) {
+                    goto compute_protocol_error;
+                }
+            } else if (event->operation !=
+                           RIN_GPU_VULKAN_EVENT_COMMAND_WAIT &&
+                       event->operation !=
+                           RIN_GPU_VULKAN_EVENT_COMMAND_WAIT_2) {
+                goto compute_protocol_error;
+            }
+        }
+        for (group_index = 0u;
+             group_index < command_stream->wait_group_count; ++group_index) {
+            const RinGpuVulkanEventWaitGroupPacketV1* group =
+                &command_stream->wait_groups[group_index];
+            uint32_t member_index;
+            if (group->command_buffer_index != 0u ||
+                group->event_count == 0u ||
+                group->first_event_index >
+                    command_stream->event_command_count ||
+                group->event_count > command_stream->event_command_count -
+                                         group->first_event_index ||
+                (group->flags != RIN_GPU_VULKAN_EVENT_WAIT_GROUP_LEGACY &&
+                 group->flags !=
+                    RIN_GPU_VULKAN_EVENT_WAIT_GROUP_SYNCHRONIZATION2) ||
+                group->reserved[0] != 0u || group->reserved[1] != 0u ||
+                !software_command_stream_dependency_range_valid(
+                    command_stream, 0u,
+                    group->first_dependency_operation,
+                    group->dependency_operation_count,
+                    source->barrier_count, 0u, source->barrier_count))
+                goto compute_protocol_error;
+            for (member_index = group->first_event_index;
+                 member_index < group->first_event_index + group->event_count;
+                 ++member_index) {
+                const RinGpuVulkanEventCommandPacketV1* event =
+                    &command_stream->event_commands[member_index];
+                if (event->command_buffer_index != 0u ||
+                    event->wait_group_index != group_index ||
+                    (event->operation != RIN_GPU_VULKAN_EVENT_COMMAND_WAIT &&
+                     event->operation !=
+                        RIN_GPU_VULKAN_EVENT_COMMAND_WAIT_2) ||
+                    event->first_dependency_operation <
+                        group->first_dependency_operation ||
+                    event->first_dependency_operation -
+                            group->first_dependency_operation >
+                        group->dependency_operation_count ||
+                    event->dependency_operation_count >
+                        group->dependency_operation_count -
+                            (event->first_dependency_operation -
+                             group->first_dependency_operation) ||
+                    (group->flags ==
+                         RIN_GPU_VULKAN_EVENT_WAIT_GROUP_LEGACY &&
+                     event->operation !=
+                         RIN_GPU_VULKAN_EVENT_COMMAND_WAIT) ||
+                    (group->flags ==
+                         RIN_GPU_VULKAN_EVENT_WAIT_GROUP_SYNCHRONIZATION2 &&
+                     event->operation !=
+                         RIN_GPU_VULKAN_EVENT_COMMAND_WAIT_2))
+                    goto compute_protocol_error;
+            }
+        }
+        for (step_index = 0u; step_index < command_stream->step_count;
+             ++step_index) {
+            const RinGpuVulkanCommandStreamStepV1* step =
+                &command_stream->steps[step_index];
+            if (step->command_buffer_index != 0u || step->count == 0u ||
+                step->reserved[0] != 0u || step->reserved[1] != 0u ||
+                step->reserved[2] != 0u)
+                goto compute_protocol_error;
+            if (step->type == RIN_GPU_VULKAN_COMMAND_STREAM_TRANSFER_OPS) {
+                if (step->wait_group_index != UINT32_MAX ||
+                    step->first_index > source->barrier_count ||
+                    step->count > source->barrier_count - step->first_index ||
+                    !software_command_stream_append(
+                        source->barriers, source->barrier_count,
+                        step->first_index, step->count, 1u, seen_operations,
+                        normalized->barriers, &operation_count,
+                        RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS,
+                        dispatch_seen, &after_dispatch_mask))
+                    goto compute_protocol_error;
+            } else if (step->type ==
+                       RIN_GPU_VULKAN_COMMAND_STREAM_EVENT) {
+                const RinGpuVulkanEventCommandPacketV1* event;
+                if (step->count != 1u ||
+                    step->wait_group_index != UINT32_MAX ||
+                    step->first_index >= command_stream->event_command_count ||
+                    seen_events[step->first_index] != 0u)
+                    goto compute_protocol_error;
+                event = &command_stream->event_commands[step->first_index];
+                if (event->command_buffer_index != 0u ||
+                    event->wait_group_index != UINT32_MAX ||
+                    (event->operation != RIN_GPU_VULKAN_EVENT_COMMAND_SET &&
+                     event->operation != RIN_GPU_VULKAN_EVENT_COMMAND_RESET &&
+                     event->operation !=
+                        RIN_GPU_VULKAN_EVENT_COMMAND_SET_2))
+                    goto compute_protocol_error;
+                if (event->operation == RIN_GPU_VULKAN_EVENT_COMMAND_SET_2 &&
+                    !software_command_stream_append(
+                        source->barriers, source->barrier_count,
+                        event->first_dependency_operation,
+                        event->dependency_operation_count, 1u,
+                        seen_operations, normalized->barriers,
+                        &operation_count,
+                        RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS,
+                        dispatch_seen, &after_dispatch_mask))
+                    goto compute_protocol_error;
+                seen_events[step->first_index] = 1u;
+            } else if (step->type ==
+                       RIN_GPU_VULKAN_COMMAND_STREAM_EVENT_WAIT_GROUP) {
+                const RinGpuVulkanEventWaitGroupPacketV1* group;
+                uint32_t member_index;
+                if (step->first_index >= command_stream->wait_group_count ||
+                    step->wait_group_index != step->first_index ||
+                    seen_wait_groups[step->first_index] != 0u)
+                    goto compute_protocol_error;
+                group = &command_stream->wait_groups[step->first_index];
+                if (group->command_buffer_index != 0u ||
+                    group->event_count != step->count)
+                    goto compute_protocol_error;
+                if (!software_command_stream_append(
+                        source->barriers, source->barrier_count,
+                        group->first_dependency_operation,
+                        group->dependency_operation_count, 1u,
+                        seen_operations, normalized->barriers,
+                        &operation_count,
+                        RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS,
+                        dispatch_seen, &after_dispatch_mask))
+                    goto compute_protocol_error;
+                for (member_index = group->first_event_index;
+                     member_index < group->first_event_index + group->event_count;
+                     ++member_index) {
+                    if (seen_events[member_index] != 0u)
+                        goto compute_protocol_error;
+                    seen_events[member_index] = 1u;
+                }
+                seen_wait_groups[step->first_index] = 1u;
+            } else if (step->type ==
+                       RIN_GPU_VULKAN_COMMAND_STREAM_COMPUTE_DISPATCH) {
+                if (step->first_index != 0u || step->count != 1u ||
+                    step->wait_group_index != UINT32_MAX ||
+                    dispatch_seen != 0u)
+                    goto compute_protocol_error;
+                dispatch_seen = 1u;
+            } else {
+                goto compute_protocol_error;
+            }
+        }
+        if (dispatch_seen == 0u || operation_count != source->barrier_count)
+            goto compute_protocol_error;
+        for (event_index = 0u;
+             event_index < command_stream->event_command_count;
+             ++event_index)
+            if (seen_events[event_index] == 0u)
+                goto compute_protocol_error;
+        for (group_index = 0u;
+             group_index < command_stream->wait_group_count; ++group_index)
+            if (seen_wait_groups[group_index] == 0u)
+                goto compute_protocol_error;
+        for (reserved_index = 0u; reserved_index < source->barrier_count;
+             ++reserved_index)
+            if (seen_operations[reserved_index] == 0u)
+                goto compute_protocol_error;
+        normalized->barrier_count = operation_count;
+        normalized->barrier_after_dispatch_mask = after_dispatch_mask;
+        *payload_out = normalized;
+        return RIN_VULKAN_PRODUCT_OK;
+
+compute_protocol_error:
+        free(normalized);
+        return RIN_VULKAN_PRODUCT_PROTOCOL;
+    }
+    return RIN_VULKAN_PRODUCT_UNSUPPORTED;
+}
+
 static int software_submit(void* context,
                            const RinVulkanProductSubmissionV1* submission,
                            const RinVulkanProductResourceV1* resources,
@@ -1009,6 +1631,22 @@ static int software_submit(void* context,
         submission->command_cookie;
     if (!packet || packet->struct_size < sizeof(uint32_t) * 2u)
         return RIN_VULKAN_PRODUCT_PROTOCOL;
+    if (packet->version == RIN_GPU_VULKAN_COMMAND_STREAM_PACKET_VERSION) {
+        const RinGpuVulkanCommandStreamPacketV1* command_stream =
+            (const RinGpuVulkanCommandStreamPacketV1*)(uintptr_t)
+                submission->command_cookie;
+        RinVulkanProductSubmissionV1 normalized_submission = *submission;
+        void* normalized_payload = NULL;
+        int stream_result = software_build_command_stream_payload(
+            command_stream, submission, &normalized_payload);
+        if (stream_result != RIN_VULKAN_PRODUCT_OK) return stream_result;
+        normalized_submission.command_cookie =
+            (uint64_t)(uintptr_t)normalized_payload;
+        stream_result = software_submit(context, &normalized_submission,
+                                        resources, resource_count);
+        free(normalized_payload);
+        return stream_result;
+    }
     if (packet->version == RIN_GPU_VULKAN_COMPUTE_PACKET_VERSION_2) {
         compute_packet = (const RinGpuVulkanComputePacketV2*)(uintptr_t)
             submission->command_cookie;

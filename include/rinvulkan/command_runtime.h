@@ -17,6 +17,7 @@
 #define RIN_GPU_VULKAN_COMPUTE_PACKET_VERSION 4u
 #define RIN_GPU_VULKAN_GRAPHICS_PACKET_VERSION 5u
 #define RIN_GPU_VULKAN_COMPUTE_PACKET_VERSION_2 6u
+#define RIN_GPU_VULKAN_COMMAND_STREAM_PACKET_VERSION 7u
 #define RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS 16u
 #define RIN_GPU_VULKAN_COMPUTE_MAX_BINDINGS 64u
 #define RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS 8u
@@ -25,6 +26,13 @@
 #define RIN_GPU_VULKAN_COMMAND_MAX_BARRIERS 8u
 #define RIN_GPU_VULKAN_COMMAND_MAX_QUERY_COMMANDS 16u
 #define RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS 16u
+#define RIN_GPU_VULKAN_COMMAND_STREAM_MAX_BUFFERS 4u
+#define RIN_GPU_VULKAN_COMMAND_STREAM_MAX_EVENTS \
+    (RIN_GPU_VULKAN_COMMAND_STREAM_MAX_BUFFERS * \
+     RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS)
+#define RIN_GPU_VULKAN_COMMAND_STREAM_MAX_WAIT_GROUPS \
+    RIN_GPU_VULKAN_COMMAND_STREAM_MAX_EVENTS
+#define RIN_GPU_VULKAN_COMMAND_STREAM_MAX_STEPS 128u
 
 #define RIN_GPU_VULKAN_COMMAND_POOL_TRANSIENT 0x00000001u
 #define RIN_GPU_VULKAN_COMMAND_POOL_RESET_BUFFER 0x00000002u
@@ -197,6 +205,92 @@ typedef struct RinGpuVulkanTransferPacketV3 {
     RinGpuVulkanTransferOpV2
         operations[RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS];
 } RinGpuVulkanTransferPacketV3;
+
+enum {
+    RIN_GPU_VULKAN_COMMAND_STREAM_COPY = 1u,
+    RIN_GPU_VULKAN_COMMAND_STREAM_TRANSFER_OPS = 2u,
+    RIN_GPU_VULKAN_COMMAND_STREAM_EVENT = 3u,
+    RIN_GPU_VULKAN_COMMAND_STREAM_EVENT_WAIT_GROUP = 4u,
+    RIN_GPU_VULKAN_COMMAND_STREAM_COMPUTE_DISPATCH = 5u,
+    RIN_GPU_VULKAN_COMMAND_STREAM_GRAPHICS_DRAW = 6u
+};
+
+enum {
+    RIN_GPU_VULKAN_EVENT_WAIT_GROUP_LEGACY = 1u,
+    RIN_GPU_VULKAN_EVENT_WAIT_GROUP_SYNCHRONIZATION2 = 2u
+};
+
+typedef struct RinGpuVulkanEventCommandPacketV1 {
+    uint64_t event;
+    uint64_t stage_mask2;
+    uint64_t destination_stage_mask2;
+    uint32_t operation;
+    uint32_t stage_mask;
+    uint32_t command_buffer_index;
+    uint32_t first_dependency_operation;
+    uint32_t dependency_operation_count;
+    uint32_t wait_group_index;
+    uint32_t reserved[2];
+} RinGpuVulkanEventCommandPacketV1;
+
+typedef struct RinGpuVulkanEventWaitGroupPacketV1 {
+    uint64_t source_stage_mask;
+    uint64_t destination_stage_mask;
+    uint32_t command_buffer_index;
+    uint32_t first_event_index;
+    uint32_t event_count;
+    uint32_t flags;
+    uint32_t first_dependency_operation;
+    uint32_t dependency_operation_count;
+    uint32_t reserved[2];
+} RinGpuVulkanEventWaitGroupPacketV1;
+
+typedef struct RinGpuVulkanCommandStreamStepV1 {
+    uint32_t command_buffer_index;
+    uint32_t type;
+    uint32_t first_index;
+    uint32_t count;
+    uint32_t wait_group_index;
+    uint32_t reserved[3];
+} RinGpuVulkanCommandStreamStepV1;
+
+typedef struct RinGpuVulkanCommandStreamBufferV1 {
+    uint32_t payload_operation_base;
+    uint32_t payload_operation_count;
+    uint32_t copy_count;
+    uint32_t transfer_operation_count;
+} RinGpuVulkanCommandStreamBufferV1;
+
+/* Event submissions use this envelope to carry event scopes and one ordered
+ * stream. The payload remains the immutable transfer/compute packet for its
+ * operation data. Buffer-local copy/transfer indices are translated to the
+ * payload operation range recorded for each command buffer. Event dependency
+ * ranges use payload operation indices and are consumed by the event step, not
+ * as independent barriers. */
+typedef struct RinGpuVulkanCommandStreamPacketV1 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint32_t payload_version;
+    uint32_t payload_size;
+    uint64_t payload_cookie;
+    uint32_t queue_family_index;
+    uint32_t queue_index;
+    uint32_t product_queue_id;
+    uint32_t reserved_route;
+    uint32_t command_buffer_count;
+    uint32_t event_command_count;
+    uint32_t wait_group_count;
+    uint32_t step_count;
+    uint32_t reserved[4];
+    RinGpuVulkanCommandStreamBufferV1
+        command_buffers[RIN_GPU_VULKAN_COMMAND_STREAM_MAX_BUFFERS];
+    RinGpuVulkanEventCommandPacketV1
+        event_commands[RIN_GPU_VULKAN_COMMAND_STREAM_MAX_EVENTS];
+    RinGpuVulkanEventWaitGroupPacketV1
+        wait_groups[RIN_GPU_VULKAN_COMMAND_STREAM_MAX_WAIT_GROUPS];
+    RinGpuVulkanCommandStreamStepV1
+        steps[RIN_GPU_VULKAN_COMMAND_STREAM_MAX_STEPS];
+} RinGpuVulkanCommandStreamPacketV1;
 
 /* A bounded, API-neutral compute submission. The trailing bytes contain one
  * validated RSH1 module. Buffer binding offsets are relative to the leased
