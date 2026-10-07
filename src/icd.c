@@ -410,6 +410,7 @@ typedef struct RinVkEventSlot {
     uint32_t generation;
     struct RinVkDevice_T* owner;
     volatile uint32_t signaled;
+    volatile uint32_t signal_stage_mask;
     volatile uint32_t pending;
 } RinVkEventSlot;
 
@@ -3324,6 +3325,7 @@ static void clear_event_slot(RinVkEventSlot* slot) {
     if (!slot) return;
     slot->owner = NULL;
     __atomic_store_n(&slot->signaled, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&slot->signal_stage_mask, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&slot->pending, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
 }
@@ -3645,10 +3647,16 @@ static void complete_submission_query_events(
             RinVkEventSlot* event = event_slot(
                 (RinVkDevice)submission->owner, (RinVkEvent)command->event);
             if (!event) continue;
-            if (command->operation == RIN_GPU_VULKAN_EVENT_COMMAND_SET)
+            if (command->operation == RIN_GPU_VULKAN_EVENT_COMMAND_SET) {
+                __atomic_store_n(&event->signal_stage_mask,
+                                 command->stage_mask, __ATOMIC_RELAXED);
                 __atomic_store_n(&event->signaled, 1u, __ATOMIC_RELEASE);
-            else if (command->operation == RIN_GPU_VULKAN_EVENT_COMMAND_RESET)
+            } else if (command->operation ==
+                       RIN_GPU_VULKAN_EVENT_COMMAND_RESET) {
                 __atomic_store_n(&event->signaled, 0u, __ATOMIC_RELEASE);
+                __atomic_store_n(&event->signal_stage_mask, 0u,
+                                 __ATOMIC_RELEASE);
+            }
             __atomic_store_n(&event->pending, 0u, __ATOMIC_RELEASE);
         }
     }
@@ -3663,6 +3671,7 @@ static int validate_submission_query_events(
     uint32_t event_count = 0u;
     uint8_t query_active[64] = {0};
     uint8_t event_signaled[64] = {0};
+    uint32_t event_signal_stage_masks[64] = {0};
     uint32_t buffer_index;
     if (!device || !command_buffers || command_buffer_count == 0u ||
         command_buffer_count > RIN_VK_MAX_SUBMIT_COMMAND_BUFFERS)
@@ -3737,14 +3746,23 @@ static int validate_submission_query_events(
                 event_signaled[event_count] =
                     (uint8_t)(__atomic_load_n(&event->signaled,
                                                __ATOMIC_ACQUIRE) != 0u);
+                event_signal_stage_masks[event_count] = __atomic_load_n(
+                    &event->signal_stage_mask, __ATOMIC_ACQUIRE);
                 ++event_count;
             }
-            if (command->operation == RIN_GPU_VULKAN_EVENT_COMMAND_SET)
+            if (command->operation == RIN_GPU_VULKAN_EVENT_COMMAND_SET) {
                 event_signaled[event_index] = 1u;
-            else if (command->operation == RIN_GPU_VULKAN_EVENT_COMMAND_RESET)
+                event_signal_stage_masks[event_index] = command->stage_mask;
+            } else if (command->operation ==
+                       RIN_GPU_VULKAN_EVENT_COMMAND_RESET) {
                 event_signaled[event_index] = 0u;
-            else if (command->operation == RIN_GPU_VULKAN_EVENT_COMMAND_WAIT) {
-                if (event_signaled[event_index] == 0u) return 0;
+                event_signal_stage_masks[event_index] = 0u;
+            } else if (command->operation ==
+                       RIN_GPU_VULKAN_EVENT_COMMAND_WAIT) {
+                if (event_signaled[event_index] == 0u ||
+                    (event_signal_stage_masks[event_index] &
+                     ~command->stage_mask) != 0u)
+                    return 0;
             } else {
                 return 0;
             }
@@ -9633,6 +9651,8 @@ RinVkResult RIN_VKAPI_CALL vkSetEvent(RinVkDevice device, RinVkEvent event) {
     RinVkEventSlot* slot = event_slot(device, event);
     if (!slot || __atomic_load_n(&slot->pending, __ATOMIC_ACQUIRE) != 0u)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    __atomic_store_n(&slot->signal_stage_mask,
+                     RIN_VK_PIPELINE_STAGE_HOST_BIT, __ATOMIC_RELAXED);
     __atomic_store_n(&slot->signaled, 1u, __ATOMIC_RELEASE);
     return RIN_VK_SUCCESS;
 }
@@ -9642,11 +9662,13 @@ RinVkResult RIN_VKAPI_CALL vkResetEvent(RinVkDevice device, RinVkEvent event) {
     if (!slot || __atomic_load_n(&slot->pending, __ATOMIC_ACQUIRE) != 0u)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
     __atomic_store_n(&slot->signaled, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&slot->signal_stage_mask, 0u, __ATOMIC_RELEASE);
     return RIN_VK_SUCCESS;
 }
 
 static void record_event_operation(RinVkCommandBuffer command_buffer,
-                                   RinVkEvent event, uint32_t operation) {
+                                   RinVkEvent event, uint32_t operation,
+                                   uint32_t stage_mask) {
     RinGpuVulkanCommandBufferV1* core =
         (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
     struct RinVkDevice_T* owner;
@@ -9656,26 +9678,31 @@ static void record_event_operation(RinVkCommandBuffer command_buffer,
             &g_command_runtime, core, event, operation) !=
             RIN_GPU_VULKAN_COMMAND_OK)
         record_query_failure(core);
+    else
+        core->event_commands[core->event_command_count - 1u].stage_mask =
+            stage_mask;
 }
 
 void RIN_VKAPI_CALL vkCmdSetEvent(RinVkCommandBuffer command_buffer,
                                   RinVkEvent event,
                                   RinVkPipelineStageFlags stage) {
-    if (!event_stage_mask_valid(stage))
+    if (!event_stage_mask_valid(stage) ||
+        (stage & RIN_VK_PIPELINE_STAGE_HOST_BIT) != 0u)
         record_query_failure((RinGpuVulkanCommandBufferV1*)(void*)command_buffer);
     else
         record_event_operation(command_buffer, event,
-                               RIN_GPU_VULKAN_EVENT_COMMAND_SET);
+                               RIN_GPU_VULKAN_EVENT_COMMAND_SET, stage);
 }
 
 void RIN_VKAPI_CALL vkCmdResetEvent(RinVkCommandBuffer command_buffer,
                                     RinVkEvent event,
                                     RinVkPipelineStageFlags stage) {
-    if (!event_stage_mask_valid(stage))
+    if (!event_stage_mask_valid(stage) ||
+        (stage & RIN_VK_PIPELINE_STAGE_HOST_BIT) != 0u)
         record_query_failure((RinGpuVulkanCommandBufferV1*)(void*)command_buffer);
     else
         record_event_operation(command_buffer, event,
-                               RIN_GPU_VULKAN_EVENT_COMMAND_RESET);
+                               RIN_GPU_VULKAN_EVENT_COMMAND_RESET, stage);
 }
 
 void RIN_VKAPI_CALL vkCmdWaitEvents(
@@ -9782,6 +9809,8 @@ void RIN_VKAPI_CALL vkCmdWaitEvents(
             record_query_failure(core);
             return;
         }
+        core->event_commands[core->event_command_count - 1u].stage_mask =
+            src_stage_mask;
     }
     if (operation_count != 0u)
         record_transfer_ops(core, operations, operation_count, NULL, 0u);

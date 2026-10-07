@@ -311,7 +311,7 @@ typedef struct RinGpuVulkanQueryCommandV1 {
 typedef struct RinGpuVulkanEventCommandV1 {
     uint64_t event;
     uint32_t operation;
-    uint32_t reserved;
+    uint32_t stage_mask;
 } RinGpuVulkanEventCommandV1;
 
 struct RinGpuVulkanCommandBufferV1 {

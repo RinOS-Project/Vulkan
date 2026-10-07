@@ -725,7 +725,7 @@ int rin_gpu_vulkan_command_buffer_record_event(
         return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
     buffer->event_commands[buffer->event_command_count].event = event;
     buffer->event_commands[buffer->event_command_count].operation = operation;
-    buffer->event_commands[buffer->event_command_count].reserved = 0u;
+    buffer->event_commands[buffer->event_command_count].stage_mask = 0u;
     ++buffer->event_command_count;
     return RIN_GPU_VULKAN_COMMAND_OK;
 }
