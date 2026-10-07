@@ -411,6 +411,9 @@ typedef struct RinVkEventSlot {
     struct RinVkDevice_T* owner;
     volatile uint32_t signaled;
     volatile uint32_t signal_stage_mask;
+    volatile uint32_t pending_queue_id;
+    volatile uint32_t pending_signaled;
+    volatile uint32_t pending_signal_stage_mask;
     volatile uint32_t pending;
 } RinVkEventSlot;
 
@@ -469,7 +472,7 @@ typedef struct RinVkSubmissionSlot {
     uint32_t command_buffer_count;
     struct RinVkDevice_T* owner;
     uint32_t queue_id;
-    uint32_t reserved;
+    uint32_t event_pending_marked;
     uint64_t sequence;
     uint64_t completion_value;
     uint64_t order;
@@ -2760,6 +2763,63 @@ static int queue_has_earlier_uncompleted_submission(
     return 0;
 }
 
+static int submissions_share_event_commands(
+        const RinVkSubmissionSlot* left,
+        const RinVkSubmissionSlot* right) {
+    uint32_t left_buffer_index;
+    if (!left || !right) return 0;
+    for (left_buffer_index = 0u;
+         left_buffer_index < left->command_buffer_count;
+         ++left_buffer_index) {
+        const RinGpuVulkanCommandBufferV1* left_buffer =
+            left->command_buffers[left_buffer_index];
+        uint32_t left_event_index;
+        if (!left_buffer) continue;
+        for (left_event_index = 0u;
+             left_event_index < left_buffer->event_command_count;
+             ++left_event_index) {
+            const uint64_t event =
+                left_buffer->event_commands[left_event_index].event;
+            uint32_t right_buffer_index;
+            for (right_buffer_index = 0u;
+                 right_buffer_index < right->command_buffer_count;
+                 ++right_buffer_index) {
+                const RinGpuVulkanCommandBufferV1* right_buffer =
+                    right->command_buffers[right_buffer_index];
+                uint32_t right_event_index;
+                if (!right_buffer) continue;
+                for (right_event_index = 0u;
+                     right_event_index < right_buffer->event_command_count;
+                     ++right_event_index)
+                    if (right_buffer->event_commands[right_event_index].event ==
+                        event)
+                        return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int queue_has_earlier_event_submission(
+        const RinVkSubmissionSlot* candidate) {
+    uint32_t index;
+    if (!candidate || !candidate->owner) return 0;
+    for (index = 0u; index < RIN_VK_MAX_SUBMISSIONS; ++index) {
+        const RinVkSubmissionSlot* earlier = &g_submissions[index];
+        const uint32_t state = __atomic_load_n(&earlier->state,
+                                                __ATOMIC_ACQUIRE);
+        if ((state == RIN_VK_SUBMISSION_ACTIVE ||
+             state == RIN_VK_SUBMISSION_RESERVED ||
+             state == RIN_VK_SUBMISSION_WAITING) &&
+            earlier != candidate && earlier->owner == candidate->owner &&
+            earlier->queue_id == candidate->queue_id &&
+            earlier->order < candidate->order &&
+            submissions_share_event_commands(earlier, candidate))
+            return 1;
+    }
+    return 0;
+}
+
 static void release_submission_wait_reservations(
         RinVkSubmissionSlot* slot) {
     uint32_t index;
@@ -3156,7 +3216,8 @@ static RinVkResult dispatch_ready_waiting_submissions(
                     RIN_VK_SUBMISSION_WAITING ||
                 slot->owner != device ||
                 (!submission_waits_satisfied(slot) &&
-                 !submission_native_waits_available(slot)))
+                 !submission_native_waits_available(slot)) ||
+                queue_has_earlier_event_submission(slot))
                 continue;
             if (slot->command_buffer_count == 0u) {
                 if (queue_has_earlier_uncompleted_submission(slot)) continue;
@@ -3326,6 +3387,10 @@ static void clear_event_slot(RinVkEventSlot* slot) {
     slot->owner = NULL;
     __atomic_store_n(&slot->signaled, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&slot->signal_stage_mask, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&slot->pending_queue_id, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&slot->pending_signaled, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&slot->pending_signal_stage_mask, 0u,
+                     __ATOMIC_RELEASE);
     __atomic_store_n(&slot->pending, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
 }
@@ -3657,13 +3722,13 @@ static void complete_submission_query_events(
                 __atomic_store_n(&event->signal_stage_mask, 0u,
                                  __ATOMIC_RELEASE);
             }
-            __atomic_store_n(&event->pending, 0u, __ATOMIC_RELEASE);
         }
     }
 }
 
 static int validate_submission_query_events(
-        struct RinVkDevice_T* device, uint32_t command_buffer_count,
+        struct RinVkDevice_T* device, uint32_t queue_id,
+        uint32_t command_buffer_count,
         RinGpuVulkanCommandBufferV1* const* command_buffers) {
     RinVkQueryValue* query_values[64];
     RinVkEventSlot* event_slots[64];
@@ -3734,8 +3799,13 @@ static int validate_submission_query_events(
                 &buffer->event_commands[index];
             RinVkEventSlot* event = event_slot(
                 (RinVkDevice)device, (RinVkEvent)command->event);
+            const uint32_t event_pending = event
+                ? __atomic_load_n(&event->pending, __ATOMIC_ACQUIRE) : 0u;
             uint32_t event_index;
-            if (!event || __atomic_load_n(&event->pending, __ATOMIC_ACQUIRE) != 0u)
+            if (!event ||
+                (event_pending != 0u &&
+                 __atomic_load_n(&event->pending_queue_id,
+                                 __ATOMIC_ACQUIRE) != queue_id))
                 return 0;
             for (event_index = 0u; event_index < event_count; ++event_index)
                 if (event_slots[event_index] == event)
@@ -3743,11 +3813,19 @@ static int validate_submission_query_events(
             if (event_index == event_count) {
                 if (event_count >= 64u) return 0;
                 event_slots[event_count] = event;
-                event_signaled[event_count] =
-                    (uint8_t)(__atomic_load_n(&event->signaled,
-                                               __ATOMIC_ACQUIRE) != 0u);
-                event_signal_stage_masks[event_count] = __atomic_load_n(
-                    &event->signal_stage_mask, __ATOMIC_ACQUIRE);
+                if (event_pending != 0u) {
+                    event_signaled[event_count] = (uint8_t)(
+                        __atomic_load_n(&event->pending_signaled,
+                                        __ATOMIC_ACQUIRE) != 0u);
+                    event_signal_stage_masks[event_count] = __atomic_load_n(
+                        &event->pending_signal_stage_mask, __ATOMIC_ACQUIRE);
+                } else {
+                    event_signaled[event_count] = (uint8_t)(
+                        __atomic_load_n(&event->signaled,
+                                        __ATOMIC_ACQUIRE) != 0u);
+                    event_signal_stage_masks[event_count] = __atomic_load_n(
+                        &event->signal_stage_mask, __ATOMIC_ACQUIRE);
+                }
                 ++event_count;
             }
             if (command->operation == RIN_GPU_VULKAN_EVENT_COMMAND_SET) {
@@ -3774,9 +3852,11 @@ static int validate_submission_query_events(
 }
 
 static void mark_submission_query_events(
-        const RinVkSubmissionSlot* submission, uint32_t pending) {
+        RinVkSubmissionSlot* submission, uint32_t pending) {
     uint32_t buffer_index;
     if (!submission || !submission->owner) return;
+    if (pending != 0u && submission->event_pending_marked != 0u) return;
+    if (pending == 0u && submission->event_pending_marked == 0u) return;
     for (buffer_index = 0u;
          buffer_index < submission->command_buffer_count; ++buffer_index) {
         const RinGpuVulkanCommandBufferV1* buffer =
@@ -3796,10 +3876,57 @@ static void mark_submission_query_events(
             RinVkEventSlot* event = event_slot(
                 (RinVkDevice)submission->owner,
                 (RinVkEvent)buffer->event_commands[index].event);
-            if (event)
-                __atomic_store_n(&event->pending, pending, __ATOMIC_RELEASE);
+            if (!event) continue;
+            if (pending != 0u) {
+                const RinGpuVulkanEventCommandV1* event_command =
+                    &buffer->event_commands[index];
+                const uint32_t prior_pending = __atomic_fetch_add(
+                    &event->pending, 1u, __ATOMIC_ACQ_REL);
+                if (prior_pending == 0u) {
+                    __atomic_store_n(&event->pending_queue_id,
+                                     submission->queue_id, __ATOMIC_RELEASE);
+                    __atomic_store_n(&event->pending_signaled,
+                                     __atomic_load_n(&event->signaled,
+                                                     __ATOMIC_ACQUIRE),
+                                     __ATOMIC_RELEASE);
+                    __atomic_store_n(&event->pending_signal_stage_mask,
+                                     __atomic_load_n(&event->signal_stage_mask,
+                                                     __ATOMIC_ACQUIRE),
+                                     __ATOMIC_RELEASE);
+                }
+                if (event_command->operation ==
+                    RIN_GPU_VULKAN_EVENT_COMMAND_SET) {
+                    __atomic_store_n(&event->pending_signaled, 1u,
+                                     __ATOMIC_RELEASE);
+                    __atomic_store_n(&event->pending_signal_stage_mask,
+                                     event_command->stage_mask,
+                                     __ATOMIC_RELEASE);
+                } else if (event_command->operation ==
+                           RIN_GPU_VULKAN_EVENT_COMMAND_RESET) {
+                    __atomic_store_n(&event->pending_signaled, 0u,
+                                     __ATOMIC_RELEASE);
+                    __atomic_store_n(&event->pending_signal_stage_mask, 0u,
+                                     __ATOMIC_RELEASE);
+                }
+            } else {
+                const uint32_t prior_pending = __atomic_fetch_sub(
+                    &event->pending, 1u, __ATOMIC_ACQ_REL);
+                if (prior_pending == 1u) {
+                    __atomic_store_n(&event->pending_queue_id, 0u,
+                                     __ATOMIC_RELEASE);
+                    __atomic_store_n(&event->pending_signaled,
+                                     __atomic_load_n(&event->signaled,
+                                                     __ATOMIC_ACQUIRE),
+                                     __ATOMIC_RELEASE);
+                    __atomic_store_n(&event->pending_signal_stage_mask,
+                                     __atomic_load_n(&event->signal_stage_mask,
+                                                     __ATOMIC_ACQUIRE),
+                                     __ATOMIC_RELEASE);
+                }
+            }
         }
     }
+    submission->event_pending_marked = pending != 0u;
 }
 
 static void cancel_submission_sync(RinVkSubmissionSlot* submission) {
@@ -3985,6 +4112,7 @@ static RinVkResult maintain_device_submissions(struct RinVkDevice_T* device) {
             return RIN_VK_ERROR_DEVICE_LOST;
         }
         complete_submission_query_events(slot);
+        mark_submission_query_events(slot, 0u);
         complete_submission_sync(slot);
         clear_submission_slot(slot);
     }
@@ -11689,8 +11817,9 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     if (rin_gpu_vulkan_command_buffers_validate_submit(
             &g_command_runtime, request.commandBufferCount,
             command_buffers) != RIN_GPU_VULKAN_COMMAND_OK ||
-        !validate_submission_query_events(device, request.commandBufferCount,
-                                           command_buffers)) {
+        !validate_submission_query_events(
+            device, queue_slot_value->queue_index,
+            request.commandBufferCount, command_buffers)) {
         result = RIN_VK_ERROR_INITIALIZATION_FAILED;
         goto done;
     }
@@ -11870,7 +11999,9 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
            sizeof(RinVkSemaphore) * request.signalSemaphoreCount);
     memcpy(slot->signal_semaphore_values, signal_values,
            sizeof(uint64_t) * request.signalSemaphoreCount);
-    if (queue_has_earlier_waiting_submission(slot)) waits_ready = 0;
+    if (queue_has_earlier_waiting_submission(slot) ||
+        queue_has_earlier_event_submission(slot))
+        waits_ready = 0;
     if (waits_ready) {
         result = submit_slot_to_product(slot);
         if (result == RIN_VK_SUCCESS) {
