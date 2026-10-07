@@ -9907,6 +9907,33 @@ void RIN_VKAPI_CALL vkCmdResetEvent(RinVkCommandBuffer command_buffer,
                                RIN_GPU_VULKAN_EVENT_COMMAND_RESET, stage);
 }
 
+void RIN_VKAPI_CALL vkCmdResetEvent2(
+        RinVkCommandBuffer command_buffer, RinVkEvent event,
+        uint64_t stage_mask) {
+    uint32_t legacy_stage_mask;
+    RinGpuVulkanCommandBufferV1* core =
+        (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
+    struct RinVkDevice_T* owner;
+
+    if (!command_owner_device(core, &owner) ||
+        !owner->synchronization2_enabled ||
+        (stage_mask & RIN_VK_PIPELINE_STAGE_2_HOST_BIT) != 0u ||
+        !rin_vk_sync2_legacy_wait_stage_mask(stage_mask,
+                                              &legacy_stage_mask)) {
+        record_query_failure(core);
+        return;
+    }
+    record_event_operation(command_buffer, event,
+                           RIN_GPU_VULKAN_EVENT_COMMAND_RESET,
+                           legacy_stage_mask);
+}
+
+void RIN_VKAPI_CALL vkCmdResetEvent2KHR(
+        RinVkCommandBuffer command_buffer, RinVkEvent event,
+        uint64_t stage_mask) {
+    vkCmdResetEvent2(command_buffer, event, stage_mask);
+}
+
 void RIN_VKAPI_CALL vkCmdWaitEvents(
         RinVkCommandBuffer command_buffer, uint32_t event_count,
         const RinVkEvent* events, RinVkPipelineStageFlags src_stage_mask,
@@ -14340,6 +14367,11 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
         return (RinVkVoidFunction)vkResetEvent;
     if (name_equal(name, "vkCmdSetEvent"))
         return (RinVkVoidFunction)vkCmdSetEvent;
+    if (name_equal(name, "vkCmdResetEvent2"))
+        return (RinVkVoidFunction)vkCmdResetEvent2;
+    if (device_value->synchronization2_enabled &&
+        name_equal(name, "vkCmdResetEvent2KHR"))
+        return (RinVkVoidFunction)vkCmdResetEvent2KHR;
     if (name_equal(name, "vkCmdResetEvent"))
         return (RinVkVoidFunction)vkCmdResetEvent;
     if (name_equal(name, "vkCmdWaitEvents"))

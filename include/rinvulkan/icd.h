@@ -2645,6 +2645,12 @@ RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkCmdSetEvent(RinVkCommandBuffer command_buffer, RinVkEvent event,
               RinVkPipelineStageFlags stage);
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdResetEvent2(RinVkCommandBuffer command_buffer, RinVkEvent event,
+                 uint64_t stage_mask);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkCmdResetEvent2KHR(RinVkCommandBuffer command_buffer, RinVkEvent event,
+                    uint64_t stage_mask);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkCmdResetEvent(RinVkCommandBuffer command_buffer, RinVkEvent event,
                 RinVkPipelineStageFlags stage);
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
