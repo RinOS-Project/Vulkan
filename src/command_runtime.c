@@ -528,7 +528,10 @@ int rin_gpu_vulkan_command_buffer_record_transfer_ops(
     for (index = 0u; index < operation_count; ++index) {
         const RinGpuVulkanTransferOpV2* operation = &operations[index];
         if (operation->type < RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_COPY ||
-            operation->type > RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER ||
+            (operation->type > RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER &&
+             operation->type !=
+                 RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_TO_BUFFER_REGION) ||
+            operation->type == RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_TO_BUFFER ||
             operation->reserved != 0u)
             return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
         if (operation->type == RIN_GPU_VULKAN_TRANSFER_OP_MEMORY_BARRIER) {
@@ -626,6 +629,35 @@ int rin_gpu_vulkan_command_buffer_record_transfer_ops(
              operation->source_gpu_address != 0u ||
              (operation->size_bytes & 3u) != 0u))
             return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
+        if (operation->type ==
+            RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_TO_BUFFER_REGION) {
+            uint64_t copied_bytes;
+            const uint32_t copy_width =
+                operation->image_to_buffer_region.copy_width;
+            const uint32_t copy_height =
+                operation->image_to_buffer_region.copy_height;
+            const uint32_t offset_x =
+                operation->image_to_buffer_region.image_offset_x;
+            const uint32_t offset_y =
+                operation->image_to_buffer_region.image_offset_y;
+            if (operation->source_width == 0u ||
+                operation->source_height == 0u ||
+                operation->destination_width == 0u ||
+                operation->destination_height == 0u ||
+                copy_width == 0u || copy_height == 0u ||
+                offset_x > operation->source_width ||
+                copy_width > operation->source_width - offset_x ||
+                offset_y > operation->source_height ||
+                copy_height > operation->source_height - offset_y ||
+                copy_width > operation->destination_width ||
+                copy_height > operation->destination_height ||
+                copy_height > UINT64_MAX / (uint64_t)copy_width / 4u ||
+                operation->filter != 0u || operation->sample_count != 0u)
+                return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
+            copied_bytes = (uint64_t)copy_width * copy_height * 4u;
+            if (operation->size_bytes != copied_bytes)
+                return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
+        }
         if (operations[index].type == RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BLIT &&
             (operations[index].source_width == 0u ||
              operations[index].source_height == 0u ||

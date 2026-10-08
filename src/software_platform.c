@@ -1863,9 +1863,115 @@ static int software_submit(void* context,
 #endif
                 continue;
             }
+            if (operation->type ==
+                RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_TO_BUFFER_REGION) {
+                const uint32_t copy_width =
+                    operation->image_to_buffer_region.copy_width;
+                const uint32_t copy_height =
+                    operation->image_to_buffer_region.copy_height;
+                const uint32_t image_offset_x =
+                    operation->image_to_buffer_region.image_offset_x;
+                const uint32_t image_offset_y =
+                    operation->image_to_buffer_region.image_offset_y;
+                uint64_t image_size;
+                uint64_t source_pitch;
+                uint64_t destination_pitch;
+                uint64_t row_bytes;
+                uint64_t source_region_offset;
+                uint64_t source_region_span;
+                uint64_t destination_span;
+                uint64_t copied_bytes;
+                uint32_t row;
+
+                if (operation->source_allocation == 0u ||
+                    operation->destination_allocation == 0u ||
+                    operation->source_gpu_address == 0u ||
+                    operation->destination_gpu_address == 0u ||
+                    operation->source_width == 0u ||
+                    operation->source_height == 0u ||
+                    operation->destination_width == 0u ||
+                    operation->destination_height == 0u ||
+                    copy_width == 0u || copy_height == 0u ||
+                    image_offset_x > operation->source_width ||
+                    copy_width > operation->source_width - image_offset_x ||
+                    image_offset_y > operation->source_height ||
+                    copy_height > operation->source_height - image_offset_y ||
+                    copy_width > operation->destination_width ||
+                    copy_height > operation->destination_height ||
+                    operation->filter != 0u || operation->sample_count != 0u ||
+                    copy_height > UINT64_MAX / (uint64_t)copy_width / 4u ||
+                    operation->source_height >
+                        UINT64_MAX / (uint64_t)operation->source_width / 4u)
+                    return RIN_VULKAN_PRODUCT_PROTOCOL;
+
+                row_bytes = (uint64_t)copy_width * 4u;
+                source_pitch = (uint64_t)operation->source_width * 4u;
+                destination_pitch =
+                    (uint64_t)operation->destination_width * 4u;
+                if ((copy_height > 1u &&
+                     source_pitch >
+                         (UINT64_MAX - row_bytes) / (copy_height - 1u)) ||
+                    (copy_height > 1u &&
+                     destination_pitch >
+                         (UINT64_MAX - row_bytes) / (copy_height - 1u)))
+                    return RIN_VULKAN_PRODUCT_PROTOCOL;
+                source_region_span = (uint64_t)(copy_height - 1u) *
+                                         source_pitch +
+                                     row_bytes;
+                destination_span = (uint64_t)(copy_height - 1u) *
+                                      destination_pitch +
+                                  row_bytes;
+                copied_bytes = row_bytes * copy_height;
+                image_size = source_pitch * operation->source_height;
+                source_region_offset =
+                    (uint64_t)image_offset_y * source_pitch +
+                    (uint64_t)image_offset_x * 4u;
+                if (operation->size_bytes != copied_bytes ||
+                    source_region_offset > image_size ||
+                    source_region_span > image_size - source_region_offset ||
+                    row_bytes > SIZE_MAX ||
+                    !resource_has_access(
+                        resources, resource_count,
+                        operation->source_allocation,
+                        RIN_VULKAN_PRODUCT_MEMORY_GPU_READ) ||
+                    !resource_has_access(
+                        resources, resource_count,
+                        operation->destination_allocation,
+                        RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE))
+                    return RIN_VULKAN_PRODUCT_PROTOCOL;
+                source = allocation_by_handle(
+                    platform, operation->source_allocation);
+                destination = allocation_by_handle(
+                    platform, operation->destination_allocation);
+                if (!source || !destination ||
+                    allocation_for_range(
+                        platform, operation->source_gpu_address,
+                        image_size) != source ||
+                    allocation_for_range(
+                        platform, operation->destination_gpu_address,
+                        destination_span) != destination)
+                    return RIN_VULKAN_PRODUCT_PROTOCOL;
+                source_offset = operation->source_gpu_address -
+                                source->gpu_virtual_address +
+                                source_region_offset;
+                destination_offset = operation->destination_gpu_address -
+                                     destination->gpu_virtual_address;
+                if (source == destination &&
+                    source_offset < destination_offset + destination_span &&
+                    destination_offset < source_offset + source_region_span)
+                    return RIN_VULKAN_PRODUCT_PROTOCOL;
+                for (row = 0u; row < copy_height; ++row)
+                    memmove(destination->bytes + destination_offset +
+                                (uint64_t)row * destination_pitch,
+                            source->bytes + source_offset +
+                                (uint64_t)row * source_pitch,
+                            (size_t)row_bytes);
+                continue;
+            }
             if ((operation->type != RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_COPY &&
                  (operation->type < RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_COPY ||
                   operation->type > RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_RESOLVE)) ||
+                operation->type == RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_TO_BUFFER ||
                 operation->size_bytes == 0u ||
                 !resource_has_access(resources, resource_count,
                                      operation->destination_allocation,

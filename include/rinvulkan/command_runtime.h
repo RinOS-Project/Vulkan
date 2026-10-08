@@ -145,7 +145,12 @@ enum {
     RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_RESOLVE = 7u,
     RIN_GPU_VULKAN_TRANSFER_OP_MEMORY_BARRIER = 8u,
     RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_BARRIER = 9u,
-    RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER = 10u
+    RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER = 10u,
+    /* Region-aware RGBA8 readback. source_width/height are source image
+     * bounds; destination_width/height are normalized bufferRowLength/
+     * bufferImageHeight in texels. The union carries imageOffset and copied
+     * extent; both GPU addresses point at their resource base. */
+    RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_TO_BUFFER_REGION = 11u
 };
 
 /* Resource barrier packet encoding: source_allocation carries the opaque
@@ -165,6 +170,12 @@ typedef struct RinGpuVulkanTransferOpV2 {
     uint64_t size_bytes;
     union {
         uint32_t clear_value[4];
+        struct {
+            uint32_t image_offset_x;
+            uint32_t image_offset_y;
+            uint32_t copy_width;
+            uint32_t copy_height;
+        } image_to_buffer_region;
         struct {
             uint32_t src_stage_mask;
             uint32_t src_access_mask;
