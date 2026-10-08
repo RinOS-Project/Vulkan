@@ -1324,7 +1324,9 @@ static RinVulkanWsiPlatformV2* acquire_wsi_v2(void) {
         (platform->version == RIN_VULKAN_WSI_PLATFORM_V3_VERSION &&
          platform->struct_size == sizeof(RinVulkanWsiPlatformV3)) ||
         (platform->version == RIN_VULKAN_WSI_PLATFORM_V4_VERSION &&
-         platform->struct_size == sizeof(RinVulkanWsiPlatformV4)))
+         platform->struct_size == sizeof(RinVulkanWsiPlatformV4)) ||
+        (platform->version == RIN_VULKAN_WSI_PLATFORM_V5_VERSION &&
+         platform->struct_size == sizeof(RinVulkanWsiPlatformV5)))
         return (RinVulkanWsiPlatformV2*)platform;
     release_wsi();
     return NULL;
@@ -1336,7 +1338,9 @@ static RinVulkanWsiPlatformV3* acquire_wsi_v3(void) {
     if ((platform->version == RIN_VULKAN_WSI_PLATFORM_V3_VERSION &&
          platform->struct_size == sizeof(RinVulkanWsiPlatformV3)) ||
         (platform->version == RIN_VULKAN_WSI_PLATFORM_V4_VERSION &&
-         platform->struct_size == sizeof(RinVulkanWsiPlatformV4)))
+         platform->struct_size == sizeof(RinVulkanWsiPlatformV4)) ||
+        (platform->version == RIN_VULKAN_WSI_PLATFORM_V5_VERSION &&
+         platform->struct_size == sizeof(RinVulkanWsiPlatformV5)))
         return (RinVulkanWsiPlatformV3*)platform;
     release_wsi();
     return NULL;
@@ -1345,8 +1349,10 @@ static RinVulkanWsiPlatformV3* acquire_wsi_v3(void) {
 static RinVulkanWsiPlatformV4* acquire_wsi_v4(void) {
     RinVulkanWsiPlatformV1* platform = acquire_wsi();
     if (!platform) return NULL;
-    if (platform->version != RIN_VULKAN_WSI_PLATFORM_V4_VERSION ||
-        platform->struct_size != sizeof(RinVulkanWsiPlatformV4)) {
+    if (!((platform->version == RIN_VULKAN_WSI_PLATFORM_V4_VERSION &&
+           platform->struct_size == sizeof(RinVulkanWsiPlatformV4)) ||
+          (platform->version == RIN_VULKAN_WSI_PLATFORM_V5_VERSION &&
+           platform->struct_size == sizeof(RinVulkanWsiPlatformV5)))) {
         release_wsi();
         return NULL;
     }
@@ -1693,6 +1699,46 @@ static RinVkResult map_wsi_platform_result(int result) {
     default:
         return RIN_VK_ERROR_UNKNOWN;
     }
+}
+
+static RinVkResult wsi_resolve_device_generation(
+        const RinGpuVulkanPhysicalDeviceV2* profile,
+        uint64_t* generation_out) {
+    RinVulkanWsiPlatformV1* bound;
+    RinVulkanWsiPhysicalDeviceIdentityV1 identity;
+    uint64_t generation = 0u;
+    int result = RIN_VULKAN_WSI_PLATFORM_OK;
+    if (!profile || !generation_out || profile->device_epoch == 0u)
+        return RIN_VK_ERROR_DEVICE_LOST;
+    *generation_out = 0u;
+    bound = acquire_wsi();
+    if (!bound) return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
+    if (bound->version == RIN_VULKAN_WSI_PLATFORM_V5_VERSION &&
+        bound->struct_size == sizeof(RinVulkanWsiPlatformV5)) {
+        RinVulkanWsiPlatformV5* platform = (RinVulkanWsiPlatformV5*)bound;
+        memset(&identity, 0, sizeof(identity));
+        identity.struct_size = sizeof(identity);
+        identity.version =
+            RIN_VULKAN_WSI_PHYSICAL_DEVICE_IDENTITY_V1_VERSION;
+        identity.vendor_id = profile->vendor_id;
+        identity.device_id = profile->device_id;
+        identity.product_device_epoch = profile->device_epoch;
+        memcpy(identity.device_uuid, profile->device_uuid,
+               sizeof(identity.device_uuid));
+        result = platform->resolve_device_generation(
+            platform->generation_context, &identity, &generation);
+        memset(&identity, 0, sizeof(identity));
+    } else {
+        /* V1–V4 preserve their historical identity contract, where the
+         * caller's epoch is also the platform generation. */
+        generation = profile->device_epoch;
+    }
+    release_wsi();
+    if (result != RIN_VULKAN_WSI_PLATFORM_OK)
+        return map_wsi_platform_result(result);
+    if (generation == 0u) return RIN_VK_ERROR_DEVICE_LOST;
+    *generation_out = generation;
+    return RIN_VK_SUCCESS;
 }
 
 static int wsi_display_is_current_record(
@@ -5232,6 +5278,41 @@ int rin_gpu_vulkan_icd_bind_wsi_platform_v4(
     return RIN_GPU_VULKAN_OK;
 }
 
+int rin_gpu_vulkan_icd_bind_wsi_platform_v5(
+    RinVulkanWsiPlatformV5* platform) {
+    uintptr_t expected = 0u;
+    RinVulkanWsiPlatformV4* base;
+    if (!platform || (uintptr_t)platform == RIN_VK_ICD_BINDING_TRANSITION)
+        return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    base = &platform->base;
+    if (__atomic_load_n(&g_runtime_binding, __ATOMIC_ACQUIRE) == 0u ||
+        __atomic_load_n(&g_runtime_binding, __ATOMIC_ACQUIRE) ==
+            RIN_VK_ICD_BINDING_TRANSITION ||
+        __atomic_load_n(&g_product_binding, __ATOMIC_ACQUIRE) == 0u ||
+        __atomic_load_n(&g_product_binding, __ATOMIC_ACQUIRE) ==
+            RIN_VK_ICD_BINDING_TRANSITION ||
+        base->struct_size != sizeof(*platform) ||
+        base->version != RIN_VULKAN_WSI_PLATFORM_V5_VERSION ||
+        !base->context || !base->query_displays || !base->query_modes ||
+        !base->present || !base->poll_present || !base->cancel_present ||
+        !base->query_planes || !base->query_plane_supported_displays ||
+        !base->query_plane_capabilities || !base->query_surface_support ||
+        !base->query_surface_properties ||
+        !wsi_zero_words(base->reserved, 4u) ||
+        !wsi_zero_words(base->reserved_v2, 4u) ||
+        !wsi_zero_words(base->reserved_v3, 4u) ||
+        !wsi_zero_words(base->reserved_v4, 4u) ||
+        !platform->resolve_device_generation ||
+        !platform->generation_context ||
+        !wsi_zero_words(platform->reserved_v5, 2u))
+        return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    if (!__atomic_compare_exchange_n(&g_wsi_binding, &expected,
+                                     (uintptr_t)platform, 0,
+                                     __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+        return RIN_GPU_VULKAN_BUSY;
+    return RIN_GPU_VULKAN_OK;
+}
+
 static int unbind_wsi_platform(void* platform) {
     uintptr_t expected;
     uint32_t index;
@@ -5295,6 +5376,11 @@ int rin_gpu_vulkan_icd_unbind_wsi_platform_v3(
 
 int rin_gpu_vulkan_icd_unbind_wsi_platform_v4(
     RinVulkanWsiPlatformV4* platform) {
+    return unbind_wsi_platform(platform);
+}
+
+int rin_gpu_vulkan_icd_unbind_wsi_platform_v5(
+    RinVulkanWsiPlatformV5* platform) {
     return unbind_wsi_platform(platform);
 }
 
@@ -5826,6 +5912,7 @@ static int wsi_query_display_records(
     RinVulkanWsiPlatformV1* platform;
     struct RinVkInstance_T* instance = NULL;
     uint32_t count = 0u;
+    uint64_t device_generation = 0u;
     int result;
     if (!physical_slot((RinVkPhysicalDevice)physical, &instance)) {
         *result_out = RIN_VK_ERROR_INITIALIZATION_FAILED;
@@ -5847,6 +5934,9 @@ static int wsi_query_display_records(
                           : map_result(result);
         return 0;
     }
+    *result_out = wsi_resolve_device_generation(&profile,
+                                                 &device_generation);
+    if (*result_out != RIN_VK_SUCCESS) return 0;
     platform = acquire_wsi();
     if (!platform) {
         *result_out = RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
@@ -5855,7 +5945,7 @@ static int wsi_query_display_records(
     memset(displays, 0,
            sizeof(RinVulkanWsiDisplayV1) * RIN_VULKAN_WSI_MAX_DISPLAYS);
     result = platform->query_displays(
-        platform->context, profile.device_epoch,
+        platform->context, device_generation,
         RIN_VULKAN_WSI_MAX_DISPLAYS, &count, displays);
     release_wsi();
     if (count > RIN_VULKAN_WSI_MAX_DISPLAYS) {
@@ -5869,7 +5959,7 @@ static int wsi_query_display_records(
     }
     for (uint32_t index = 0u; index < count; ++index) {
         if (!wsi_display_record_valid(&displays[index],
-                                      profile.device_epoch)) {
+                                      device_generation)) {
             *result_out = RIN_VK_ERROR_DEVICE_LOST;
             return 0;
         }
@@ -5915,6 +6005,7 @@ static int wsi_query_plane_records(
     struct RinVkInstance_T* instance = NULL;
     uint32_t count = 0u;
     uint32_t index;
+    uint64_t device_generation = 0u;
     int result;
     if (!physical_slot((RinVkPhysicalDevice)physical, &instance)) {
         *result_out = RIN_VK_ERROR_INITIALIZATION_FAILED;
@@ -5935,6 +6026,9 @@ static int wsi_query_plane_records(
                           : map_result(result);
         return 0;
     }
+    *result_out = wsi_resolve_device_generation(&profile,
+                                                 &device_generation);
+    if (*result_out != RIN_VK_SUCCESS) return 0;
     platform = acquire_wsi_v2();
     if (!platform) {
         *result_out = RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
@@ -5944,7 +6038,7 @@ static int wsi_query_plane_records(
            sizeof(RinVulkanWsiDisplayPlaneV2) *
                RIN_VULKAN_WSI_MAX_PLANES);
     result = platform->query_planes(
-        platform->context, profile.device_epoch,
+        platform->context, device_generation,
         RIN_VULKAN_WSI_MAX_PLANES, &count, planes);
     release_wsi();
     if (count > RIN_VULKAN_WSI_MAX_PLANES) {
@@ -5958,7 +6052,7 @@ static int wsi_query_plane_records(
     }
     for (index = 0u; index < count; ++index) {
         if (!wsi_plane_record_valid(&planes[index], index,
-                                    profile.device_epoch) ||
+                                    device_generation) ||
             (planes[index].current_display_cookie != 0u &&
              planes[index].current_stack_index >= count)) {
             *result_out = RIN_VK_ERROR_DEVICE_LOST;
@@ -5966,7 +6060,7 @@ static int wsi_query_plane_records(
         }
     }
     *count_out = count;
-    *device_generation_out = profile.device_epoch;
+    *device_generation_out = device_generation;
     if (instance_out) *instance_out = instance;
     *result_out = map_wsi_platform_result(result);
     return 1;
@@ -6941,6 +7035,7 @@ RinVkResult RIN_VKAPI_CALL vkGetPhysicalDeviceSurfaceSupportKHR(
     uint64_t mode_cookie;
     uint64_t output_generation;
     uint64_t device_generation;
+    uint64_t current_device_generation = 0u;
     int result;
     RinVkResult surface_result = RIN_VK_SUCCESS;
 
@@ -6954,6 +7049,9 @@ RinVkResult RIN_VKAPI_CALL vkGetPhysicalDeviceSurfaceSupportKHR(
     result = get_physical_profile(physical_device, &profile);
     if (result != RIN_GPU_VULKAN_OK) return map_result(result);
     if (profile.device_epoch == 0u) return RIN_VK_ERROR_DEVICE_LOST;
+    result = wsi_resolve_device_generation(&profile,
+                                           &current_device_generation);
+    if (result != RIN_VK_SUCCESS) return result;
     if (queue_family_index >= profile.queue_family_count)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
     queue_flags = profile.queue_families[queue_family_index].flags &
@@ -6984,8 +7082,8 @@ RinVkResult RIN_VKAPI_CALL vkGetPhysicalDeviceSurfaceSupportKHR(
         sync_unlock();
         return RIN_VK_ERROR_OUT_OF_DATE_KHR;
     }
-    if (surface->device_generation != profile.device_epoch ||
-        surface->display->device_generation != profile.device_epoch) {
+    if (surface->device_generation != current_device_generation ||
+        surface->display->device_generation != current_device_generation) {
         sync_unlock();
         return RIN_VK_ERROR_DEVICE_LOST;
     }
@@ -7072,6 +7170,7 @@ static RinVkResult begin_surface_query(
     struct RinVkPhysicalDevice_T* physical;
     uint32_t index_field = (uint32_t)(surface_handle & UINT64_C(0xffff));
     uint32_t generation = (uint32_t)(surface_handle >> 16u);
+    uint64_t current_device_generation = 0u;
     int result;
 
     if (!profile_out || !lease) return RIN_VK_ERROR_INITIALIZATION_FAILED;
@@ -7086,6 +7185,9 @@ static RinVkResult begin_surface_query(
     if (result != RIN_GPU_VULKAN_OK) return map_result(result);
     if (profile_out->device_epoch == 0u)
         return RIN_VK_ERROR_DEVICE_LOST;
+    result = wsi_resolve_device_generation(profile_out,
+                                           &current_device_generation);
+    if (result != RIN_VK_SUCCESS) return result;
 
     lease->surface = &g_display_surfaces[index_field - 1u];
     sync_lock();
@@ -7115,9 +7217,9 @@ static RinVkResult begin_surface_query(
         sync_unlock();
         return RIN_VK_ERROR_OUT_OF_DATE_KHR;
     }
-    if (lease->surface->device_generation != profile_out->device_epoch ||
+    if (lease->surface->device_generation != current_device_generation ||
         lease->surface->display->device_generation !=
-            profile_out->device_epoch)
+            current_device_generation)
     {
         sync_unlock();
         return RIN_VK_ERROR_DEVICE_LOST;
@@ -7843,8 +7945,8 @@ RinVkResult RIN_VKAPI_CALL vkCreateSwapchainKHR(
     result = begin_surface_query((RinVkPhysicalDevice)device->physical_device,
                                  create_info->surface, &profile, &lease);
     if (result != RIN_VK_SUCCESS) return result;
-    if (lease.device_generation != device->physical_profile.device_epoch ||
-        lease.device_generation != device->plan.device_epoch) {
+    if (profile.device_epoch != device->physical_profile.device_epoch ||
+        profile.device_epoch != device->plan.device_epoch) {
         result = RIN_VK_ERROR_DEVICE_LOST;
         goto done;
     }

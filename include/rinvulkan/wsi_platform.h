@@ -9,6 +9,8 @@
 #define RIN_VULKAN_WSI_PLATFORM_V2_VERSION 2u
 #define RIN_VULKAN_WSI_PLATFORM_V3_VERSION 3u
 #define RIN_VULKAN_WSI_PLATFORM_V4_VERSION 4u
+#define RIN_VULKAN_WSI_PLATFORM_V5_VERSION 5u
+#define RIN_VULKAN_WSI_PHYSICAL_DEVICE_IDENTITY_V1_VERSION 1u
 #define RIN_VULKAN_WSI_MAX_DISPLAYS 16u
 #define RIN_VULKAN_WSI_MAX_MODES 64u
 #define RIN_VULKAN_WSI_MAX_PLANES 16u
@@ -285,6 +287,31 @@ typedef struct RinVulkanWsiPlatformV4 {
     uint64_t reserved_v4[4];
 } RinVulkanWsiPlatformV4;
 
+/* The Vulkan product epoch and a physical display driver's device generation
+ * are separate identities. V5 lets an OS-Core adapter resolve the physical
+ * generation for one exact Vulkan physical-device profile before any WSI
+ * operation. The V4 callback prefix remains byte-for-byte unchanged. */
+typedef struct RinVulkanWsiPhysicalDeviceIdentityV1 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint32_t vendor_id;
+    uint32_t device_id;
+    uint64_t product_device_epoch;
+    uint8_t device_uuid[16];
+    uint64_t reserved[2];
+} RinVulkanWsiPhysicalDeviceIdentityV1;
+
+typedef int (*RinVulkanWsiResolveDeviceGenerationV5Fn)(
+    void* context, const RinVulkanWsiPhysicalDeviceIdentityV1* identity,
+    uint64_t* physical_device_generation_out);
+
+typedef struct RinVulkanWsiPlatformV5 {
+    RinVulkanWsiPlatformV4 base;
+    RinVulkanWsiResolveDeviceGenerationV5Fn resolve_device_generation;
+    void* generation_context;
+    uint64_t reserved_v5[2];
+} RinVulkanWsiPlatformV5;
+
 #if defined(__cplusplus)
 static_assert(sizeof(RinVulkanWsiDisplayPlaneV2) == 64u,
               "Vulkan WSI plane ABI drift");
@@ -323,6 +350,14 @@ static_assert(offsetof(RinVulkanWsiPlatformV4, query_surface_properties) ==
 static_assert(sizeof(RinVulkanWsiPlatformV4) ==
                   (sizeof(void*) == 8u ? 224u : 180u),
               "Vulkan WSI platform V4 ABI drift");
+static_assert(sizeof(RinVulkanWsiPhysicalDeviceIdentityV1) == 56u,
+              "Vulkan WSI physical-device identity ABI drift");
+static_assert(offsetof(RinVulkanWsiPlatformV5, resolve_device_generation) ==
+                  sizeof(RinVulkanWsiPlatformV4),
+              "Vulkan WSI V5 callback prefix drift");
+static_assert(sizeof(RinVulkanWsiPlatformV5) ==
+                  (sizeof(void*) == 8u ? 256u : 204u),
+              "Vulkan WSI platform V5 ABI drift");
 #else
 _Static_assert(sizeof(RinVulkanWsiDisplayPlaneV2) == 64u,
                "Vulkan WSI plane ABI drift");
@@ -361,6 +396,14 @@ _Static_assert(offsetof(RinVulkanWsiPlatformV4, query_surface_properties) ==
 _Static_assert(sizeof(RinVulkanWsiPlatformV4) ==
                    (sizeof(void*) == 8u ? 224u : 180u),
                "Vulkan WSI platform V4 ABI drift");
+_Static_assert(sizeof(RinVulkanWsiPhysicalDeviceIdentityV1) == 56u,
+               "Vulkan WSI physical-device identity ABI drift");
+_Static_assert(offsetof(RinVulkanWsiPlatformV5, resolve_device_generation) ==
+                   sizeof(RinVulkanWsiPlatformV4),
+               "Vulkan WSI V5 callback prefix drift");
+_Static_assert(sizeof(RinVulkanWsiPlatformV5) ==
+                   (sizeof(void*) == 8u ? 256u : 204u),
+               "Vulkan WSI platform V5 ABI drift");
 #endif
 
 #endif /* RINVULKAN_PUBLIC_WSI_PLATFORM_H */
