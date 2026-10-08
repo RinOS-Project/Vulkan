@@ -589,6 +589,8 @@ int rin_gpu_vulkan_command_buffer_record_transfer_ops(
                         operation->source_width !=
                             RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
                         operation->source_width !=
+                            RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR &&
+                        operation->source_width !=
                             RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL &&
                         operation->source_width !=
                             RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) ||
@@ -596,6 +598,8 @@ int rin_gpu_vulkan_command_buffer_record_transfer_ops(
                             RIN_VK_IMAGE_LAYOUT_GENERAL &&
                         operation->source_height !=
                             RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
+                        operation->source_height !=
+                            RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR &&
                         operation->source_height !=
                             RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL &&
                         operation->source_height !=

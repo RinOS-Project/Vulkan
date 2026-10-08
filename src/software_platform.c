@@ -1829,6 +1829,8 @@ static int software_submit(void* context,
                          operation->source_width !=
                              RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
                          operation->source_width !=
+                             RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR &&
+                         operation->source_width !=
                              RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL &&
                          operation->source_width !=
                              RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) ||
@@ -1836,6 +1838,8 @@ static int software_submit(void* context,
                              RIN_VK_IMAGE_LAYOUT_GENERAL &&
                          operation->source_height !=
                              RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
+                         operation->source_height !=
+                             RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR &&
                          operation->source_height !=
                              RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL &&
                          operation->source_height !=

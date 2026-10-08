@@ -8308,6 +8308,12 @@ RinVkResult RIN_VKAPI_CALL vkQueuePresentKHR(
             device_wsi_unlock(device);
             goto present_result;
         }
+        if (__atomic_load_n(&image->current_layout, __ATOMIC_ACQUIRE) !=
+            RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR) {
+            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+            device_wsi_unlock(device);
+            goto present_result;
+        }
         pending = reserve_pending_present(device);
         if (!pending) {
             result = RIN_VK_ERROR_TOO_MANY_OBJECTS;
@@ -9781,6 +9787,14 @@ static int image_layout_transfer_valid(uint32_t layout) {
            layout == RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 }
 
+static int image_barrier_layout_valid(const RinVkImageSlot* image,
+                                     uint32_t layout, int old_layout) {
+    if (layout == RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
+        return image && image->swapchain_owner != NULL;
+    if (old_layout && layout == RIN_VK_IMAGE_LAYOUT_UNDEFINED) return 1;
+    return image_layout_transfer_valid(layout);
+}
+
 static int image_layout_transfer_source_valid(uint32_t layout) {
     return layout == RIN_VK_IMAGE_LAYOUT_GENERAL ||
            layout == RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
@@ -9996,11 +10010,6 @@ static int image_barrier_range_valid(
             range->layerCount == RIN_VK_REMAINING_ARRAY_LAYERS);
 }
 
-static int image_barrier_old_layout_valid(uint32_t layout) {
-    return layout == RIN_VK_IMAGE_LAYOUT_UNDEFINED ||
-           image_layout_transfer_valid(layout);
-}
-
 static int build_memory_barrier_operation(
         uint64_t src_stage_mask, uint64_t src_access_mask,
         uint64_t dst_stage_mask, uint64_t dst_access_mask,
@@ -10064,8 +10073,8 @@ static int build_image_barrier_operation(
         !(image = image_slot((RinVkDevice)owner, image_handle)) ||
         !image->memory ||
         !image_barrier_range_valid(image, subresource_range) ||
-        !image_barrier_old_layout_valid(old_layout) ||
-        !image_layout_transfer_valid(new_layout) ||
+        !image_barrier_layout_valid(image, old_layout, 1) ||
+        !image_barrier_layout_valid(image, new_layout, 0) ||
         !checked_image_address(image, 0u, image->memory_size, &address))
         return 0;
     memset(operation, 0, sizeof(*operation));

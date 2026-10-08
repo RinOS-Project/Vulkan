@@ -540,6 +540,96 @@ static int query_surface_properties(
     return RIN_VULKAN_WSI_PLATFORM_OK;
 }
 
+static RinVkResult transition_swapchain_image_to_present(
+        RinVkDevice device, RinVkQueue queue, RinVkSwapchainKHR swapchain,
+        uint32_t image_index, RinVkSemaphore acquire_semaphore,
+        uint32_t old_layout) {
+    RinVkCommandPoolCreateInfo pool_info;
+    RinVkCommandPool command_pool = 0u;
+    RinVkCommandBufferAllocateInfo allocate_info;
+    RinVkCommandBuffer command_buffer = 0u;
+    RinVkImage images[2];
+    uint32_t image_count = 2u;
+    RinVkFenceCreateInfo fence_info;
+    RinVkFence completion_fence = 0u;
+    RinVkCommandBufferBeginInfo begin_info;
+    RinVkImageMemoryBarrier2 image_barrier;
+    RinVkDependencyInfo dependency_info;
+    RinVkSubmitInfo submit_info;
+    uint32_t wait_stage = RIN_VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    RinVkResult result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+
+    result = vkGetSwapchainImagesKHR(device, swapchain, &image_count, images);
+    if (result != RIN_VK_SUCCESS || image_index >= image_count)
+        return result == RIN_VK_SUCCESS
+                   ? RIN_VK_ERROR_INITIALIZATION_FAILED
+                   : result;
+
+    memset(&fence_info, 0, sizeof(fence_info));
+    fence_info.sType = RIN_VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    result = vkCreateFence(device, &fence_info, NULL, &completion_fence);
+    if (result != RIN_VK_SUCCESS) goto done;
+
+    memset(&pool_info, 0, sizeof(pool_info));
+    pool_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pool_info.queueFamilyIndex = 0u;
+    result = vkCreateCommandPool(device, &pool_info, NULL, &command_pool);
+    if (result != RIN_VK_SUCCESS) goto done;
+
+    memset(&allocate_info, 0, sizeof(allocate_info));
+    allocate_info.sType =
+        RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocate_info.commandPool = command_pool;
+    allocate_info.level = RIN_VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocate_info.commandBufferCount = 1u;
+    result = vkAllocateCommandBuffers(device, &allocate_info, &command_buffer);
+    if (result != RIN_VK_SUCCESS) goto done;
+
+    memset(&begin_info, 0, sizeof(begin_info));
+    begin_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    result = vkBeginCommandBuffer(command_buffer, &begin_info);
+    if (result != RIN_VK_SUCCESS) goto done;
+
+    memset(&image_barrier, 0, sizeof(image_barrier));
+    image_barrier.sType = RIN_VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    image_barrier.srcStageMask = RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    image_barrier.dstStageMask = RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    image_barrier.srcQueueFamilyIndex = RIN_VK_QUEUE_FAMILY_IGNORED;
+    image_barrier.dstQueueFamilyIndex = RIN_VK_QUEUE_FAMILY_IGNORED;
+    image_barrier.oldLayout = old_layout;
+    image_barrier.newLayout = RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    image_barrier.image = images[image_index];
+    image_barrier.subresourceRange.aspectMask = RIN_VK_IMAGE_ASPECT_COLOR_BIT;
+    image_barrier.subresourceRange.levelCount = 1u;
+    image_barrier.subresourceRange.layerCount = 1u;
+    memset(&dependency_info, 0, sizeof(dependency_info));
+    dependency_info.sType = RIN_VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency_info.imageMemoryBarrierCount = 1u;
+    dependency_info.pImageMemoryBarriers = &image_barrier;
+    vkCmdPipelineBarrier2(command_buffer, &dependency_info);
+    result = vkEndCommandBuffer(command_buffer);
+    if (result != RIN_VK_SUCCESS) goto done;
+
+    memset(&submit_info, 0, sizeof(submit_info));
+    submit_info.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.waitSemaphoreCount = 1u;
+    submit_info.pWaitSemaphores = &acquire_semaphore;
+    submit_info.pWaitDstStageMask = &wait_stage;
+    submit_info.commandBufferCount = 1u;
+    submit_info.pCommandBuffers = &command_buffer;
+    result = vkQueueSubmit(queue, 1u, &submit_info,
+                           (uint64_t)completion_fence);
+    if (result != RIN_VK_SUCCESS) goto done;
+    result = vkWaitForFences(device, 1u, &completion_fence, 1u, UINT64_MAX);
+
+done:
+    if (command_pool != 0u)
+        vkDestroyCommandPool(device, command_pool, NULL);
+    if (completion_fence != 0u)
+        vkDestroyFence(device, completion_fence, NULL);
+    return result;
+}
+
 int main(void) {
     RinGpuVulkanPhysicalDeviceV2 profile;
     RinGpuVulkanRuntimeV1 runtime;
@@ -558,6 +648,8 @@ int main(void) {
     const char* unimplemented_display_extension =
         RIN_VK_KHR_DISPLAY_EXTENSION;
     const char* debug_utils_extension = RIN_VK_EXT_DEBUG_UTILS_EXTENSION;
+    const char* synchronization2_extension =
+        RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION;
     RinVkInstance instance = NULL;
     RinVkInstance foreign_instance = NULL;
     RinVkPhysicalDevice physical_devices[1];
@@ -572,6 +664,7 @@ int main(void) {
     RinVkQueue queue = NULL;
     RinVkDeviceQueueCreateInfo device_queue_info;
     RinVkDeviceCreateInfo device_create_info;
+    RinVkPhysicalDeviceSynchronization2Features synchronization2_features;
     RinVkFenceCreateInfo fence_create_info;
     RinVkSemaphoreCreateInfo semaphore_create_info;
     RinVkFence fence = 0u;
@@ -1333,9 +1426,18 @@ int main(void) {
             loader_device_create_info.sType =
                 (RinVkStructureType)TEST_LOADER_DEVICE_CREATE_INFO;
             loader_device_create_info.pNext = NULL;
-            device_create_info.pNext = &loader_device_create_info;
+            memset(&synchronization2_features, 0,
+                   sizeof(synchronization2_features));
+            synchronization2_features.sType =
+                RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
+            synchronization2_features.pNext = &loader_device_create_info;
+            synchronization2_features.synchronization2 = 1u;
+            device_create_info.pNext = &synchronization2_features;
             device_create_info.enabledLayerCount = 1u;
             device_create_info.ppEnabledLayerNames = &loader_layer_name;
+            device_create_info.enabledExtensionCount = 1u;
+            device_create_info.ppEnabledExtensionNames =
+                &synchronization2_extension;
             CHECK(vkCreateDevice(physical, &device_create_info, NULL,
                                  &device) == RIN_VK_SUCCESS);
             CHECK(vkGetDeviceProcAddr(device, "vkCreateSwapchainKHR") == NULL);
@@ -1469,12 +1571,19 @@ int main(void) {
                 CHECK(vkResetFences(device, 1u, &fence) == RIN_VK_SUCCESS);
                 memset(&present_info, 0, sizeof(present_info));
                 present_info.sType = RIN_VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-                present_info.waitSemaphoreCount = 1u;
-                present_info.pWaitSemaphores = &semaphore;
+                present_info.waitSemaphoreCount = 0u;
+                present_info.pWaitSemaphores = NULL;
                 present_info.swapchainCount = 1u;
                 present_info.pSwapchains = &swapchain;
                 present_info.pImageIndices = &acquired_image;
                 present_info.pResults = &present_result;
+                CHECK(vkQueuePresentKHR(queue, &present_info) ==
+                      RIN_VK_ERROR_INITIALIZATION_FAILED);
+                CHECK(present_result == RIN_VK_ERROR_INITIALIZATION_FAILED &&
+                      provider.present_call_count == 0u);
+                CHECK(transition_swapchain_image_to_present(
+                          device, queue, swapchain, acquired_image, semaphore,
+                          RIN_VK_IMAGE_LAYOUT_UNDEFINED) == RIN_VK_SUCCESS);
                 CHECK(vkQueuePresentKHR(queue, &present_info) ==
                       RIN_VK_ERROR_FEATURE_NOT_PRESENT);
                 CHECK(present_result == RIN_VK_ERROR_FEATURE_NOT_PRESENT &&
@@ -1491,6 +1600,9 @@ int main(void) {
                                             fence, &acquired_image) ==
                       RIN_VK_SUCCESS);
                 CHECK(vkResetFences(device, 1u, &fence) == RIN_VK_SUCCESS);
+                CHECK(transition_swapchain_image_to_present(
+                          device, queue, swapchain, acquired_image, semaphore,
+                          RIN_VK_IMAGE_LAYOUT_UNDEFINED) == RIN_VK_SUCCESS);
                 CHECK(vkQueuePresentKHR(queue, &present_info) ==
                       RIN_VK_ERROR_DEVICE_LOST);
                 CHECK(present_result == RIN_VK_ERROR_DEVICE_LOST &&
@@ -1512,12 +1624,13 @@ int main(void) {
                 CHECK(vkResetFences(device, 1u, &fence) == RIN_VK_SUCCESS);
                 memset(&present_info, 0, sizeof(present_info));
                 present_info.sType = RIN_VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-                present_info.waitSemaphoreCount = 1u;
-                present_info.pWaitSemaphores = &semaphore;
                 present_info.swapchainCount = 1u;
                 present_info.pSwapchains = &swapchain;
                 present_info.pImageIndices = &first_image;
                 present_info.pResults = &present_result;
+                CHECK(transition_swapchain_image_to_present(
+                          device, queue, swapchain, first_image, semaphore,
+                          RIN_VK_IMAGE_LAYOUT_UNDEFINED) == RIN_VK_SUCCESS);
                 CHECK(vkQueuePresentKHR(queue, &present_info) ==
                       RIN_VK_SUCCESS);
                 CHECK(present_result == RIN_VK_SUCCESS &&
@@ -1544,6 +1657,9 @@ int main(void) {
                       vkGetFenceStatus(device, fence) == RIN_VK_SUCCESS);
                 CHECK(vkResetFences(device, 1u, &fence) == RIN_VK_SUCCESS);
                 present_info.pImageIndices = &second_image;
+                CHECK(transition_swapchain_image_to_present(
+                          device, queue, swapchain, second_image, semaphore,
+                          RIN_VK_IMAGE_LAYOUT_UNDEFINED) == RIN_VK_SUCCESS);
                 CHECK(vkQueuePresentKHR(queue, &present_info) ==
                       RIN_VK_SUCCESS);
                 CHECK(provider.present_call_count == retained_present_base + 2u);
@@ -1559,6 +1675,10 @@ int main(void) {
                       vkGetFenceStatus(device, fence) == RIN_VK_SUCCESS);
                 CHECK(vkResetFences(device, 1u, &fence) == RIN_VK_SUCCESS);
                 present_info.pImageIndices = &third_image;
+                CHECK(transition_swapchain_image_to_present(
+                          device, queue, swapchain, third_image, semaphore,
+                          RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR) ==
+                      RIN_VK_SUCCESS);
                 CHECK(vkQueuePresentKHR(queue, &present_info) ==
                       RIN_VK_SUCCESS);
                 CHECK(provider.present_call_count == retained_present_base + 3u);
@@ -1576,6 +1696,9 @@ int main(void) {
                 CHECK(vkResetFences(device, 1u, &fence) == RIN_VK_SUCCESS);
                 present_info.pSwapchains = &swapchain;
                 present_info.pImageIndices = &acquired_image;
+                CHECK(transition_swapchain_image_to_present(
+                          device, queue, swapchain, acquired_image, semaphore,
+                          RIN_VK_IMAGE_LAYOUT_UNDEFINED) == RIN_VK_SUCCESS);
                 CHECK(vkQueuePresentKHR(queue, &present_info) ==
                       RIN_VK_SUCCESS);
                 CHECK(provider.last_present.present_mode ==
