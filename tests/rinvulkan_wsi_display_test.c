@@ -645,11 +645,18 @@ int main(void) {
     TestLoaderCreateInfoHeader loader_instance_create_info;
     TestLoaderCreateInfoHeader loader_device_create_info;
     const char* loader_layer_name = "VK_LAYER_KHRONOS_validation";
-    const char* unimplemented_display_extension =
-        RIN_VK_KHR_DISPLAY_EXTENSION;
     const char* debug_utils_extension = RIN_VK_EXT_DEBUG_UTILS_EXTENSION;
+    const char* display_extensions[2] = {
+        RIN_VK_KHR_SURFACE_EXTENSION,
+        RIN_VK_KHR_DISPLAY_EXTENSION
+    };
+    const char* display_only_extension = RIN_VK_KHR_DISPLAY_EXTENSION;
     const char* synchronization2_extension =
         RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION;
+    const char* swapchain_device_extensions[2] = {
+        RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION,
+        RIN_VK_KHR_SWAPCHAIN_EXTENSION
+    };
     RinVkInstance instance = NULL;
     RinVkInstance foreign_instance = NULL;
     RinVkPhysicalDevice physical_devices[1];
@@ -681,7 +688,7 @@ int main(void) {
     RinVkDisplayPlanePropertiesKHR plane_properties[1];
     RinVkDisplayPlaneCapabilitiesKHR plane_capabilities;
     RinVkDisplayKHR supported_displays[1];
-    RinVkExtensionProperties extensions[2];
+    RinVkExtensionProperties extensions[4];
     RinVkPhysicalDevice physical = NULL;
     uint32_t count;
     uint32_t instance_initialized = 0u;
@@ -781,7 +788,7 @@ int main(void) {
           RIN_GPU_VULKAN_INVALID_ARGUMENT);
     wsi_v4.query_surface_properties = query_surface_properties;
 
-    count = 2u;
+    count = 4u;
     CHECK(vkEnumerateInstanceExtensionProperties(NULL, &count, extensions) ==
           RIN_VK_SUCCESS);
     CHECK(count == 1u &&
@@ -795,8 +802,7 @@ int main(void) {
     instance_create.sType = RIN_VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     instance_create.pApplicationInfo = &application;
     instance_create.enabledExtensionCount = 1u;
-    instance_create.ppEnabledExtensionNames =
-        &unimplemented_display_extension;
+    instance_create.ppEnabledExtensionNames = &display_extensions[1];
     CHECK(vkCreateInstance(&instance_create, NULL, &instance) ==
           RIN_VK_ERROR_EXTENSION_NOT_PRESENT);
     CHECK(instance == NULL);
@@ -885,6 +891,64 @@ int main(void) {
     wsi_bound = 1u;
     CHECK(rin_gpu_vulkan_icd_unbind_wsi_platform_v4(&wsi_v4) ==
           RIN_GPU_VULKAN_BUSY);
+    CHECK(vkGetInstanceProcAddr(
+              instance, "vkGetPhysicalDeviceDisplayPropertiesKHR") == NULL);
+    CHECK(vkGetInstanceProcAddr(
+              instance, "vkGetPhysicalDeviceSurfaceSupportKHR") == NULL);
+    instance_create.enabledExtensionCount = 1u;
+    instance_create.ppEnabledExtensionNames = &display_only_extension;
+    CHECK(vkCreateInstance(&instance_create, NULL, &foreign_instance) ==
+          RIN_VK_ERROR_EXTENSION_NOT_PRESENT);
+    CHECK(foreign_instance == NULL);
+    instance_create.enabledExtensionCount = 0u;
+    instance_create.ppEnabledExtensionNames = NULL;
+
+    count = 4u;
+    CHECK(vkEnumerateInstanceExtensionProperties(NULL, &count, extensions) ==
+          RIN_VK_SUCCESS);
+    CHECK(count == 3u &&
+          strcmp(extensions[1].extensionName,
+                 RIN_VK_KHR_SURFACE_EXTENSION) == 0 &&
+          strcmp(extensions[2].extensionName,
+                 RIN_VK_KHR_DISPLAY_EXTENSION) == 0);
+    vkDestroyInstance(instance, NULL);
+    instance = NULL;
+    instance_create.enabledExtensionCount = 2u;
+    instance_create.ppEnabledExtensionNames = display_extensions;
+    CHECK(vkCreateInstance(&instance_create, NULL, &instance) ==
+          RIN_VK_SUCCESS);
+    CHECK(vkGetInstanceProcAddr(instance, "vkDestroySurfaceKHR") != NULL);
+    CHECK(vkGetInstanceProcAddr(
+              instance, "vkGetPhysicalDeviceSurfaceSupportKHR") != NULL);
+    CHECK(vkGetInstanceProcAddr(
+              instance, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR") != NULL);
+    CHECK(vkGetInstanceProcAddr(
+              instance, "vkGetPhysicalDeviceSurfaceFormatsKHR") != NULL);
+    CHECK(vkGetInstanceProcAddr(
+              instance, "vkGetPhysicalDeviceSurfacePresentModesKHR") != NULL);
+    CHECK(vkGetInstanceProcAddr(
+              instance, "vkGetPhysicalDeviceDisplayPropertiesKHR") != NULL);
+    CHECK(vkGetInstanceProcAddr(
+              instance, "vkGetDisplayModePropertiesKHR") != NULL);
+    CHECK(vkGetInstanceProcAddr(instance, "vkCreateDisplayModeKHR") != NULL);
+    CHECK(vkGetInstanceProcAddr(instance, "vkCreateDisplayPlaneSurfaceKHR") !=
+          NULL);
+    CHECK(vkGetInstanceProcAddr(
+              instance, "vkGetPhysicalDeviceDisplayPlanePropertiesKHR") !=
+          NULL);
+    CHECK(vkGetInstanceProcAddr(
+              instance, "vkGetDisplayPlaneSupportedDisplaysKHR") != NULL);
+    CHECK(vkGetInstanceProcAddr(
+              instance, "vkGetDisplayPlaneCapabilitiesKHR") != NULL);
+    CHECK(vk_icdGetPhysicalDeviceProcAddr(
+              instance, "vkGetPhysicalDeviceSurfaceSupportKHR") != NULL);
+    CHECK(vk_icdGetPhysicalDeviceProcAddr(
+              instance, "vkGetPhysicalDeviceDisplayPropertiesKHR") != NULL);
+    count = 1u;
+    CHECK(vkEnumeratePhysicalDevices(instance, &count, physical_devices) ==
+          RIN_VK_SUCCESS);
+    CHECK(count == 1u);
+    physical = physical_devices[0];
 
     count = 0u;
     CHECK(vkGetPhysicalDeviceDisplayPropertiesKHR(physical, &count, NULL) ==
@@ -1389,7 +1453,7 @@ int main(void) {
         CHECK(vkCreateInstance(&instance_create, NULL, &instance) ==
               RIN_VK_SUCCESS);
         CHECK(vkGetInstanceProcAddr(
-                  instance, "vkCreateDisplayPlaneSurfaceKHR") == NULL);
+                  instance, "vkCreateDisplayPlaneSurfaceKHR") != NULL);
         count = 1u;
         CHECK(vkEnumeratePhysicalDevices(
                   instance, &count, physical_devices) == RIN_VK_SUCCESS);
@@ -1411,6 +1475,7 @@ int main(void) {
         {
             const float queue_priority = 1.0f;
             uint32_t image_count = 0u;
+            uint32_t device_extension_count = 4u;
             uint32_t recycle_index;
 
             memset(&device_queue_info, 0, sizeof(device_queue_info));
@@ -1435,6 +1500,17 @@ int main(void) {
             device_create_info.pNext = &synchronization2_features;
             device_create_info.enabledLayerCount = 1u;
             device_create_info.ppEnabledLayerNames = &loader_layer_name;
+            CHECK(vkEnumerateDeviceExtensionProperties(
+                      physical, NULL, &device_extension_count, extensions) ==
+                  RIN_VK_SUCCESS);
+            CHECK(device_extension_count == 3u);
+            device_create_info.enabledExtensionCount = 2u;
+            device_create_info.ppEnabledExtensionNames =
+                swapchain_device_extensions;
+            CHECK(vkCreateDevice(physical, &device_create_info, NULL,
+                                 &device) ==
+                  RIN_VK_ERROR_EXTENSION_NOT_PRESENT);
+            CHECK(device == NULL);
             device_create_info.enabledExtensionCount = 1u;
             device_create_info.ppEnabledExtensionNames =
                 &synchronization2_extension;

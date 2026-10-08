@@ -117,6 +117,9 @@ static void sync_unlock(void);
 static void yield_thread(void);
 static int wsi_zero_words(const uint64_t* values, uint32_t count);
 static int finite_graphics_float(float value);
+static int get_physical_profile(
+    RinVkPhysicalDevice physical_device,
+    RinGpuVulkanPhysicalDeviceV2* profile);
 static int device_has_swapchains(const struct RinVkDevice_T* device);
 static int instance_has_swapchains(const struct RinVkInstance_T* instance);
 static int call_query_physical(
@@ -135,6 +138,8 @@ struct RinVkInstance_T {
     uintptr_t loader_magic;
     uint32_t state;
     uint32_t debug_utils_enabled;
+    uint32_t surface_enabled;
+    uint32_t display_enabled;
     RinGpuVulkanHandle runtime_handle;
     struct RinVkPhysicalDevice_T
         physical_devices[RIN_GPU_VULKAN_MAX_PHYSICAL_DEVICES];
@@ -177,6 +182,7 @@ struct RinVkDevice_T {
     uint32_t timeline_enabled;
     uint32_t synchronization2_enabled;
     uint32_t dynamic_rendering_enabled;
+    uint32_t swapchain_enabled;
     uint32_t queue_count;
     uint32_t reserved_queue;
     uint64_t next_submission_order;
@@ -1213,10 +1219,14 @@ static int dynamic_rendering_extension_enabled(
     return extension_enabled(info, RIN_VK_KHR_DYNAMIC_RENDERING_EXTENSION);
 }
 
+static int swapchain_extension_enabled(const RinVkDeviceCreateInfo* info) {
+    return extension_enabled(info, RIN_VK_KHR_SWAPCHAIN_EXTENSION);
+}
+
 static int device_extensions_valid(const RinVkDeviceCreateInfo* info) {
     uint32_t index;
     uint32_t prior;
-    if (!info || info->enabledExtensionCount > 3u) return 0;
+    if (!info || info->enabledExtensionCount > 4u) return 0;
     if (info->enabledExtensionCount == 0u)
         return info->ppEnabledExtensionNames == NULL;
     if (!info->ppEnabledExtensionNames) return 0;
@@ -1225,7 +1235,8 @@ static int device_extensions_valid(const RinVkDeviceCreateInfo* info) {
         if (!name ||
             (!name_equal(name, RIN_VK_KHR_TIMELINE_SEMAPHORE_EXTENSION) &&
              !name_equal(name, RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION) &&
-             !name_equal(name, RIN_VK_KHR_DYNAMIC_RENDERING_EXTENSION)))
+             !name_equal(name, RIN_VK_KHR_DYNAMIC_RENDERING_EXTENSION) &&
+             !name_equal(name, RIN_VK_KHR_SWAPCHAIN_EXTENSION)))
             return 0;
         for (prior = 0u; prior < index; ++prior) {
             if (name_equal(name, info->ppEnabledExtensionNames[prior]))
@@ -1357,6 +1368,29 @@ static RinVulkanWsiPlatformV4* acquire_wsi_v4(void) {
         return NULL;
     }
     return (RinVulkanWsiPlatformV4*)platform;
+}
+
+static int wsi_display_surface_available(void) {
+    RinVulkanWsiPlatformV4* platform = acquire_wsi_v4();
+    if (!platform) return 0;
+    release_wsi();
+    return 1;
+}
+
+static int physical_profile_has_present_queue(
+        const RinGpuVulkanPhysicalDeviceV2* profile) {
+    uint32_t index;
+    if (!profile || profile->queue_family_count == 0u ||
+        profile->queue_family_count > RIN_GPU_VULKAN_MAX_QUEUE_FAMILIES)
+        return 0;
+    for (index = 0u; index < profile->queue_family_count; ++index) {
+        const RinGpuVulkanQueueFamilyV1* queue =
+            &profile->queue_families[index];
+        if (queue->queue_count != 0u &&
+            (queue->flags & RIN_GPU_VK_QUEUE_PRESENT) != 0u)
+            return 1;
+    }
+    return 0;
 }
 
 static RinVkResult map_result(int result) {
@@ -5429,26 +5463,39 @@ RinVkResult RIN_VKAPI_CALL vkEnumerateInstanceVersion(
 RinVkResult RIN_VKAPI_CALL vkEnumerateInstanceExtensionProperties(
         const char* layer_name, uint32_t* property_count,
         RinVkExtensionProperties* properties) {
-    RinVkExtensionProperties extension;
+    RinVkExtensionProperties extensions[3];
     uint32_t capacity;
+    uint32_t available = 1u;
+    uint32_t count;
+    uint32_t index;
     if (!property_count) return RIN_VK_ERROR_INITIALIZATION_FAILED;
     if (layer_name) {
         *property_count = 0u;
         return RIN_VK_ERROR_LAYER_NOT_PRESENT;
     }
+    memset(extensions, 0, sizeof(extensions));
+    memcpy(extensions[0].extensionName, RIN_VK_EXT_DEBUG_UTILS_EXTENSION,
+           sizeof(RIN_VK_EXT_DEBUG_UTILS_EXTENSION));
+    extensions[0].specVersion = RIN_VK_DEBUG_UTILS_SPEC_VERSION;
+    if (wsi_display_surface_available()) {
+        memcpy(extensions[1].extensionName, RIN_VK_KHR_SURFACE_EXTENSION,
+               sizeof(RIN_VK_KHR_SURFACE_EXTENSION));
+        extensions[1].specVersion = RIN_VK_KHR_SURFACE_SPEC_VERSION;
+        memcpy(extensions[2].extensionName, RIN_VK_KHR_DISPLAY_EXTENSION,
+               sizeof(RIN_VK_KHR_DISPLAY_EXTENSION));
+        extensions[2].specVersion = RIN_VK_KHR_DISPLAY_SPEC_VERSION;
+        available = 3u;
+    }
     capacity = *property_count;
     if (!properties) {
-        *property_count = 1u;
+        *property_count = available;
         return RIN_VK_SUCCESS;
     }
-    *property_count = capacity == 0u ? 0u : 1u;
-    if (capacity == 0u) return RIN_VK_INCOMPLETE;
-    memset(&extension, 0, sizeof(extension));
-    memcpy(extension.extensionName, RIN_VK_EXT_DEBUG_UTILS_EXTENSION,
-           sizeof(RIN_VK_EXT_DEBUG_UTILS_EXTENSION));
-    extension.specVersion = RIN_VK_DEBUG_UTILS_SPEC_VERSION;
-    properties[0] = extension;
-    return RIN_VK_SUCCESS;
+    count = capacity < available ? capacity : available;
+    *property_count = count;
+    for (index = 0u; index < count; ++index)
+        properties[index] = extensions[index];
+    return count < available ? RIN_VK_INCOMPLETE : RIN_VK_SUCCESS;
 }
 
 RinVkResult RIN_VKAPI_CALL vkCreateDebugUtilsMessengerEXT(
@@ -5747,7 +5794,9 @@ void RIN_VKAPI_CALL vkQueueInsertDebugUtilsLabelEXT(
 RinVkResult RIN_VKAPI_CALL vkEnumerateDeviceExtensionProperties(
         RinVkPhysicalDevice physical_device, const char* layer_name,
         uint32_t* property_count, RinVkExtensionProperties* properties) {
-    RinVkExtensionProperties extensions[3];
+    RinVkExtensionProperties extensions[4];
+    RinGpuVulkanPhysicalDeviceV2 profile;
+    uint64_t device_generation = 0u;
     uint32_t capacity;
     uint32_t available = 3u;
     uint32_t count;
@@ -5759,6 +5808,18 @@ RinVkResult RIN_VKAPI_CALL vkEnumerateDeviceExtensionProperties(
         *property_count = 0u;
         return RIN_VK_ERROR_LAYER_NOT_PRESENT;
     }
+    memset(extensions, 0, sizeof(extensions));
+    if (get_physical_profile(physical_device, &profile) ==
+            RIN_GPU_VULKAN_OK &&
+        wsi_display_surface_available() &&
+        physical_profile_has_present_queue(&profile) &&
+        wsi_resolve_device_generation(&profile, &device_generation) ==
+            RIN_VK_SUCCESS && device_generation != 0u) {
+        memcpy(extensions[3].extensionName, RIN_VK_KHR_SWAPCHAIN_EXTENSION,
+               sizeof(RIN_VK_KHR_SWAPCHAIN_EXTENSION));
+        extensions[3].specVersion = RIN_VK_KHR_SWAPCHAIN_SPEC_VERSION;
+        available = 4u;
+    }
     capacity = *property_count;
     if (!properties) {
         *property_count = available;
@@ -5767,7 +5828,6 @@ RinVkResult RIN_VKAPI_CALL vkEnumerateDeviceExtensionProperties(
     count = capacity < available ? capacity : available;
     *property_count = count;
     if (count == 0u) return RIN_VK_INCOMPLETE;
-    memset(extensions, 0, sizeof(extensions));
     memcpy(extensions[0].extensionName,
            RIN_VK_KHR_TIMELINE_SEMAPHORE_EXTENSION,
            sizeof(RIN_VK_KHR_TIMELINE_SEMAPHORE_EXTENSION));
@@ -6772,6 +6832,8 @@ RinVkResult RIN_VKAPI_CALL vkCreateInstance(
     uint32_t index;
     uint32_t expected;
     uint32_t debug_utils_enabled = 0u;
+    uint32_t surface_enabled = 0u;
+    uint32_t display_enabled = 0u;
     int result;
     (void)allocator;
 
@@ -6784,17 +6846,33 @@ RinVkResult RIN_VKAPI_CALL vkCreateInstance(
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
     /* Instance layers are owned and dispatched by the Vulkan loader.  The
      * enabled layer names may remain in the ICD call; do not resolve them. */
-    if (create_info->enabledExtensionCount > 1u ||
+    if (create_info->enabledExtensionCount > 3u ||
         (create_info->enabledExtensionCount != 0u &&
          !create_info->ppEnabledExtensionNames))
         return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
-    if (create_info->enabledExtensionCount == 1u) {
-        if (!create_info->ppEnabledExtensionNames[0] ||
-            !name_equal(create_info->ppEnabledExtensionNames[0],
-                        RIN_VK_EXT_DEBUG_UTILS_EXTENSION))
+    for (index = 0u; index < create_info->enabledExtensionCount; ++index) {
+        const char* name = create_info->ppEnabledExtensionNames[index];
+        uint32_t prior;
+        if (!name) return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
+        for (prior = 0u; prior < index; ++prior) {
+            if (name_equal(name,
+                           create_info->ppEnabledExtensionNames[prior]))
+                return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
+        }
+        if (name_equal(name, RIN_VK_EXT_DEBUG_UTILS_EXTENSION)) {
+            debug_utils_enabled = 1u;
+        } else if (name_equal(name, RIN_VK_KHR_SURFACE_EXTENSION)) {
+            surface_enabled = 1u;
+        } else if (name_equal(name, RIN_VK_KHR_DISPLAY_EXTENSION)) {
+            display_enabled = 1u;
+        } else {
             return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
-        debug_utils_enabled = 1u;
     }
+    }
+    if ((display_enabled && !surface_enabled) ||
+        ((surface_enabled || display_enabled) &&
+         !wsi_display_surface_available()))
+        return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
     if (!collect_instance_create_chain(create_info->pNext,
                                        debug_utils_enabled,
                                        &create_messenger_info))
@@ -6849,6 +6927,8 @@ RinVkResult RIN_VKAPI_CALL vkCreateInstance(
     memset(slot->physical_devices, 0, sizeof(slot->physical_devices));
     slot->loader_magic = RIN_VK_ICD_LOADER_MAGIC;
     slot->debug_utils_enabled = debug_utils_enabled;
+    slot->surface_enabled = surface_enabled;
+    slot->display_enabled = display_enabled;
     slot->runtime_handle = 0u;
     result = call_create_instance(runtime, &request, &slot->runtime_handle);
     release_runtime();
@@ -6860,6 +6940,8 @@ RinVkResult RIN_VKAPI_CALL vkCreateInstance(
             "Vulkan instance creation failed");
         slot->loader_magic = 0u;
         slot->debug_utils_enabled = 0u;
+        slot->surface_enabled = 0u;
+        slot->display_enabled = 0u;
         slot->runtime_handle = 0u;
         __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
         return map_result(result);
@@ -6908,6 +6990,8 @@ void RIN_VKAPI_CALL vkDestroyInstance(RinVkInstance instance,
     slot->runtime_handle = 0u;
     slot->loader_magic = 0u;
     slot->debug_utils_enabled = 0u;
+    slot->surface_enabled = 0u;
+    slot->display_enabled = 0u;
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
 }
 
@@ -8821,6 +8905,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
     uint32_t requested_queues[RIN_GPU_VULKAN_MAX_QUEUE_FAMILIES] = {0u};
     uint32_t total_requested_queues = 0u;
     uint32_t primary_requested = 0u;
+    uint32_t swapchain_enabled;
     uint32_t expected;
     uint32_t index;
     int result;
@@ -8854,6 +8939,10 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
     /* Device layers are deprecated and dispatch is owned by the loader. */
     if (!device_extensions_valid(create_info))
+        return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
+    swapchain_enabled =
+        (uint32_t)swapchain_extension_enabled(create_info);
+    if (swapchain_enabled && !instance->surface_enabled)
         return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
     if (create_info->queueCreateInfoCount == 0u ||
         create_info->queueCreateInfoCount >
@@ -8902,6 +8991,23 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
         release_runtime();
         return map_result(result);
     }
+    if (swapchain_enabled) {
+        uint64_t device_generation = 0u;
+        RinVkResult generation_result;
+        if (!wsi_display_surface_available() ||
+            !physical_profile_has_present_queue(&profile)) {
+            release_runtime();
+            return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
+        }
+        generation_result =
+            wsi_resolve_device_generation(&profile, &device_generation);
+        if (generation_result != RIN_VK_SUCCESS || device_generation == 0u) {
+            release_runtime();
+            return generation_result == RIN_VK_ERROR_EXTENSION_NOT_PRESENT
+                       ? RIN_VK_ERROR_EXTENSION_NOT_PRESENT
+                       : generation_result;
+        }
+    }
     for (index = 0u; index < RIN_GPU_VULKAN_MAX_QUEUE_FAMILIES; ++index) {
         if (requested_queues[index] == 0u) continue;
         if (index >= profile.queue_family_count ||
@@ -8935,6 +9041,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
         release_runtime();
         return RIN_VK_ERROR_TOO_MANY_OBJECTS;
     }
+    slot->swapchain_enabled = 0u;
     memset(&request, 0, sizeof(request));
     request.struct_size = sizeof(request);
     request.version = RIN_GPU_VULKAN_PROFILE_VERSION;
@@ -8956,6 +9063,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
     if (result != RIN_GPU_VULKAN_OK) {
         release_runtime();
         memset(&slot->physical_profile, 0, sizeof(slot->physical_profile));
+        slot->swapchain_enabled = 0u;
         slot->runtime_handle = 0u;
         slot->owner_instance = 0u;
         slot->physical_device = NULL;
@@ -8987,6 +9095,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
         }
         memset(&slot->plan, 0, sizeof(slot->plan));
         memset(&slot->physical_profile, 0, sizeof(slot->physical_profile));
+        slot->swapchain_enabled = 0u;
         slot->runtime_handle = 0u;
         slot->owner_instance = 0u;
         slot->physical_device = NULL;
@@ -9002,6 +9111,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
         (chain_features & RIN_GPU_VK_FEATURE_SYNCHRONIZATION_2) != 0u;
     slot->dynamic_rendering_enabled =
         (chain_features & RIN_GPU_VK_FEATURE_DYNAMIC_RENDERING) != 0u;
+    slot->swapchain_enabled = swapchain_enabled;
     slot->physical_profile = profile;
     if (rin_gpu_vulkan_descriptor_runtime_init(
             &slot->descriptor_runtime,
@@ -9016,6 +9126,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
         }
         memset(&slot->plan, 0, sizeof(slot->plan));
         memset(&slot->physical_profile, 0, sizeof(slot->physical_profile));
+        slot->swapchain_enabled = 0u;
         slot->runtime_handle = 0u;
         slot->owner_instance = 0u;
         slot->physical_device = NULL;
@@ -9133,6 +9244,7 @@ void RIN_VKAPI_CALL vkDestroyDevice(RinVkDevice device,
     slot->timeline_enabled = 0u;
     slot->synchronization2_enabled = 0u;
     slot->dynamic_rendering_enabled = 0u;
+    slot->swapchain_enabled = 0u;
     memset(&slot->plan, 0, sizeof(slot->plan));
     memset(&slot->physical_profile, 0, sizeof(slot->physical_profile));
     memset(slot->queues, 0, sizeof(slot->queues));
@@ -15740,6 +15852,18 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
     struct RinVkInstance_T* instance =
         debug_instance_for_device(device_value);
     if (!device_value || !name) return NULL;
+    if (device_value->swapchain_enabled) {
+        if (name_equal(name, "vkCreateSwapchainKHR"))
+            return (RinVkVoidFunction)vkCreateSwapchainKHR;
+        if (name_equal(name, "vkDestroySwapchainKHR"))
+            return (RinVkVoidFunction)vkDestroySwapchainKHR;
+        if (name_equal(name, "vkGetSwapchainImagesKHR"))
+            return (RinVkVoidFunction)vkGetSwapchainImagesKHR;
+        if (name_equal(name, "vkAcquireNextImageKHR"))
+            return (RinVkVoidFunction)vkAcquireNextImageKHR;
+        if (name_equal(name, "vkQueuePresentKHR"))
+            return (RinVkVoidFunction)vkQueuePresentKHR;
+    }
     if (instance && instance->debug_utils_enabled) {
         if (name_equal(name, "vkSetDebugUtilsObjectNameEXT"))
             return (RinVkVoidFunction)vkSetDebugUtilsObjectNameEXT;
@@ -15967,6 +16091,7 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
 
 RinVkVoidFunction RIN_VKAPI_CALL vkGetInstanceProcAddr(
         RinVkInstance instance, const char* name) {
+    struct RinVkInstance_T* instance_value;
     if (!name) return NULL;
     if (name_equal(name, "vkGetInstanceProcAddr"))
         return (RinVkVoidFunction)vkGetInstanceProcAddr;
@@ -15985,8 +16110,9 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetInstanceProcAddr(
             vk_icdNegotiateLoaderICDInterfaceVersion;
     if (name_equal(name, "vk_icdGetPhysicalDeviceProcAddr"))
         return (RinVkVoidFunction)vk_icdGetPhysicalDeviceProcAddr;
-    if (!instance_slot(instance)) return NULL;
-    if (instance_slot(instance)->debug_utils_enabled) {
+    instance_value = instance_slot(instance);
+    if (!instance_value) return NULL;
+    if (instance_value->debug_utils_enabled) {
         if (name_equal(name, "vkCreateDebugUtilsMessengerEXT"))
             return (RinVkVoidFunction)vkCreateDebugUtilsMessengerEXT;
         if (name_equal(name, "vkDestroyDebugUtilsMessengerEXT"))
@@ -16009,6 +16135,34 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetInstanceProcAddr(
             return (RinVkVoidFunction)vkQueueEndDebugUtilsLabelEXT;
         if (name_equal(name, "vkQueueInsertDebugUtilsLabelEXT"))
             return (RinVkVoidFunction)vkQueueInsertDebugUtilsLabelEXT;
+    }
+    if (instance_value->surface_enabled) {
+        if (name_equal(name, "vkDestroySurfaceKHR"))
+            return (RinVkVoidFunction)vkDestroySurfaceKHR;
+        if (name_equal(name, "vkGetPhysicalDeviceSurfaceSupportKHR"))
+            return (RinVkVoidFunction)vkGetPhysicalDeviceSurfaceSupportKHR;
+        if (name_equal(name, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"))
+            return (RinVkVoidFunction)vkGetPhysicalDeviceSurfaceCapabilitiesKHR;
+        if (name_equal(name, "vkGetPhysicalDeviceSurfaceFormatsKHR"))
+            return (RinVkVoidFunction)vkGetPhysicalDeviceSurfaceFormatsKHR;
+        if (name_equal(name, "vkGetPhysicalDeviceSurfacePresentModesKHR"))
+            return (RinVkVoidFunction)vkGetPhysicalDeviceSurfacePresentModesKHR;
+    }
+    if (instance_value->display_enabled) {
+        if (name_equal(name, "vkGetPhysicalDeviceDisplayPropertiesKHR"))
+            return (RinVkVoidFunction)vkGetPhysicalDeviceDisplayPropertiesKHR;
+        if (name_equal(name, "vkGetDisplayModePropertiesKHR"))
+            return (RinVkVoidFunction)vkGetDisplayModePropertiesKHR;
+        if (name_equal(name, "vkCreateDisplayModeKHR"))
+            return (RinVkVoidFunction)vkCreateDisplayModeKHR;
+        if (name_equal(name, "vkCreateDisplayPlaneSurfaceKHR"))
+            return (RinVkVoidFunction)vkCreateDisplayPlaneSurfaceKHR;
+        if (name_equal(name, "vkGetPhysicalDeviceDisplayPlanePropertiesKHR"))
+            return (RinVkVoidFunction)vkGetPhysicalDeviceDisplayPlanePropertiesKHR;
+        if (name_equal(name, "vkGetDisplayPlaneSupportedDisplaysKHR"))
+            return (RinVkVoidFunction)vkGetDisplayPlaneSupportedDisplaysKHR;
+        if (name_equal(name, "vkGetDisplayPlaneCapabilitiesKHR"))
+            return (RinVkVoidFunction)vkGetDisplayPlaneCapabilitiesKHR;
     }
     if (name_equal(name, "vkDestroyInstance"))
         return (RinVkVoidFunction)vkDestroyInstance;
@@ -16050,7 +16204,32 @@ RinVkVoidFunction RIN_VKAPI_CALL vk_icdGetInstanceProcAddr(
 
 RinVkVoidFunction RIN_VKAPI_CALL vk_icdGetPhysicalDeviceProcAddr(
         RinVkInstance instance, const char* name) {
-    if (!instance_slot(instance) || !name) return NULL;
+    struct RinVkInstance_T* instance_value = instance_slot(instance);
+    if (!instance_value || !name) return NULL;
+    if (instance_value->surface_enabled) {
+        if (name_equal(name, "vkGetPhysicalDeviceSurfaceSupportKHR"))
+            return (RinVkVoidFunction)vkGetPhysicalDeviceSurfaceSupportKHR;
+        if (name_equal(name, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"))
+            return (RinVkVoidFunction)vkGetPhysicalDeviceSurfaceCapabilitiesKHR;
+        if (name_equal(name, "vkGetPhysicalDeviceSurfaceFormatsKHR"))
+            return (RinVkVoidFunction)vkGetPhysicalDeviceSurfaceFormatsKHR;
+        if (name_equal(name, "vkGetPhysicalDeviceSurfacePresentModesKHR"))
+            return (RinVkVoidFunction)vkGetPhysicalDeviceSurfacePresentModesKHR;
+    }
+    if (instance_value->display_enabled) {
+        if (name_equal(name, "vkGetPhysicalDeviceDisplayPropertiesKHR"))
+            return (RinVkVoidFunction)vkGetPhysicalDeviceDisplayPropertiesKHR;
+        if (name_equal(name, "vkGetDisplayModePropertiesKHR"))
+            return (RinVkVoidFunction)vkGetDisplayModePropertiesKHR;
+        if (name_equal(name, "vkCreateDisplayModeKHR"))
+            return (RinVkVoidFunction)vkCreateDisplayModeKHR;
+        if (name_equal(name, "vkGetPhysicalDeviceDisplayPlanePropertiesKHR"))
+            return (RinVkVoidFunction)vkGetPhysicalDeviceDisplayPlanePropertiesKHR;
+        if (name_equal(name, "vkGetDisplayPlaneSupportedDisplaysKHR"))
+            return (RinVkVoidFunction)vkGetDisplayPlaneSupportedDisplaysKHR;
+        if (name_equal(name, "vkGetDisplayPlaneCapabilitiesKHR"))
+            return (RinVkVoidFunction)vkGetDisplayPlaneCapabilitiesKHR;
+    }
     if (name_equal(name, "vkGetPhysicalDeviceFeatures"))
         return (RinVkVoidFunction)vkGetPhysicalDeviceFeatures;
     if (name_equal(name, "vkGetPhysicalDeviceFeatures2"))
