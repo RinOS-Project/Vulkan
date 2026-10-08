@@ -40,6 +40,7 @@
 #define RIN_VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO 3
 #define RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO 4
 #define RIN_VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO 5
+#define RIN_VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE 6
 #define RIN_VK_STRUCTURE_TYPE_FENCE_CREATE_INFO 8
 #define RIN_VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO 9
 #define RIN_VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO 12
@@ -210,6 +211,7 @@
 #define RIN_VK_ERROR_OUT_OF_DEVICE_MEMORY (-2)
 #define RIN_VK_ERROR_INITIALIZATION_FAILED (-3)
 #define RIN_VK_ERROR_DEVICE_LOST (-4)
+#define RIN_VK_ERROR_MEMORY_MAP_FAILED (-5)
 #define RIN_VK_ERROR_LAYER_NOT_PRESENT (-6)
 #define RIN_VK_ERROR_EXTENSION_NOT_PRESENT (-7)
 #define RIN_VK_ERROR_FEATURE_NOT_PRESENT (-8)
@@ -1245,6 +1247,14 @@ typedef struct RinVkMemoryAllocateInfo {
     uint32_t memoryTypeIndex;
 } RinVkMemoryAllocateInfo;
 
+typedef struct RinVkMappedMemoryRange {
+    RinVkStructureType sType;
+    const void* pNext;
+    RinVkDeviceMemory memory;
+    uint64_t offset;
+    uint64_t size;
+} RinVkMappedMemoryRange;
+
 typedef struct RinVkBufferCreateInfo {
     RinVkStructureType sType;
     const void* pNext;
@@ -2148,6 +2158,10 @@ int rin_gpu_vulkan_icd_bind_product_platform_v3(
     RinVulkanProductPlatformV3* platform);
 int rin_gpu_vulkan_icd_unbind_product_platform_v3(
     RinVulkanProductPlatformV3* platform);
+int rin_gpu_vulkan_icd_bind_product_platform_v4(
+    RinVulkanProductPlatformV4* platform);
+int rin_gpu_vulkan_icd_unbind_product_platform_v4(
+    RinVulkanProductPlatformV4* platform);
 int rin_gpu_vulkan_icd_bind_wsi_platform(RinVulkanWsiPlatformV1* platform);
 int rin_gpu_vulkan_icd_unbind_wsi_platform(RinVulkanWsiPlatformV1* platform);
 int rin_gpu_vulkan_icd_bind_wsi_platform_v2(
@@ -2484,6 +2498,17 @@ vkAllocateMemory(RinVkDevice device,
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkFreeMemory(RinVkDevice device, RinVkDeviceMemory memory,
              const void* allocator);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkMapMemory(RinVkDevice device, RinVkDeviceMemory memory, uint64_t offset,
+            uint64_t size, uint32_t flags, void** data_out);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkUnmapMemory(RinVkDevice device, RinVkDeviceMemory memory);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkFlushMappedMemoryRanges(RinVkDevice device, uint32_t range_count,
+                          const RinVkMappedMemoryRange* ranges);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkInvalidateMappedMemoryRanges(RinVkDevice device, uint32_t range_count,
+                               const RinVkMappedMemoryRange* ranges);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkCreateBuffer(RinVkDevice device, const RinVkBufferCreateInfo* create_info,
                const void* allocator, RinVkBuffer* buffer_out);

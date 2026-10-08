@@ -66,6 +66,8 @@
      RIN_VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT)
 #define RIN_VK_QUERY_POOL_MAX_QUERIES 64u
 #define RIN_VK_PIPELINE_CACHE_MAX_PAYLOAD 4096u
+#define RIN_VK_MIN_MEMORY_MAP_ALIGNMENT ((uint64_t)1u)
+#define RIN_VK_NON_COHERENT_ATOM_SIZE ((uint64_t)1u)
 #define RIN_VK_RESOURCE_ALIGNMENT UINT64_C(2097152)
 #define RIN_VK_BUFFER_TAG UINT64_C(0x5242)
 #define RIN_VK_IMAGE_TAG UINT64_C(0x5249)
@@ -200,6 +202,12 @@ typedef struct RinVkMemorySlot {
     uint64_t requested_size;
     uint32_t memory_type_index;
     uint32_t bound_resource_count;
+    uint32_t mapped;
+    uint32_t reserved_mapping;
+    uint64_t mapped_address;
+    uint64_t mapped_size;
+    uint64_t mapped_offset;
+    uint64_t mapping_lease;
 } RinVkMemorySlot;
 
 typedef struct RinVkBufferSlot {
@@ -583,6 +591,7 @@ static uint32_t g_active_calls;
 static uintptr_t g_product_binding;
 static uintptr_t g_product_binding_v2;
 static uintptr_t g_product_binding_v3;
+static uintptr_t g_product_binding_v4;
 static uint32_t g_active_product_calls;
 static uintptr_t g_wsi_binding;
 static uint32_t g_active_wsi_calls;
@@ -1308,6 +1317,17 @@ static RinVulkanProductPlatformV3* product_v3_for_base(
     return platform->base == base ? platform : NULL;
 }
 
+static RinVulkanProductPlatformV4* product_v4_for_base(
+        const RinVulkanProductPlatformV3* base) {
+    const uintptr_t binding =
+        __atomic_load_n(&g_product_binding_v4, __ATOMIC_ACQUIRE);
+    RinVulkanProductPlatformV4* platform;
+    if (binding == 0u || binding == RIN_VK_ICD_BINDING_TRANSITION)
+        return NULL;
+    platform = (RinVulkanProductPlatformV4*)binding;
+    return platform->base == base ? platform : NULL;
+}
+
 static RinVulkanWsiPlatformV1* acquire_wsi(void) {
     uint32_t attempt;
     for (attempt = 0u; attempt < RIN_VK_ICD_CALL_RETRIES; ++attempt) {
@@ -1432,6 +1452,8 @@ static RinVkResult map_command_result(int result) {
     }
 }
 
+static RinVkResult map_host_mapping_result(int result);
+
 static RinVkResult map_product_result(int result) {
     switch (result) {
     case RIN_VULKAN_PRODUCT_OK:
@@ -1444,10 +1466,34 @@ static RinVkResult map_product_result(int result) {
         return RIN_VK_ERROR_DEVICE_LOST;
     case RIN_VULKAN_PRODUCT_BUSY:
         return RIN_VK_NOT_READY;
+    case RIN_VULKAN_PRODUCT_ACCESS_DENIED:
+        return map_host_mapping_result(result);
     case RIN_VULKAN_PRODUCT_INVALID_ARGUMENT:
     case RIN_VULKAN_PRODUCT_STATE:
     case RIN_VULKAN_PRODUCT_BACKEND_FAILED:
     case RIN_VULKAN_PRODUCT_TIMEOUT:
+    case RIN_VULKAN_PRODUCT_RECOVERY_REQUIRED:
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    default:
+        return RIN_VK_ERROR_UNKNOWN;
+    }
+}
+
+static RinVkResult map_host_mapping_result(int result) {
+    switch (result) {
+    case RIN_VULKAN_PRODUCT_ACCESS_DENIED:
+    case RIN_VULKAN_PRODUCT_BUSY:
+    case RIN_VULKAN_PRODUCT_BACKEND_FAILED:
+    case RIN_VULKAN_PRODUCT_TIMEOUT:
+    case RIN_VULKAN_PRODUCT_LIMIT:
+    case RIN_VULKAN_PRODUCT_UNSUPPORTED:
+    case RIN_VULKAN_PRODUCT_NO_SPACE:
+        return RIN_VK_ERROR_MEMORY_MAP_FAILED;
+    case RIN_VULKAN_PRODUCT_LOST:
+    case RIN_VULKAN_PRODUCT_PROTOCOL:
+        return RIN_VK_ERROR_DEVICE_LOST;
+    case RIN_VULKAN_PRODUCT_INVALID_ARGUMENT:
+    case RIN_VULKAN_PRODUCT_STATE:
     case RIN_VULKAN_PRODUCT_RECOVERY_REQUIRED:
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
     default:
@@ -2451,6 +2497,15 @@ static RinVkEventSlot* reserve_event_slot(
     return NULL;
 }
 
+static void clear_memory_mapping(RinVkMemorySlot* slot) {
+    slot->mapped = 0u;
+    slot->reserved_mapping = 0u;
+    slot->mapped_address = 0u;
+    slot->mapped_size = 0u;
+    slot->mapped_offset = 0u;
+    slot->mapping_lease = 0u;
+}
+
 static void clear_memory_slot(RinVkMemorySlot* slot) {
     slot->owner = NULL;
     slot->product_allocation = 0u;
@@ -2458,6 +2513,7 @@ static void clear_memory_slot(RinVkMemorySlot* slot) {
     slot->requested_size = 0u;
     slot->memory_type_index = 0u;
     slot->bound_resource_count = 0u;
+    clear_memory_mapping(slot);
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
 }
 
@@ -5178,6 +5234,8 @@ int rin_gpu_vulkan_icd_unbind_product_platform_v3(
     RinVulkanProductPlatformV3* platform) {
     uintptr_t expected;
     if (!platform) return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    if (__atomic_load_n(&g_product_binding_v4, __ATOMIC_ACQUIRE) != 0u)
+        return RIN_GPU_VULKAN_BUSY;
     expected = (uintptr_t)platform;
     if (!__atomic_compare_exchange_n(
             &g_product_binding_v3, &expected,
@@ -5195,6 +5253,63 @@ int rin_gpu_vulkan_icd_unbind_product_platform_v3(
         return RIN_GPU_VULKAN_BUSY;
     }
     __atomic_store_n(&g_product_binding_v3, 0u, __ATOMIC_RELEASE);
+    return RIN_GPU_VULKAN_OK;
+}
+
+int rin_gpu_vulkan_icd_bind_product_platform_v4(
+    RinVulkanProductPlatformV4* platform) {
+    uintptr_t expected = 0u;
+    uintptr_t runtime_binding;
+    uintptr_t v3_binding;
+    if (!platform || (uintptr_t)platform == RIN_VK_ICD_BINDING_TRANSITION ||
+        platform->struct_size != sizeof(*platform) ||
+        platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V4_VERSION ||
+        !platform->base || !platform->context || !platform->map_memory ||
+        !platform->unmap_memory || !platform->sync_memory ||
+        !wsi_zero_words(platform->reserved, 2u))
+        return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    if (!__atomic_compare_exchange_n(&g_product_binding_v4, &expected,
+                                     RIN_VK_ICD_BINDING_TRANSITION, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        return RIN_GPU_VULKAN_BUSY;
+    runtime_binding =
+        __atomic_load_n(&g_runtime_binding, __ATOMIC_ACQUIRE);
+    v3_binding =
+        __atomic_load_n(&g_product_binding_v3, __ATOMIC_ACQUIRE);
+    if (runtime_binding == 0u ||
+        runtime_binding == RIN_VK_ICD_BINDING_TRANSITION ||
+        v3_binding != (uintptr_t)platform->base ||
+        !platform->base->base ||
+        !product_platform_ready(platform->base->base->base)) {
+        __atomic_store_n(&g_product_binding_v4, 0u, __ATOMIC_RELEASE);
+        return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    }
+    __atomic_store_n(&g_product_binding_v4, (uintptr_t)platform,
+                     __ATOMIC_RELEASE);
+    return RIN_GPU_VULKAN_OK;
+}
+
+int rin_gpu_vulkan_icd_unbind_product_platform_v4(
+    RinVulkanProductPlatformV4* platform) {
+    uintptr_t expected;
+    if (!platform) return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    expected = (uintptr_t)platform;
+    if (!__atomic_compare_exchange_n(
+            &g_product_binding_v4, &expected,
+            RIN_VK_ICD_BINDING_TRANSITION, 0, __ATOMIC_ACQ_REL,
+            __ATOMIC_RELAXED))
+        return expected == 0u ? RIN_GPU_VULKAN_NOT_INITIALIZED
+                              : RIN_GPU_VULKAN_BUSY;
+    if (platform->struct_size != sizeof(*platform) ||
+        platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V4_VERSION ||
+        !platform->base || !platform->context ||
+        __atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
+        resource_slots_active() || submission_slots_active()) {
+        __atomic_store_n(&g_product_binding_v4, (uintptr_t)platform,
+                         __ATOMIC_RELEASE);
+        return RIN_GPU_VULKAN_BUSY;
+    }
+    __atomic_store_n(&g_product_binding_v4, 0u, __ATOMIC_RELEASE);
     return RIN_GPU_VULKAN_OK;
 }
 
@@ -8684,6 +8799,14 @@ static void publish_legacy_properties(
         profile->max_per_stage_resources;
     properties->limits.maxSamplerAnisotropy =
         profile->max_sampler_anisotropy;
+    /* The process mapper returns valid byte-addressable host pointers, and
+     * RinGPU cache sync accepts arbitrary ranges while expanding maintenance
+     * within the allocation. These are the implementation's minimum Vulkan
+     * alignment guarantees. */
+    properties->limits.minMemoryMapAlignment =
+        (size_t)RIN_VK_MIN_MEMORY_MAP_ALIGNMENT;
+    properties->limits.nonCoherentAtomSize =
+        RIN_VK_NON_COHERENT_ATOM_SIZE;
     properties->limits.timestampPeriod =
         (float)profile->timestamp_period_ns_x1000 / 1000.0f;
     for (index = 0u; index < profile->queue_family_count; ++index) {
@@ -14022,17 +14145,219 @@ void RIN_VKAPI_CALL vkFreeMemory(RinVkDevice device, RinVkDeviceMemory handle,
     RinVkMemorySlot* memory = memory_slot(device, handle);
     RinVulkanProductPlatformV1* product;
     (void)allocator;
-    if (!memory || memory->bound_resource_count != 0u) return;
+    if (!memory || memory->bound_resource_count != 0u || memory->mapped == 1u)
+        return;
     product = acquire_product();
     if (!product || !product_matches_device(product, memory->owner)) {
         if (product) release_product();
         return;
+    }
+    if (memory->mapped != 0u) {
+        RinVulkanProductPlatformV3* product_v3 = bound_product_v3();
+        RinVulkanProductPlatformV4* product_v4 =
+            product_v3 ? product_v4_for_base(product_v3) : NULL;
+        if (memory->mapped != 2u || memory->mapping_lease == 0u ||
+            !product_v4 ||
+            product_v4->unmap_memory(
+                product_v4->context, memory->product_allocation,
+                memory->mapping_lease) != RIN_VULKAN_PRODUCT_OK) {
+            release_product();
+            return;
+        }
+        clear_memory_mapping(memory);
     }
     if (product->destroy_allocation(product->context,
                                     memory->product_allocation) ==
         RIN_VULKAN_PRODUCT_OK)
         clear_memory_slot(memory);
     release_product();
+}
+
+RinVkResult RIN_VKAPI_CALL vkMapMemory(
+        RinVkDevice device, RinVkDeviceMemory handle, uint64_t offset,
+        uint64_t size, uint32_t flags, void** data_out) {
+    RinVkMemorySlot* memory = memory_slot(device, handle);
+    RinVulkanProductPlatformV1* product;
+    RinVulkanProductPlatformV3* product_v3;
+    RinVulkanProductPlatformV4* product_v4;
+    uint32_t memory_flags;
+    uint64_t resolved_size;
+    uint64_t address = 0u;
+    uint64_t allocation_size = 0u;
+    uint64_t lease = 0u;
+    int result;
+    if (data_out) *data_out = NULL;
+    if (!data_out || !memory || flags != 0u ||
+        offset >= memory->requested_size)
+        return RIN_VK_ERROR_MEMORY_MAP_FAILED;
+    resolved_size = size == RIN_VK_WHOLE_SIZE
+                        ? memory->requested_size - offset
+                        : size;
+    if (resolved_size == 0u || resolved_size > memory->requested_size - offset ||
+        memory->mapped != 0u)
+        return RIN_VK_ERROR_MEMORY_MAP_FAILED;
+    memory_flags =
+        memory->owner->physical_profile.memory_types[memory->memory_type_index]
+            .property_flags;
+    if ((memory_flags & RIN_GPU_VK_MEMORY_HOST_VISIBLE) == 0u)
+        return RIN_VK_ERROR_MEMORY_MAP_FAILED;
+    product = acquire_product();
+    if (!product) return RIN_VK_ERROR_MEMORY_MAP_FAILED;
+    product_v3 = bound_product_v3();
+    product_v4 = product_v3 ? product_v4_for_base(product_v3) : NULL;
+    if (!product_v4) {
+        release_product();
+        return RIN_VK_ERROR_MEMORY_MAP_FAILED;
+    }
+    result = product_v4->map_memory(
+        product_v4->context, memory->product_allocation,
+        RIN_VULKAN_PRODUCT_CPU_ACCESS_READ |
+            RIN_VULKAN_PRODUCT_CPU_ACCESS_WRITE,
+        &address, &allocation_size, &lease);
+    if (result != RIN_VULKAN_PRODUCT_OK || address == 0u || lease == 0u ||
+        allocation_size < memory->requested_size || address > UINTPTR_MAX ||
+        memory->requested_size > UINTPTR_MAX - (uintptr_t)address ||
+        offset > UINTPTR_MAX - (uintptr_t)address) {
+        if (lease != 0u) {
+            const int unmap_result = product_v4->unmap_memory(
+                product_v4->context, memory->product_allocation,
+                lease);
+            if (unmap_result != RIN_VULKAN_PRODUCT_OK) {
+                /* Keep the product lease owned until a retry can release it,
+                 * but do not expose an invalid host mapping to range sync. */
+                memory->mapped = 2u;
+                memory->mapped_address = address;
+                memory->mapped_size = 0u;
+                memory->mapped_offset = 0u;
+                memory->mapping_lease = lease;
+            }
+        }
+        release_product();
+        return RIN_VK_ERROR_MEMORY_MAP_FAILED;
+    }
+    memory->mapped = 1u;
+    memory->mapped_address = address;
+    memory->mapped_size = resolved_size;
+    memory->mapped_offset = offset;
+    memory->mapping_lease = lease;
+    *data_out = (void*)(uintptr_t)(address + offset);
+    release_product();
+    return RIN_VK_SUCCESS;
+}
+
+void RIN_VKAPI_CALL vkUnmapMemory(RinVkDevice device,
+                                  RinVkDeviceMemory handle) {
+    RinVkMemorySlot* memory = memory_slot(device, handle);
+    RinVulkanProductPlatformV1* product;
+    RinVulkanProductPlatformV3* product_v3;
+    RinVulkanProductPlatformV4* product_v4;
+    int result;
+    if (!memory || memory->mapped == 0u || memory->mapping_lease == 0u)
+        return;
+    product = acquire_product();
+    if (!product) return;
+    product_v3 = bound_product_v3();
+    product_v4 = product_v3 ? product_v4_for_base(product_v3) : NULL;
+    if (!product_v4) {
+        release_product();
+        return;
+    }
+    result = product_v4->unmap_memory(
+        product_v4->context, memory->product_allocation,
+        memory->mapping_lease);
+    if (result == RIN_VULKAN_PRODUCT_OK) {
+        clear_memory_mapping(memory);
+    }
+    release_product();
+}
+
+static RinVkResult sync_mapped_ranges(
+        RinVkDevice device, uint32_t range_count,
+        const RinVkMappedMemoryRange* ranges, uint32_t action) {
+    RinVulkanProductPlatformV1* product;
+    RinVulkanProductPlatformV3* product_v3;
+    RinVulkanProductPlatformV4* product_v4;
+    uint32_t index;
+    if (range_count == 0u || range_count > 64u || !ranges)
+        return RIN_VK_ERROR_MEMORY_MAP_FAILED;
+    /* Validate the whole batch before performing any cache operation. */
+    for (index = 0u; index < range_count; ++index) {
+        const RinVkMappedMemoryRange* range = &ranges[index];
+        RinVkMemorySlot* memory = memory_slot(device, range->memory);
+        uint64_t resolved_size;
+        uint64_t mapped_end;
+        if (range->sType != RIN_VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE ||
+            range->pNext || !memory || memory->mapped != 1u ||
+            range->offset > memory->requested_size ||
+            (range->offset % RIN_VK_NON_COHERENT_ATOM_SIZE) != 0u)
+            return RIN_VK_ERROR_MEMORY_MAP_FAILED;
+        if (memory->mapped_offset > UINT64_MAX - memory->mapped_size)
+            return RIN_VK_ERROR_MEMORY_MAP_FAILED;
+        mapped_end = memory->mapped_offset + memory->mapped_size;
+        if (range->offset < memory->mapped_offset ||
+            range->offset >= mapped_end)
+            return RIN_VK_ERROR_MEMORY_MAP_FAILED;
+        resolved_size = range->size == RIN_VK_WHOLE_SIZE
+                            ? mapped_end - range->offset
+                            : range->size;
+        if (resolved_size == 0u ||
+            resolved_size > memory->requested_size - range->offset ||
+            resolved_size > mapped_end - range->offset)
+            return RIN_VK_ERROR_MEMORY_MAP_FAILED;
+        if ((range->size == RIN_VK_WHOLE_SIZE &&
+             mapped_end != memory->requested_size &&
+             (mapped_end % RIN_VK_NON_COHERENT_ATOM_SIZE) != 0u) ||
+            (range->size != RIN_VK_WHOLE_SIZE &&
+             range->offset + resolved_size != memory->requested_size &&
+             (resolved_size % RIN_VK_NON_COHERENT_ATOM_SIZE) != 0u))
+            return RIN_VK_ERROR_MEMORY_MAP_FAILED;
+    }
+    product = acquire_product();
+    if (!product) return RIN_VK_ERROR_MEMORY_MAP_FAILED;
+    product_v3 = bound_product_v3();
+    product_v4 = product_v3 ? product_v4_for_base(product_v3) : NULL;
+    if (!product_v4) {
+        release_product();
+        return RIN_VK_ERROR_MEMORY_MAP_FAILED;
+    }
+    for (index = 0u; index < range_count; ++index) {
+        const RinVkMappedMemoryRange* range = &ranges[index];
+        RinVkMemorySlot* memory = memory_slot(device, range->memory);
+        const uint64_t resolved_size =
+            range->size == RIN_VK_WHOLE_SIZE
+                ? memory->mapped_offset + memory->mapped_size - range->offset
+                : range->size;
+        const uint32_t memory_flags =
+            memory->owner->physical_profile
+                .memory_types[memory->memory_type_index]
+                .property_flags;
+        int result;
+        if ((memory_flags & RIN_GPU_VK_MEMORY_HOST_COHERENT) != 0u)
+            continue;
+        result = product_v4->sync_memory(
+            product_v4->context, memory->product_allocation,
+            action, range->offset, resolved_size);
+        if (result != RIN_VULKAN_PRODUCT_OK) {
+            release_product();
+            return map_product_result(result);
+        }
+    }
+    release_product();
+    return RIN_VK_SUCCESS;
+}
+
+RinVkResult RIN_VKAPI_CALL vkFlushMappedMemoryRanges(
+        RinVkDevice device, uint32_t range_count,
+        const RinVkMappedMemoryRange* ranges) {
+    return sync_mapped_ranges(device, range_count, ranges,
+                              RIN_VULKAN_PRODUCT_SYNC_CPU_TO_DEVICE);
+}
+
+RinVkResult RIN_VKAPI_CALL vkInvalidateMappedMemoryRanges(
+        RinVkDevice device, uint32_t range_count,
+        const RinVkMappedMemoryRange* ranges) {
+    return sync_mapped_ranges(device, range_count, ranges,
+                              RIN_VULKAN_PRODUCT_SYNC_DEVICE_TO_CPU);
 }
 
 RinVkResult RIN_VKAPI_CALL vkCreateBuffer(
@@ -16010,6 +16335,14 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
         return (RinVkVoidFunction)vkAllocateMemory;
     if (name_equal(name, "vkFreeMemory"))
         return (RinVkVoidFunction)vkFreeMemory;
+    if (name_equal(name, "vkMapMemory"))
+        return (RinVkVoidFunction)vkMapMemory;
+    if (name_equal(name, "vkUnmapMemory"))
+        return (RinVkVoidFunction)vkUnmapMemory;
+    if (name_equal(name, "vkFlushMappedMemoryRanges"))
+        return (RinVkVoidFunction)vkFlushMappedMemoryRanges;
+    if (name_equal(name, "vkInvalidateMappedMemoryRanges"))
+        return (RinVkVoidFunction)vkInvalidateMappedMemoryRanges;
     if (name_equal(name, "vkCreateBuffer"))
         return (RinVkVoidFunction)vkCreateBuffer;
     if (name_equal(name, "vkDestroyBuffer"))
