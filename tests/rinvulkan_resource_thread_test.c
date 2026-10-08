@@ -496,6 +496,7 @@ int main(void) {
     uint64_t timeline_signal_value[1];
     uint64_t timeline_counter = 0u;
     uint32_t wait_stage = UINT32_C(0x00001000);
+    uint32_t native_wait_stage = RIN_VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     float priorities[2] = {1.0f, 1.0f};
     uint32_t physical_count = 1u;
     uint32_t instance_extension_count = 0u;
@@ -793,7 +794,7 @@ int main(void) {
     native_wait_consumer_submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
     native_wait_consumer_submit.waitSemaphoreCount = 1u;
     native_wait_consumer_submit.pWaitSemaphores = &native_wait_semaphore;
-    native_wait_consumer_submit.pWaitDstStageMask = &wait_stage;
+    native_wait_consumer_submit.pWaitDstStageMask = &native_wait_stage;
     native_wait_consumer_submit.commandBufferCount = 1u;
     native_wait_consumer_submit.pCommandBuffers =
         &native_wait_command_buffer;
@@ -913,7 +914,8 @@ int main(void) {
     semaphore_submit_info.sType =
         RIN_VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
     semaphore_submit_info.semaphore = semaphore;
-    semaphore_submit_info.stageMask = 0u;
+    semaphore_submit_info.stageMask =
+        RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     memset(&empty_submit2, 0, sizeof(empty_submit2));
     empty_submit2.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
     empty_submit2.signalSemaphoreInfoCount = 1u;
