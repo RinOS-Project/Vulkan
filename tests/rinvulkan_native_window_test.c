@@ -1,12 +1,33 @@
 /* SPDX-License-Identifier: MIT */
+#if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE 1
+#endif
 #include <rinvulkan/icd.h>
 #include <rinvulkan/software_platform.h>
 #include <rin/contract_abi.h>
 #include <rinruntime/window.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdatomic.h>
 #include <string.h>
+
+#if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
+#include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/socket.h>
+#include <time.h>
+#include <unistd.h>
+#include <rin/ipc/shm_abi.h>
+
+/* Compile the actual RinRuntime callback provider into this POSIX-only
+ * integration variant. The ordinary Windows test below keeps its small
+ * callback fixture. */
+#include "../../rinruntime/src/compositor_gui.c"
+#endif
 
 typedef struct TestCompositorSurface {
     uint32_t width;
@@ -33,6 +54,262 @@ typedef struct TestProductAdapters {
     TestMemoryMapping mappings[RIN_GPU_VULKAN_SOFTWARE_MAX_ALLOCATIONS];
 } TestProductAdapters;
 
+#if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
+typedef struct RuntimeExportPeer {
+    int fd;
+    uint64_t acquire_fences[2];
+    int result;
+} RuntimeExportPeer;
+
+typedef struct RuntimeTestMapping {
+    int fd;
+    void* address;
+    size_t bytes;
+} RuntimeTestMapping;
+
+static RuntimeTestMapping runtime_test_mappings[8];
+static char runtime_test_unlink_names[8][RIN_SHM_NAME_MAX + 2u];
+static size_t runtime_test_unlink_count;
+static int runtime_test_unlink_cleanup_registered;
+
+static void runtime_test_unlink_cleanup(void) {
+    size_t index;
+    for (index = 0u; index < runtime_test_unlink_count; ++index)
+        (void)shm_unlink(runtime_test_unlink_names[index]);
+}
+
+/* POSIX host implementations for the actual Runtime platform boundary. */
+uint64_t rin_monotonic_ms(void) {
+    struct timespec now;
+    uint64_t seconds;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 || now.tv_sec < 0 ||
+        now.tv_nsec < 0 || now.tv_nsec >= 1000000000L)
+        return UINT64_MAX;
+    seconds = (uint64_t)now.tv_sec;
+    if (seconds > (UINT64_MAX - (uint64_t)now.tv_nsec / UINT64_C(1000000)) /
+                      UINT64_C(1000))
+        return UINT64_MAX;
+    return seconds * UINT64_C(1000) +
+           (uint64_t)now.tv_nsec / UINT64_C(1000000);
+}
+
+void rin_sleep(unsigned int milliseconds) {
+    struct timespec remaining;
+    remaining.tv_sec = (time_t)(milliseconds / 1000u);
+    remaining.tv_nsec = (long)(milliseconds % 1000u) * 1000000L;
+    while (nanosleep(&remaining, &remaining) != 0 && errno == EINTR) {}
+}
+
+int rin_shm_get(const char* name, uint32_t size, uint32_t flags) {
+    char posix_name[RIN_SHM_NAME_MAX + 2u];
+    size_t length;
+    int descriptor;
+    int created = 0;
+    if (!name || name[0] == '\0' || size == 0u ||
+        (flags & ~(RIN_SHM_FLAG_CREAT | RIN_SHM_FLAG_EXCL |
+                   RIN_SHM_FLAG_UNLINK_ON_CLOSE)) != 0u) {
+        errno = EINVAL;
+        return -1;
+    }
+    length = strnlen(name, RIN_SHM_NAME_MAX);
+    if (length == 0u || length >= RIN_SHM_NAME_MAX ||
+        memchr(name, '/', length) != NULL ||
+        ((flags & RIN_SHM_FLAG_EXCL) != 0u &&
+         (flags & RIN_SHM_FLAG_CREAT) == 0u)) {
+        errno = EINVAL;
+        return -1;
+    }
+    posix_name[0] = '/';
+    memcpy(posix_name + 1u, name, length + 1u);
+    if ((flags & RIN_SHM_FLAG_CREAT) == 0u) {
+        descriptor = shm_open(posix_name, O_RDWR, 0u);
+    } else if ((flags & RIN_SHM_FLAG_EXCL) != 0u) {
+        descriptor = shm_open(posix_name, O_RDWR | O_CREAT | O_EXCL, 0600u);
+        created = descriptor >= 0;
+    } else {
+        descriptor = shm_open(posix_name, O_RDWR | O_CREAT | O_EXCL, 0600u);
+        if (descriptor >= 0) {
+            created = 1;
+        } else if (errno == EEXIST) {
+            descriptor = shm_open(posix_name, O_RDWR, 0u);
+        }
+    }
+    if (descriptor < 0) return -1;
+    if (created && ftruncate(descriptor, (off_t)size) != 0) {
+        int saved_errno = errno;
+        (void)close(descriptor);
+        (void)shm_unlink(posix_name);
+        errno = saved_errno;
+        return -1;
+    }
+    if ((flags & RIN_SHM_FLAG_UNLINK_ON_CLOSE) != 0u) {
+        if (runtime_test_unlink_count >=
+                sizeof(runtime_test_unlink_names) /
+                    sizeof(runtime_test_unlink_names[0]) ||
+            (!runtime_test_unlink_cleanup_registered &&
+             atexit(runtime_test_unlink_cleanup) != 0)) {
+            (void)close(descriptor);
+            if (created) (void)shm_unlink(posix_name);
+            errno = ENOSPC;
+            return -1;
+        }
+        runtime_test_unlink_cleanup_registered = 1;
+        memcpy(runtime_test_unlink_names[runtime_test_unlink_count],
+               posix_name, length + 2u);
+        ++runtime_test_unlink_count;
+    }
+    return descriptor;
+}
+
+void* rin_shm_at(int fd, void* address_hint, uint32_t prot) {
+    struct stat status;
+    int native_prot = 0;
+    size_t index;
+    void* address;
+    if (fd < 0 || (prot & ~(RIN_SHM_PROT_READ | RIN_SHM_PROT_WRITE)) != 0u ||
+        prot == 0u) {
+        errno = EINVAL;
+        return NULL;
+    }
+    if (fstat(fd, &status) != 0) return NULL;
+    if (status.st_size <= 0 || (uintmax_t)status.st_size > SIZE_MAX) {
+        errno = EINVAL;
+        return NULL;
+    }
+    if ((prot & RIN_SHM_PROT_READ) != 0u) native_prot |= PROT_READ;
+    if ((prot & RIN_SHM_PROT_WRITE) != 0u) native_prot |= PROT_WRITE;
+    address = mmap(address_hint, (size_t)status.st_size, native_prot,
+                   MAP_SHARED, fd, 0);
+    if (address == MAP_FAILED) return NULL;
+    if (address == NULL) {
+        (void)munmap(address, (size_t)status.st_size);
+        errno = ENOMEM;
+        return NULL;
+    }
+    for (index = 0u; index < sizeof(runtime_test_mappings) /
+                                sizeof(runtime_test_mappings[0]); ++index) {
+        RuntimeTestMapping* mapping = &runtime_test_mappings[index];
+        if (mapping->address != NULL) continue;
+        mapping->fd = fd;
+        mapping->address = address;
+        mapping->bytes = (size_t)status.st_size;
+        return address;
+    }
+    (void)munmap(address, (size_t)status.st_size);
+    errno = ENOSPC;
+    return NULL;
+}
+
+int rin_shm_dt(int fd, void* address) {
+    size_t index;
+    if (fd < 0 || !address) {
+        errno = EINVAL;
+        return -1;
+    }
+    for (index = 0u; index < sizeof(runtime_test_mappings) /
+                                sizeof(runtime_test_mappings[0]); ++index) {
+        RuntimeTestMapping* mapping = &runtime_test_mappings[index];
+        if (mapping->fd != fd || mapping->address != address) continue;
+        if (munmap(mapping->address, mapping->bytes) != 0) return -1;
+        memset(mapping, 0, sizeof(*mapping));
+        return 0;
+    }
+    errno = EINVAL;
+    return -1;
+}
+
+static int runtime_test_read_exact(int fd, void* destination, size_t size) {
+    uint8_t* bytes = (uint8_t*)destination;
+    size_t offset = 0u;
+    while (offset < size) {
+        ssize_t count = recv(fd, bytes + offset, size - offset, 0);
+        if (count > 0) {
+            offset += (size_t)count;
+            continue;
+        }
+        if (count < 0 && errno == EINTR) continue;
+        return -1;
+    }
+    return 0;
+}
+
+static int runtime_test_write_exact(int fd, const void* source, size_t size) {
+    const uint8_t* bytes = (const uint8_t*)source;
+    size_t offset = 0u;
+    while (offset < size) {
+        ssize_t count = send(fd, bytes + offset, size - offset, MSG_NOSIGNAL);
+        if (count > 0) {
+            offset += (size_t)count;
+            continue;
+        }
+        if (count < 0 && errno == EINTR) continue;
+        return -1;
+    }
+    return 0;
+}
+
+static void* runtime_test_export_peer(void* opaque) {
+    RuntimeExportPeer* peer = (RuntimeExportPeer*)opaque;
+    uint32_t reply_index;
+    if (!peer || peer->fd < 0) return NULL;
+    for (reply_index = 0u; reply_index < 2u; ++reply_index) {
+        RinCompositorHeader request_header;
+        RinCompositorGpuExportImageV1 request;
+        RinCompositorGpuImageV1 image;
+        RinCompositorHeader reply_header;
+        memset(&request_header, 0, sizeof(request_header));
+        memset(&request, 0, sizeof(request));
+        memset(&image, 0, sizeof(image));
+        memset(&reply_header, 0, sizeof(reply_header));
+        if (runtime_test_read_exact(peer->fd, &request_header,
+                                    sizeof(request_header)) != 0 ||
+            request_header.magic != RIN_COMPOSITOR_MAGIC ||
+            request_header.version != RIN_COMPOSITOR_PROTOCOL_VERSION ||
+            request_header.type != RIN_COMPOSITOR_EXPORT_GPU_IMAGE ||
+            request_header.payload_size != sizeof(request) ||
+            request_header.request_id == 0u ||
+            request_header.reserved != 0u ||
+            runtime_test_read_exact(peer->fd, &request, sizeof(request)) != 0 ||
+            request.struct_size != sizeof(request) ||
+            request.version != RIN_COMPOSITOR_GPU_SURFACE_ABI_VERSION ||
+            request.flags != 0u || request.reserved != 0u ||
+            request.surface_id != 7u || request.buffer_slot != 0u ||
+            request.expected_surface_generation != 9u) {
+            peer->result = -1;
+            return NULL;
+        }
+
+        image.struct_size = sizeof(image);
+        image.version = RIN_COMPOSITOR_GPU_SURFACE_ABI_VERSION;
+        image.surface_id = request.surface_id;
+        image.buffer_slot = request.buffer_slot;
+        image.surface_generation = request.expected_surface_generation;
+        image.image_handle = UINT64_C(0x700010001);
+        image.acquire_fence = peer->acquire_fences[reply_index];
+        image.width = 4u;
+        image.height = 4u;
+        image.pitch = 16u;
+        image.format = RIN_RUNTIME_COMPOSITOR_GPU_PIXEL_BGRA8;
+        image.bytes = 256u;
+
+        reply_header.magic = RIN_COMPOSITOR_MAGIC;
+        reply_header.version = request_header.version;
+        reply_header.type = request_header.type;
+        reply_header.payload_size = sizeof(image);
+        reply_header.request_id = request_header.request_id;
+        if (runtime_test_write_exact(peer->fd, &reply_header,
+                                     sizeof(reply_header)) != 0 ||
+            runtime_test_write_exact(peer->fd, &image, sizeof(image)) != 0) {
+            peer->result = -1;
+            return NULL;
+        }
+    }
+    peer->result = 0;
+    return NULL;
+}
+#endif
+
+#if !defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
 static int test_surface_query(
         void* context, RinRuntimeGuiHandle handle,
         RinRuntimeCompositorGpuSurfaceV1* surface_out) {
@@ -85,6 +362,7 @@ static int test_surface_import(
     ++surface->accepted_imports;
     return RIN_RESULT_OK;
 }
+#endif
 
 static int test_prepare_submission_v2(
         void* context, uint32_t queue_id, uint64_t command_cookie,
@@ -428,6 +706,20 @@ int main(void) {
     RinGpuVulkanSoftwarePlatformV1 software;
     TestProductAdapters product_adapters;
     RinRuntimeCompositorGpuSurfaceOpsV1 surface_ops;
+#if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
+    RinRuntimeGuiSurface* runtime_surface = NULL;
+    RuntimeExportPeer runtime_peer;
+    RinRuntimeGuiAsyncJob* runtime_job = NULL;
+    RinCompositorDamage runtime_damage;
+    RinCompositorCommitV2 runtime_commit;
+    pthread_t runtime_peer_thread;
+    uint8_t runtime_pixels[512];
+    uint8_t runtime_expected_rgba[4];
+    uint32_t runtime_pixel_index;
+    int runtime_sockets[2] = {-1, -1};
+    int runtime_peer_started = 0;
+    int runtime_peer_joined = 0;
+#endif
     RinVkApplicationInfo application;
     RinVkInstanceCreateInfo instance_info;
     const char* instance_extensions[] = {
@@ -558,16 +850,46 @@ int main(void) {
               &product_adapters.v4) == RIN_GPU_VULKAN_OK);
     product_v4_bound = 1u;
 
+#if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
+    memset(g_surfaces, 0, sizeof(g_surfaces));
+    memset(&g_async_requests, 0, sizeof(g_async_requests));
+    memset(runtime_pixels, 0, sizeof(runtime_pixels));
+    runtime_surface = &g_surfaces[0];
+    runtime_surface->active = 1u;
+    runtime_surface->handle_token = 33u;
+    runtime_surface->handle_generation = 1u;
+    runtime_surface->id = 7u;
+    runtime_surface->width = 4u;
+    runtime_surface->height = 4u;
+    runtime_surface->pitch = 16u;
+    runtime_surface->bytes = 256u;
+    runtime_surface->draw_slot = 0u;
+    runtime_surface->frame_sequence = 12u;
+    runtime_surface->slot_submitted_sequence[0] = 5u;
+    runtime_surface->render_target_generation = 1u;
+    runtime_surface->compositor_surface_generation = 9u;
+    runtime_surface->shm_handles[0] = -1;
+    runtime_surface->shm_handles[1] = -1;
+    runtime_surface->pixels[0] = runtime_pixels;
+    runtime_surface->pixels[1] = runtime_pixels + 256u;
+    g_compositor_features = RIN_COMPOSITOR_FEATURE_GPU_SURFACE_ABI;
+    CHECK(wnd_get_gpu_surface_ops_v1(&surface_ops) == RIN_RESULT_OK);
+#else
     memset(&surface_ops, 0, sizeof(surface_ops));
     surface_ops.struct_size = sizeof(surface_ops);
     surface_ops.version = RIN_RUNTIME_COMPOSITOR_GPU_SURFACE_OPS_V1_VERSION;
     surface_ops.context = &compositor;
     surface_ops.query = test_surface_query;
     surface_ops.import_frame = test_surface_import;
+#endif
     memset(&surface_info, 0, sizeof(surface_info));
     surface_info.struct_size = sizeof(surface_info);
     surface_info.version = RIN_VK_RINOS_NATIVE_WINDOW_SURFACE_SPEC_VERSION;
+#if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
+    surface_info.window_handle = 33u;
+#else
     surface_info.window_handle = UINT64_C(0x7711);
+#endif
     surface_info.surface_ops = &surface_ops;
     CHECK(vkCreateRinOSNativeWindowSurfaceV1(
               instance, &surface_info, NULL, &surface) == RIN_VK_SUCCESS);
@@ -577,8 +899,13 @@ int main(void) {
     CHECK(extension_count == 1u);
     CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
               physical, surface, &capabilities) == RIN_VK_SUCCESS);
+#if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
+    CHECK(capabilities.currentExtent.width == 4u &&
+          capabilities.currentExtent.height == 4u &&
+#else
     CHECK(capabilities.currentExtent.width == compositor.width &&
           capabilities.currentExtent.height == compositor.height &&
+#endif
           (capabilities.supportedUsageFlags &
            RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT) != 0u &&
           (capabilities.supportedUsageFlags &
@@ -618,8 +945,13 @@ int main(void) {
     swapchain_info.minImageCount = 2u;
     swapchain_info.imageFormat = RIN_VK_FORMAT_R8G8B8A8_UNORM;
     swapchain_info.imageColorSpace = RIN_VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+#if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
+    swapchain_info.imageExtent.width = 4u;
+    swapchain_info.imageExtent.height = 4u;
+#else
     swapchain_info.imageExtent.width = compositor.width;
     swapchain_info.imageExtent.height = compositor.height;
+#endif
     swapchain_info.imageArrayLayers = 1u;
     swapchain_info.imageUsage = RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     swapchain_info.imageSharingMode = RIN_VK_SHARING_MODE_EXCLUSIVE;
@@ -653,27 +985,101 @@ int main(void) {
     present.pSwapchains = &swapchain;
     present.pImageIndices = &image_index;
     present.pResults = &present_result;
+#if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, runtime_sockets) == 0);
+    g_compositor_fd = runtime_sockets[0];
+    memset(&runtime_peer, 0, sizeof(runtime_peer));
+    runtime_peer.fd = runtime_sockets[1];
+    runtime_peer.acquire_fences[0] = 4u;
+    runtime_peer.acquire_fences[1] = 5u;
+    CHECK(pthread_create(&runtime_peer_thread, NULL,
+                         runtime_test_export_peer, &runtime_peer) == 0);
+    runtime_peer_started = 1;
+#else
     compositor.busy_imports = 1u;
+#endif
     CHECK(vkQueuePresentKHR(queue, &present) == RIN_VK_NOT_READY);
+#if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
+    CHECK(present_result == RIN_VK_NOT_READY);
+#else
     CHECK(present_result == RIN_VK_NOT_READY &&
           compositor.import_attempts == 1u &&
           compositor.accepted_imports == 0u);
+#endif
     CHECK(vkQueuePresentKHR(queue, &present) == RIN_VK_SUCCESS);
+#if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
+    CHECK(present_result == RIN_VK_SUCCESS);
+    CHECK(pthread_join(runtime_peer_thread, NULL) == 0);
+    runtime_peer_joined = 1;
+    CHECK(runtime_peer.result == 0);
+    CHECK(g_async_requests.count == 1u);
+    runtime_job = &g_async_requests.jobs[g_async_requests.head];
+    CHECK(runtime_job->type == RIN_COMPOSITOR_DAMAGE &&
+          runtime_job->payload_size == sizeof(runtime_damage));
+    CHECK(runtime_job->second_type == RIN_COMPOSITOR_COMMIT_V2 &&
+          runtime_job->second_payload_size == sizeof(runtime_commit));
+    memcpy(&runtime_damage, runtime_job->payload, sizeof(runtime_damage));
+    memcpy(&runtime_commit, runtime_job->second_payload,
+           sizeof(runtime_commit));
+    CHECK(runtime_damage.surface_id == 7u && runtime_damage.x == 0 &&
+          runtime_damage.y == 0 && runtime_damage.w == 4u &&
+          runtime_damage.h == 4u);
+    CHECK(runtime_commit.surface_id == 7u &&
+          runtime_commit.buffer_slot == 0u &&
+          runtime_commit.frame_sequence == 13u &&
+          runtime_commit.reserved == 0u);
+    CHECK(runtime_surface->frame_present_pending == 1u &&
+          runtime_surface->frame_sequence == 13u);
+    memcpy(runtime_expected_rgba, &compositor.expected_word,
+           sizeof(runtime_expected_rgba));
+    for (runtime_pixel_index = 0u; runtime_pixel_index < 16u;
+         ++runtime_pixel_index) {
+        const uint8_t* pixel = runtime_pixels + runtime_pixel_index * 4u;
+        CHECK(pixel[0] == runtime_expected_rgba[2] &&
+              pixel[1] == runtime_expected_rgba[1] &&
+              pixel[2] == runtime_expected_rgba[0] &&
+              pixel[3] == runtime_expected_rgba[3]);
+    }
+#else
     CHECK(present_result == RIN_VK_SUCCESS &&
           compositor.import_attempts == 2u &&
           compositor.accepted_imports == 1u);
+#endif
 
+#if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
+    runtime_surface->width = 8u;
+    runtime_surface->height = 8u;
+    runtime_surface->pitch = 32u;
+    runtime_surface->render_target_generation = 2u;
+    runtime_surface->compositor_surface_generation = 10u;
+#else
     ++compositor.generation;
     compositor.width = 8u;
     compositor.height = 8u;
+#endif
     image_index = UINT32_MAX;
     CHECK(vkAcquireNextImageKHR(device, swapchain, 0u,
                                 acquire_semaphore, 0u, &image_index) ==
           RIN_VK_ERROR_OUT_OF_DATE_KHR);
+#if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
+    CHECK(image_index == UINT32_MAX);
+#else
     CHECK(image_index == UINT32_MAX && compositor.accepted_imports == 1u);
+#endif
 
     result = RIN_VK_SUCCESS;
 cleanup:
+#if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
+    if (runtime_peer_started && !runtime_peer_joined) {
+        if (runtime_sockets[0] >= 0)
+            (void)shutdown(runtime_sockets[0], SHUT_RDWR);
+        (void)pthread_join(runtime_peer_thread, NULL);
+        runtime_peer_joined = 1;
+    }
+    g_compositor_fd = -1;
+    if (runtime_sockets[0] >= 0) (void)close(runtime_sockets[0]);
+    if (runtime_sockets[1] >= 0) (void)close(runtime_sockets[1]);
+#endif
     if (device_created && queue) (void)vkQueueWaitIdle(queue);
     if (swapchain_created) vkDestroySwapchainKHR(device, swapchain, NULL);
     if (acquire_semaphore != 0u)
