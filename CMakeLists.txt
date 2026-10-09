@@ -52,6 +52,10 @@ if(RINVULKAN_BUILD_RINOS_NATIVE_WINDOW_EXAMPLE)
         message(FATAL_ERROR
             "The RinOS native-window example requires the POSIX Compositor transport")
     endif()
+    # The optional example links RinRuntime's C++ render-context target. Keep
+    # the base RinVulkan library C-only, but enable CXX in this parent project
+    # when the mixed-language GUI target is requested.
+    enable_language(CXX)
     set(RINRUNTIME_BUILD_GUI ON)
     set(RINRUNTIME_BUILD_TESTS OFF)
     set(RINRUNTIME_BUILD_EXAMPLES OFF)
