@@ -7,6 +7,10 @@
 #include <rin/contract_abi.h>
 #include <rinruntime/window.h>
 
+#if defined(RIN_VULKAN_NATIVE_WINDOW_COMPOSITOR_TEST)
+#include "compositor_native_window_vulkan_bridge.h"
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdatomic.h>
@@ -1040,6 +1044,17 @@ int main(void) {
               pixel[2] == runtime_expected_rgba[0] &&
               pixel[3] == runtime_expected_rgba[3]);
     }
+#if defined(RIN_VULKAN_NATIVE_WINDOW_COMPOSITOR_TEST)
+    CHECK(compositor_native_window_vulkan_reset(
+              runtime_surface->id, 77u, runtime_surface->width,
+              runtime_surface->height, runtime_surface->pixels[0],
+              runtime_surface->bytes, runtime_surface->pixels[1],
+              runtime_surface->bytes, runtime_surface->pitch) == 0);
+    CHECK(compositor_native_window_vulkan_dispatch_frame(
+              &runtime_damage, sizeof(runtime_damage), &runtime_commit,
+              sizeof(runtime_commit), 77u, runtime_pixels,
+              runtime_surface->bytes) == 0);
+#endif
 #else
     CHECK(present_result == RIN_VK_SUCCESS &&
           compositor.import_attempts == 2u &&
