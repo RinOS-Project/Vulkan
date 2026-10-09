@@ -45,7 +45,7 @@ else()
 endif()
 
 option(RINVULKAN_BUILD_RINOS_NATIVE_WINDOW_EXAMPLE
-    "Build the RinRuntime native-window surface bootstrap example" OFF)
+    "Build the RinVk one-frame RinOS native-window surface example" OFF)
 if(RINVULKAN_BUILD_RINOS_NATIVE_WINDOW_EXAMPLE)
     if(WIN32)
         message(FATAL_ERROR
