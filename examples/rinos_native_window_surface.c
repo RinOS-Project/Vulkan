@@ -158,7 +158,7 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
                                    uint32_t queue_family,
                                    RinVkSurfaceKHR surface,
                                    RinRuntimeGuiHandle window,
-                                   ExampleFrameCompletion* completion) {
+                                   RinVulkanExampleFrameCompletion* completion) {
     static const char* const device_extensions[] = {
         RIN_VK_KHR_SWAPCHAIN_EXTENSION,
         RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION
