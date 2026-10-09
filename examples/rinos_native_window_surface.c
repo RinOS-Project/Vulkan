@@ -10,6 +10,79 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+typedef struct ExampleFrameCompletion {
+    RinRuntimeGuiHandle window;
+    int completed;
+    int32_t status;
+    uint64_t frame_sequence;
+} ExampleFrameCompletion;
+
+static void example_compositor_completion(
+        const RinRuntimeGuiCompletionV1* completion, void* context) {
+    ExampleFrameCompletion* state = (ExampleFrameCompletion*)context;
+    if (!state || state->completed || !completion ||
+        completion->handle != state->window ||
+        completion->request_type != RIN_COMPOSITOR_DAMAGE)
+        return;
+    if (completion->struct_size != sizeof(*completion) ||
+        completion->version != 1u || completion->cookie == 0u ||
+        completion->payload_size != 0u || completion->reserved != 0u) {
+        state->status = RIN_RESULT_CORRUPT_DATA;
+    } else {
+        state->status = completion->status;
+        state->frame_sequence = completion->cookie;
+    }
+    state->completed = 1;
+}
+
+static int example_utc_milliseconds(uint64_t* milliseconds_out) {
+    struct timespec now;
+    uint64_t seconds;
+    uint64_t nanoseconds;
+    if (!milliseconds_out || timespec_get(&now, TIME_UTC) != TIME_UTC ||
+        now.tv_sec < 0 || now.tv_nsec < 0 || now.tv_nsec >= 1000000000L)
+        return 0;
+    seconds = (uint64_t)now.tv_sec;
+    nanoseconds = (uint64_t)now.tv_nsec;
+    if (seconds > (UINT64_MAX - nanoseconds / UINT64_C(1000000)) /
+                      UINT64_C(1000))
+        return 0;
+    *milliseconds_out = seconds * UINT64_C(1000) +
+                        nanoseconds / UINT64_C(1000000);
+    return 1;
+}
+
+static RinVkResult wait_for_compositor_commit(
+        ExampleFrameCompletion* state) {
+    uint64_t started_ms;
+    if (!state || !example_utc_milliseconds(&started_ms))
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    while (!state->completed) {
+        uint64_t now_ms;
+        const int dispatch_result = wnd_dispatch_compositor(50u, 8u);
+        if (dispatch_result < 0) {
+            fprintf(stderr, "wnd_dispatch_compositor failed: %d\n",
+                    dispatch_result);
+            return RIN_VK_ERROR_SURFACE_LOST_KHR;
+        }
+        if (!example_utc_milliseconds(&now_ms) || now_ms < started_ms)
+            return RIN_VK_ERROR_INITIALIZATION_FAILED;
+        if (now_ms - started_ms >= UINT64_C(10000)) {
+            fprintf(stderr, "timed out waiting for Compositor commit response\n");
+            return RIN_VK_TIMEOUT;
+        }
+    }
+    if (state->status != RIN_RESULT_OK) {
+        fprintf(stderr, "Compositor rejected frame sequence %llu: %d\n",
+                (unsigned long long)state->frame_sequence, state->status);
+        return RIN_VK_ERROR_SURFACE_LOST_KHR;
+    }
+    printf("Compositor accepted damage/commit sequence %llu.\n",
+           (unsigned long long)state->frame_sequence);
+    return RIN_VK_SUCCESS;
+}
 
 static int report_vk_failure(const char* operation, RinVkResult result) {
     fprintf(stderr, "%s failed with RinVkResult %d\n", operation,
@@ -108,7 +181,8 @@ static void record_image_barrier(RinVkCommandBuffer command_buffer,
 static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
                                    uint32_t queue_family,
                                    RinVkSurfaceKHR surface,
-                                   RinRuntimeGuiHandle window) {
+                                   RinRuntimeGuiHandle window,
+                                   ExampleFrameCompletion* completion) {
     static const char* const device_extensions[] = {
         RIN_VK_KHR_SWAPCHAIN_EXTENSION,
         RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION
@@ -542,8 +616,11 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
         goto cleanup;
     }
     submission_pending = 0;
-    printf("Submitted and presented one cleared frame through the "
-           "RinOS Compositor surface callback.\n");
+    vk_result = wait_for_compositor_commit(completion);
+    if (vk_result != RIN_VK_SUCCESS) {
+        report_vk_failure("Compositor damage/commit", vk_result);
+        goto cleanup;
+    }
     exit_status = 0;
 
 cleanup:
@@ -576,6 +653,7 @@ int main(void) {
     };
     RinRuntimeGuiHandle window = RIN_WINDOW_HANDLE_INVALID;
     RinRuntimeCompositorGpuSurfaceOpsV1 surface_ops;
+    ExampleFrameCompletion completion;
     RinVkApplicationInfo application;
     RinVkInstanceCreateInfo instance_info;
     RinVkRinOSNativeWindowSurfaceCreateInfoV1 surface_info;
@@ -588,6 +666,8 @@ int main(void) {
     RinVkResult vk_result;
     int runtime_result;
     int exit_status = 1;
+
+    memset(&completion, 0, sizeof(completion));
 
     window = wnd_create("RinVulkan native-window surface", 64, 64, 960, 540);
     if (window == RIN_WINDOW_HANDLE_INVALID) {
@@ -715,11 +795,22 @@ int main(void) {
                 (queue_families[family].queueFlags &
                  (RIN_VK_QUEUE_GRAPHICS_BIT | RIN_VK_QUEUE_TRANSFER_BIT)) !=
                     0u) {
+                completion.window = window;
+                runtime_result = wnd_set_compositor_completion_callback(
+                    window, example_compositor_completion, &completion);
+                if (runtime_result != RIN_RESULT_OK) {
+                    free(queue_families);
+                    fprintf(stderr,
+                            "wnd_set_compositor_completion_callback failed: %d\n",
+                            runtime_result);
+                    goto cleanup;
+                }
                 printf("RinOS native-window surface is supported by "
                        "device %u, queue family %u.\n", device_index, family);
                 free(queue_families);
                 exit_status = present_one_clear_frame(
-                    physical_devices[device_index], family, surface, window);
+                    physical_devices[device_index], family, surface, window,
+                    &completion);
                 goto cleanup;
             }
         }
@@ -732,6 +823,9 @@ cleanup:
     free(physical_devices);
     if (surface != 0u) vkDestroySurfaceKHR(instance, surface, NULL);
     if (instance) vkDestroyInstance(instance, NULL);
-    if (window != RIN_WINDOW_HANDLE_INVALID) wnd_close(window);
+    if (window != RIN_WINDOW_HANDLE_INVALID) {
+        (void)wnd_set_compositor_completion_callback(window, NULL, NULL);
+        wnd_close(window);
+    }
     return exit_status;
 }
