@@ -5,37 +5,13 @@
 #include <rinvulkan/icd.h>
 #include <rin/contract_abi.h>
 #include <rinruntime/window.h>
+#include "rinos_native_window_completion.h"
 
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-
-typedef struct ExampleFrameCompletion {
-    RinRuntimeGuiHandle window;
-    int completed;
-    int32_t status;
-    uint64_t frame_sequence;
-} ExampleFrameCompletion;
-
-static void example_compositor_completion(
-        const RinRuntimeGuiCompletionV1* completion, void* context) {
-    ExampleFrameCompletion* state = (ExampleFrameCompletion*)context;
-    if (!state || state->completed || !completion ||
-        completion->handle != state->window ||
-        completion->request_type != RIN_COMPOSITOR_DAMAGE)
-        return;
-    if (completion->struct_size != sizeof(*completion) ||
-        completion->version != 1u || completion->cookie == 0u ||
-        completion->payload_size != 0u || completion->reserved != 0u) {
-        state->status = RIN_RESULT_CORRUPT_DATA;
-    } else {
-        state->status = completion->status;
-        state->frame_sequence = completion->cookie;
-    }
-    state->completed = 1;
-}
 
 static int example_utc_milliseconds(uint64_t* milliseconds_out) {
     struct timespec now;
@@ -55,7 +31,7 @@ static int example_utc_milliseconds(uint64_t* milliseconds_out) {
 }
 
 static RinVkResult wait_for_compositor_commit(
-        ExampleFrameCompletion* state) {
+        RinVulkanExampleFrameCompletion* state) {
     uint64_t started_ms;
     if (!state || !example_utc_milliseconds(&started_ms))
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
@@ -653,7 +629,7 @@ int main(void) {
     };
     RinRuntimeGuiHandle window = RIN_WINDOW_HANDLE_INVALID;
     RinRuntimeCompositorGpuSurfaceOpsV1 surface_ops;
-    ExampleFrameCompletion completion;
+    RinVulkanExampleFrameCompletion completion;
     RinVkApplicationInfo application;
     RinVkInstanceCreateInfo instance_info;
     RinVkRinOSNativeWindowSurfaceCreateInfoV1 surface_info;
@@ -797,7 +773,8 @@ int main(void) {
                     0u) {
                 completion.window = window;
                 runtime_result = wnd_set_compositor_completion_callback(
-                    window, example_compositor_completion, &completion);
+                    window, rin_vulkan_example_compositor_completion,
+                    &completion);
                 if (runtime_result != RIN_RESULT_OK) {
                     free(queue_families);
                     fprintf(stderr,
