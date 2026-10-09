@@ -13602,6 +13602,14 @@ static int stage_image_state_update(
     return 1;
 }
 
+static int image_old_layout_matches(uint32_t tracked_layout,
+                                    uint32_t old_layout) {
+    /* Vulkan permits UNDEFINED as oldLayout to discard the previous image
+     * contents, regardless of the layout currently tracked by the ICD. */
+    return old_layout == RIN_VK_IMAGE_LAYOUT_UNDEFINED ||
+           tracked_layout == old_layout;
+}
+
 static int prepare_image_layout_updates(
         struct RinVkDevice_T* device,
         const RinGpuVulkanTransferPacketV2* packet,
@@ -13646,7 +13654,8 @@ static int prepare_image_layout_updates(
             dst_queue_family = operation->filter;
         if (src_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED &&
             dst_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED) {
-            if (current_layout != operation->source_width ||
+            if (!image_old_layout_matches(current_layout,
+                                          operation->source_width) ||
                 ownership->transfer_pending != 0u ||
                 (ownership->owner_queue_family !=
                      RIN_VK_QUEUE_FAMILY_IGNORED &&
@@ -13664,7 +13673,8 @@ static int prepare_image_layout_updates(
             return 0;
         if (src_queue_family == dst_queue_family) {
             if (queue_family_index != src_queue_family ||
-                current_layout != operation->source_width ||
+                !image_old_layout_matches(current_layout,
+                                          operation->source_width) ||
                 ownership->transfer_pending != 0u ||
                 (ownership->owner_queue_family !=
                      RIN_VK_QUEUE_FAMILY_IGNORED &&
@@ -13674,7 +13684,8 @@ static int prepare_image_layout_updates(
                 ownership->owner_queue_family = queue_family_index;
             layouts[update_index] = operation->source_height;
         } else if (queue_family_index == src_queue_family) {
-            if (current_layout != operation->source_width ||
+            if (!image_old_layout_matches(current_layout,
+                                          operation->source_width) ||
                 ownership->transfer_pending != 0u || signal_count == 0u ||
                 (ownership->owner_queue_family !=
                      RIN_VK_QUEUE_FAMILY_IGNORED &&

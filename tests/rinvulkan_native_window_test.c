@@ -681,6 +681,28 @@ static RinVkResult record_present_layout_and_clear(
     barrier.oldLayout = RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     barrier.newLayout = RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     vkCmdPipelineBarrier2(command_buffer, &dependency);
+
+    /* UNDEFINED is a valid discard source even when the tracked current
+     * layout is PRESENT. Reinitialize the image before importing its pixels. */
+    barrier.srcStageMask = RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barrier.srcAccessMask = 0u;
+    barrier.dstStageMask = RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    barrier.dstAccessMask = RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    barrier.oldLayout = RIN_VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    vkCmdPipelineBarrier2(command_buffer, &dependency);
+    memset(&clear, 0, sizeof(clear));
+    clear.uint32[0] = clear_word;
+    vkCmdClearColorImage(command_buffer, image,
+                         RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         &clear, 1u, &range);
+    barrier.srcStageMask = RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    barrier.srcAccessMask = RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    barrier.dstStageMask = RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barrier.dstAccessMask = RIN_VK_ACCESS_2_MEMORY_READ_BIT;
+    barrier.oldLayout = RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    vkCmdPipelineBarrier2(command_buffer, &dependency);
     result = vkEndCommandBuffer(command_buffer);
     if (result != RIN_VK_SUCCESS) goto done;
 
