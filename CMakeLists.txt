@@ -44,6 +44,33 @@ else()
     target_compile_options(RinVulkan PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+option(RINVULKAN_BUILD_RINOS_NATIVE_WINDOW_EXAMPLE
+    "Build the RinRuntime native-window surface bootstrap example" OFF)
+if(RINVULKAN_BUILD_RINOS_NATIVE_WINDOW_EXAMPLE)
+    if(WIN32)
+        message(FATAL_ERROR
+            "The RinOS native-window example requires the POSIX Compositor transport")
+    endif()
+    set(RINRUNTIME_BUILD_GUI ON)
+    set(RINRUNTIME_BUILD_TESTS OFF)
+    set(RINRUNTIME_BUILD_EXAMPLES OFF)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../rinruntime"
+        "rinruntime-build" EXCLUDE_FROM_ALL)
+    add_executable(rinvulkan-native-window-surface-example
+        examples/rinos_native_window_surface.c)
+    target_compile_features(rinvulkan-native-window-surface-example
+        PRIVATE c_std_11)
+    target_link_libraries(rinvulkan-native-window-surface-example
+        PRIVATE RinVulkan::RinVulkan RinRuntime::RinRuntime)
+    if(MSVC)
+        target_compile_options(rinvulkan-native-window-surface-example
+            PRIVATE /W4)
+    else()
+        target_compile_options(rinvulkan-native-window-surface-example
+            PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+endif()
+
 option(RINVULKAN_BUILD_VALIDATION_SMOKE
     "Build a shared ICD and exercise it through the Khronos Vulkan loader and validation layer"
     OFF)
