@@ -611,6 +611,7 @@ static void make_profile(RinGpuVulkanPhysicalDeviceV2* profile) {
 static RinVkResult record_present_layout_and_clear(
         RinVkDevice device, RinVkQueue queue, RinVkImage image,
         RinVkSemaphore acquire_semaphore,
+        RinVkSemaphore render_complete_semaphore,
         uint32_t clear_word) {
     RinVkCommandPoolCreateInfo pool_info;
     RinVkCommandPool pool = 0u;
@@ -626,6 +627,7 @@ static RinVkResult record_present_layout_and_clear(
     RinVkFence fence = 0u;
     const RinVkCommandBuffer* command_buffers = &command_buffer;
     const uint64_t* wait_semaphores = &acquire_semaphore;
+    const uint64_t* signal_semaphores = &render_complete_semaphore;
     uint32_t wait_stage = RIN_VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     RinVkResult result;
 
@@ -693,6 +695,8 @@ static RinVkResult record_present_layout_and_clear(
     submit.pWaitDstStageMask = &wait_stage;
     submit.commandBufferCount = 1u;
     submit.pCommandBuffers = command_buffers;
+    submit.signalSemaphoreCount = 1u;
+    submit.pSignalSemaphores = signal_semaphores;
     result = vkQueueSubmit(queue, 1u, &submit, fence);
     if (result == RIN_VK_SUCCESS)
         result = vkWaitForFences(device, 1u, &fence, 1u, UINT64_MAX);
@@ -758,6 +762,7 @@ int main(void) {
     uint32_t image_count = 2u;
     RinVkSemaphoreCreateInfo semaphore_info;
     RinVkSemaphore acquire_semaphore = 0u;
+    RinVkSemaphore render_complete_semaphore = 0u;
     uint32_t image_index = UINT32_MAX;
     RinVkPresentInfoKHR present;
     RinVkResult present_result = RIN_VK_ERROR_INITIALIZATION_FAILED;
@@ -976,15 +981,20 @@ int main(void) {
     semaphore_info.sType = RIN_VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     CHECK(vkCreateSemaphore(device, &semaphore_info, NULL,
                             &acquire_semaphore) == RIN_VK_SUCCESS);
+    CHECK(vkCreateSemaphore(device, &semaphore_info, NULL,
+                            &render_complete_semaphore) == RIN_VK_SUCCESS);
     CHECK(vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
                                 acquire_semaphore, 0u, &image_index) ==
           RIN_VK_SUCCESS);
     CHECK(image_index < image_count);
     CHECK(record_present_layout_and_clear(
               device, queue, images[image_index], acquire_semaphore,
+              render_complete_semaphore,
               compositor.expected_word) == RIN_VK_SUCCESS);
     memset(&present, 0, sizeof(present));
     present.sType = RIN_VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    present.waitSemaphoreCount = 1u;
+    present.pWaitSemaphores = &render_complete_semaphore;
     present.swapchainCount = 1u;
     present.pSwapchains = &swapchain;
     present.pImageIndices = &image_index;
@@ -1010,6 +1020,14 @@ int main(void) {
           compositor.import_attempts == 1u &&
           compositor.accepted_imports == 0u);
 #endif
+    {
+        RinVkSubmitInfo retry_signal;
+        memset(&retry_signal, 0, sizeof(retry_signal));
+        retry_signal.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        retry_signal.signalSemaphoreCount = 1u;
+        retry_signal.pSignalSemaphores = &render_complete_semaphore;
+        CHECK(vkQueueSubmit(queue, 1u, &retry_signal, 0u) == RIN_VK_SUCCESS);
+    }
     CHECK(vkQueuePresentKHR(queue, &present) == RIN_VK_SUCCESS);
 #if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
     CHECK(present_result == RIN_VK_SUCCESS);
@@ -1097,6 +1115,8 @@ cleanup:
 #endif
     if (device_created && queue) (void)vkQueueWaitIdle(queue);
     if (swapchain_created) vkDestroySwapchainKHR(device, swapchain, NULL);
+    if (render_complete_semaphore != 0u)
+        vkDestroySemaphore(device, render_complete_semaphore, NULL);
     if (acquire_semaphore != 0u)
         vkDestroySemaphore(device, acquire_semaphore, NULL);
     if (device_created) vkDestroyDevice(device, NULL);
