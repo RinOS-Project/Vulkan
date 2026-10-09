@@ -2,6 +2,9 @@
 /* One-frame RinOS application example for the ordinary Compositor WSI path.
  * The platform must already have admitted and bound its real Vulkan runtime;
  * this example never initializes the software host platform as a fallback. */
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include <rinvulkan/icd.h>
 #include <rin/contract_abi.h>
 #include <rinruntime/window.h>
@@ -12,12 +15,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
-static int example_utc_milliseconds(uint64_t* milliseconds_out) {
+static int example_monotonic_milliseconds(uint64_t* milliseconds_out) {
+#if defined(_WIN32)
+    if (!milliseconds_out) return 0;
+    *milliseconds_out = (uint64_t)GetTickCount64();
+    return 1;
+#else
     struct timespec now;
     uint64_t seconds;
     uint64_t nanoseconds;
-    if (!milliseconds_out || timespec_get(&now, TIME_UTC) != TIME_UTC ||
+    if (!milliseconds_out || clock_gettime(CLOCK_MONOTONIC, &now) != 0 ||
         now.tv_sec < 0 || now.tv_nsec < 0 || now.tv_nsec >= 1000000000L)
         return 0;
     seconds = (uint64_t)now.tv_sec;
@@ -28,36 +39,42 @@ static int example_utc_milliseconds(uint64_t* milliseconds_out) {
     *milliseconds_out = seconds * UINT64_C(1000) +
                         nanoseconds / UINT64_C(1000000);
     return 1;
+#endif
+}
+
+static int example_read_monotonic_ms(void* context,
+                                     uint64_t* milliseconds_out) {
+    (void)context;
+    return example_monotonic_milliseconds(milliseconds_out);
+}
+
+static int example_dispatch_compositor(void* context, uint32_t timeout_ms,
+                                       uint32_t max_completions) {
+    (void)context;
+    return wnd_dispatch_compositor(timeout_ms, max_completions);
 }
 
 static RinVkResult wait_for_compositor_commit(
         RinVulkanExampleFrameCompletion* state) {
-    uint64_t started_ms;
-    if (!state || !example_utc_milliseconds(&started_ms))
-        return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    while (!state->completed) {
-        uint64_t now_ms;
-        const int dispatch_result = wnd_dispatch_compositor(50u, 8u);
-        if (dispatch_result < 0) {
-            fprintf(stderr, "wnd_dispatch_compositor failed: %d\n",
-                    dispatch_result);
-            return RIN_VK_ERROR_SURFACE_LOST_KHR;
-        }
-        if (!example_utc_milliseconds(&now_ms) || now_ms < started_ms)
-            return RIN_VK_ERROR_INITIALIZATION_FAILED;
-        if (now_ms - started_ms >= UINT64_C(10000)) {
-            fprintf(stderr, "timed out waiting for Compositor commit response\n");
-            return RIN_VK_TIMEOUT;
-        }
-    }
-    if (state->status != RIN_RESULT_OK) {
+    const RinVkResult result =
+        rin_vulkan_example_wait_for_compositor_commit(
+            state, example_read_monotonic_ms,
+            example_dispatch_compositor, NULL);
+    if (result == RIN_VK_TIMEOUT) {
+        fprintf(stderr, "timed out waiting for Compositor commit response\n");
+    } else if (state && state->completed &&
+               state->status != RIN_RESULT_OK) {
         fprintf(stderr, "Compositor rejected frame sequence %llu: %d\n",
                 (unsigned long long)state->frame_sequence, state->status);
-        return RIN_VK_ERROR_SURFACE_LOST_KHR;
+    } else if (result == RIN_VK_ERROR_SURFACE_LOST_KHR) {
+        fprintf(stderr, "wnd_dispatch_compositor failed\n");
+    } else if (result != RIN_VK_SUCCESS) {
+        fprintf(stderr, "monotonic clock failed while waiting for Compositor\n");
     }
-    printf("Compositor accepted damage/commit sequence %llu.\n",
-           (unsigned long long)state->frame_sequence);
-    return RIN_VK_SUCCESS;
+    if (result == RIN_VK_SUCCESS)
+        printf("Compositor accepted damage/commit sequence %llu.\n",
+               (unsigned long long)state->frame_sequence);
+    return result;
 }
 
 static int report_vk_failure(const char* operation, RinVkResult result) {
