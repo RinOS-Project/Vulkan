@@ -6,6 +6,10 @@ set(RINGPU_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../RinGPU" CACHE PATH
 if(NOT EXISTS "${RINGPU_DIR}/CMakeLists.txt")
     message(FATAL_ERROR "RinGPU is required; set RINGPU_DIR to its checkout")
 endif()
+set(RINRUNTIME_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../RinRuntime/include")
+if(NOT EXISTS "${RINRUNTIME_INCLUDE_DIR}/rinruntime/window.h")
+    message(FATAL_ERROR "RinRuntime window ABI is required by RinOS WSI")
+endif()
 
 if(NOT TARGET RinGPU::RinGPU)
     set(RINGPU_BUILD_TESTS OFF CACHE BOOL "Disable RinGPU tests in RinVulkan" FORCE)
@@ -31,7 +35,8 @@ add_library(RinVulkan STATIC ${RINVULKAN_SOURCES})
 add_library(RinVulkan::RinVulkan ALIAS RinVulkan)
 target_compile_features(RinVulkan PUBLIC c_std_11)
 target_include_directories(RinVulkan
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${RINRUNTIME_INCLUDE_DIR})
 target_link_libraries(RinVulkan PUBLIC RinGPU::RinGPU)
 if(MSVC)
     target_compile_options(RinVulkan PRIVATE /W4)
@@ -53,7 +58,8 @@ if(RINVULKAN_BUILD_VALIDATION_SMOKE)
     add_library(RinVulkanICD SHARED ${RINVULKAN_SOURCES})
     target_compile_features(RinVulkanICD PRIVATE c_std_11)
     target_include_directories(RinVulkanICD
-        PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+        PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+        PRIVATE ${RINRUNTIME_INCLUDE_DIR})
     target_link_libraries(RinVulkanICD PRIVATE RinGPU::RinGPU)
     set_target_properties(RinVulkanICD PROPERTIES
         OUTPUT_NAME "rin-vulkan-icd"
@@ -117,6 +123,15 @@ if(BUILD_TESTING)
         RinVulkan::RinVulkan)
     add_test(NAME rinvulkan-wsi-display
         COMMAND rinvulkan-wsi-display-test)
+    add_executable(rinvulkan-native-window-test
+        tests/rinvulkan_native_window_test.c)
+    target_compile_features(rinvulkan-native-window-test PRIVATE c_std_11)
+    target_include_directories(rinvulkan-native-window-test PRIVATE
+        ${RINRUNTIME_INCLUDE_DIR})
+    target_link_libraries(rinvulkan-native-window-test PRIVATE
+        RinVulkan::RinVulkan)
+    add_test(NAME rinvulkan-native-window
+        COMMAND rinvulkan-native-window-test)
     add_executable(rinvulkan-buffer-ownership-test
         tests/rinvulkan_buffer_ownership_test.c
         src/buffer_ownership.c)

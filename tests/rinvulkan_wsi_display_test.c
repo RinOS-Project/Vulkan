@@ -791,9 +791,13 @@ int main(void) {
     count = 4u;
     CHECK(vkEnumerateInstanceExtensionProperties(NULL, &count, extensions) ==
           RIN_VK_SUCCESS);
-    CHECK(count == 1u &&
+    CHECK(count == 3u &&
           strcmp(extensions[0].extensionName,
-                 RIN_VK_EXT_DEBUG_UTILS_EXTENSION) == 0);
+                 RIN_VK_EXT_DEBUG_UTILS_EXTENSION) == 0 &&
+          strcmp(extensions[1].extensionName,
+                 RIN_VK_KHR_SURFACE_EXTENSION) == 0 &&
+          strcmp(extensions[2].extensionName,
+                 RIN_VK_RINOS_NATIVE_WINDOW_SURFACE_EXTENSION) == 0);
     memset(&application, 0, sizeof(application));
     application.sType = RIN_VK_STRUCTURE_TYPE_APPLICATION_INFO;
     application.pApplicationName = "RinVulkan WSI display test";
@@ -906,11 +910,13 @@ int main(void) {
     count = 4u;
     CHECK(vkEnumerateInstanceExtensionProperties(NULL, &count, extensions) ==
           RIN_VK_SUCCESS);
-    CHECK(count == 3u &&
+    CHECK(count == 4u &&
           strcmp(extensions[1].extensionName,
                  RIN_VK_KHR_SURFACE_EXTENSION) == 0 &&
           strcmp(extensions[2].extensionName,
-                 RIN_VK_KHR_DISPLAY_EXTENSION) == 0);
+                 RIN_VK_KHR_DISPLAY_EXTENSION) == 0 &&
+          strcmp(extensions[3].extensionName,
+                 RIN_VK_RINOS_NATIVE_WINDOW_SURFACE_EXTENSION) == 0);
     vkDestroyInstance(instance, NULL);
     instance = NULL;
     instance_create.enabledExtensionCount = 2u;
@@ -1503,7 +1509,9 @@ int main(void) {
             CHECK(vkEnumerateDeviceExtensionProperties(
                       physical, NULL, &device_extension_count, extensions) ==
                   RIN_VK_SUCCESS);
-            CHECK(device_extension_count == 3u);
+            CHECK(device_extension_count == 4u &&
+                  strcmp(extensions[3].extensionName,
+                         RIN_VK_KHR_SWAPCHAIN_EXTENSION) == 0);
             device_create_info.enabledExtensionCount = 2u;
             device_create_info.ppEnabledExtensionNames =
                 swapchain_device_extensions;

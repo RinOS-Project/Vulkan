@@ -113,9 +113,12 @@
 #define RIN_VK_KHR_SURFACE_EXTENSION "VK_KHR_surface"
 #define RIN_VK_KHR_DISPLAY_EXTENSION "VK_KHR_display"
 #define RIN_VK_KHR_SWAPCHAIN_EXTENSION "VK_KHR_swapchain"
+#define RIN_VK_RINOS_NATIVE_WINDOW_SURFACE_EXTENSION \
+    "VK_RINOS_native_window_surface"
 #define RIN_VK_KHR_SURFACE_SPEC_VERSION 25u
 #define RIN_VK_KHR_DISPLAY_SPEC_VERSION 23u
 #define RIN_VK_KHR_SWAPCHAIN_SPEC_VERSION 70u
+#define RIN_VK_RINOS_NATIVE_WINDOW_SURFACE_SPEC_VERSION 1u
 #define RIN_VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR UINT32_C(0x00000001)
 #define RIN_VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR UINT32_C(0x00000001)
 #define RIN_VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR UINT32_C(0x00000002)
@@ -943,6 +946,21 @@ typedef struct RinVkDisplaySurfaceCreateInfoKHR {
     uint32_t alphaMode;
     RinVkExtent2D imageExtent;
 } RinVkDisplaySurfaceCreateInfoKHR;
+
+/* RinOS ordinary-window surface creation. Present explicitly copies each
+ * completed application image through a transfer/readback mapping into the
+ * Compositor import callback; it does not require app images to be scanout
+ * allocations and never routes through VK_KHR_display. surface_ops points to
+ * the versioned RinRuntimeCompositorGpuSurfaceOpsV1 returned by
+ * wnd_get_gpu_surface_ops_v1(). The table is copied by value; its context and
+ * window handle must remain valid until vkDestroySurfaceKHR. */
+typedef struct RinVkRinOSNativeWindowSurfaceCreateInfoV1 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint64_t window_handle;
+    const struct RinRuntimeCompositorGpuSurfaceOpsV1* surface_ops;
+    uint64_t reserved[2];
+} RinVkRinOSNativeWindowSurfaceCreateInfoV1;
 
 typedef struct RinVkSwapchainCreateInfoKHR {
     RinVkStructureType sType;
@@ -2305,6 +2323,11 @@ vkCreateDisplayModeKHR(
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkCreateDisplayPlaneSurfaceKHR(
     RinVkInstance instance, const RinVkDisplaySurfaceCreateInfoKHR* create_info,
+    const void* allocator, RinVkSurfaceKHR* surface_out);
+RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
+vkCreateRinOSNativeWindowSurfaceV1(
+    RinVkInstance instance,
+    const RinVkRinOSNativeWindowSurfaceCreateInfoV1* create_info,
     const void* allocator, RinVkSurfaceKHR* surface_out);
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkDestroySurfaceKHR(RinVkInstance instance, RinVkSurfaceKHR surface,

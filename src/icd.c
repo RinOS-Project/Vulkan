@@ -4,6 +4,8 @@
 #include <rinvulkan/command_runtime.h>
 #include <rinvulkan/descriptor_runtime.h>
 #include <rinvulkan/graphics.h>
+#include <rin/contract_abi.h>
+#include <rinruntime/window.h>
 
 #include <float.h>
 #include <stdlib.h>
@@ -26,6 +28,7 @@
 #define RIN_VK_MAX_DISPLAYS 128u
 #define RIN_VK_MAX_DISPLAY_MODES 512u
 #define RIN_VK_MAX_DISPLAY_SURFACES 64u
+#define RIN_VK_MAX_NATIVE_WINDOW_SURFACES 64u
 #define RIN_VK_MAX_SWAPCHAINS 32u
 #define RIN_VK_MAX_SWAPCHAIN_IMAGES 8u
 #define RIN_VK_MAX_WSI_PRESENTS \
@@ -85,6 +88,7 @@
 #define RIN_VK_DISPLAY_TAG UINT64_C(0x5244)
 #define RIN_VK_DISPLAY_MODE_TAG UINT64_C(0x524f)
 #define RIN_VK_SURFACE_TAG UINT64_C(0x5259)
+#define RIN_VK_NATIVE_WINDOW_SURFACE_TAG UINT64_C(0x525a)
 #define RIN_VK_SWAPCHAIN_TAG UINT64_C(0x5257)
 #define RIN_VK_PIPELINE_CACHE_MAGIC UINT32_C(0x52494e43)
 #define RIN_VK_PIPELINE_CACHE_VERSION 1u
@@ -142,6 +146,7 @@ struct RinVkInstance_T {
     uint32_t debug_utils_enabled;
     uint32_t surface_enabled;
     uint32_t display_enabled;
+    uint32_t native_window_surface_enabled;
     RinGpuVulkanHandle runtime_handle;
     struct RinVkPhysicalDevice_T
         physical_devices[RIN_GPU_VULKAN_MAX_PHYSICAL_DEVICES];
@@ -307,13 +312,30 @@ typedef struct RinVkDisplaySurfaceSlot {
     uint64_t device_generation;
 } RinVkDisplaySurfaceSlot;
 
+typedef struct RinVkNativeWindowSurfaceSlot {
+    uint32_t state;
+    uint32_t generation;
+    uint32_t active_queries;
+    uint32_t swapchain_count;
+    struct RinVkInstance_T* owner_instance;
+    RinRuntimeGuiHandle window_handle;
+    RinRuntimeCompositorGpuSurfaceOpsV1 surface_ops;
+    uint32_t width;
+    uint32_t height;
+    uint32_t supported_frame_formats;
+    uint32_t reserved;
+    uint64_t surface_generation;
+} RinVkNativeWindowSurfaceSlot;
+
 typedef struct RinVkSwapchainSlot {
     uint32_t state;
     uint32_t generation;
     struct RinVkDevice_T* owner;
     RinVkDisplaySurfaceSlot* surface;
+    RinVkNativeWindowSurfaceSlot* native_window_surface;
     RinVkSurfaceKHR surface_handle;
     uint32_t surface_generation;
+    uint64_t native_surface_generation;
     uint64_t output_generation;
     uint64_t device_generation;
     uint64_t mode_cookie;
@@ -605,6 +627,8 @@ static RinVkDisplaySlot g_displays[RIN_VK_MAX_DISPLAYS];
 static RinVkDisplayModeSlot g_display_modes[RIN_VK_MAX_DISPLAY_MODES];
 static RinVkDisplaySurfaceSlot
     g_display_surfaces[RIN_VK_MAX_DISPLAY_SURFACES];
+static RinVkNativeWindowSurfaceSlot
+    g_native_window_surfaces[RIN_VK_MAX_NATIVE_WINDOW_SURFACES];
 static RinVkSwapchainSlot g_swapchains[RIN_VK_MAX_SWAPCHAINS];
 static RinVkImageViewSlot g_image_views[RIN_VK_MAX_IMAGE_VIEWS];
 static RinVkSamplerSlot g_samplers[RIN_VK_MAX_SAMPLERS];
@@ -642,6 +666,10 @@ static RinGpuVulkanCommandStreamStepV1
                           [RIN_GPU_VULKAN_COMMAND_STREAM_MAX_STEPS];
 static uint32_t g_command_stream_step_counts[
     RIN_GPU_VULKAN_COMMAND_MAX_BUFFERS];
+
+static RinVkResult native_window_swapchain_present(
+    struct RinVkQueue_T* queue, RinVkSwapchainSlot* swapchain,
+    uint32_t image_index);
 
 static int command_buffer_runtime_index(
         const RinGpuVulkanCommandBufferV1* command_buffer,
@@ -825,6 +853,19 @@ static int device_has_swapchains(const struct RinVkDevice_T* device) {
     return 0;
 }
 
+static int native_window_swapchains_active(void) {
+    uint32_t index;
+    for (index = 0u; index < RIN_VK_MAX_SWAPCHAINS; ++index) {
+        const RinVkSwapchainSlot* swapchain = &g_swapchains[index];
+        const uint32_t state =
+            __atomic_load_n(&swapchain->state, __ATOMIC_ACQUIRE);
+        if ((state == 1u || state == 2u) &&
+            swapchain->native_window_surface)
+            return 1;
+    }
+    return 0;
+}
+
 static int instance_has_swapchains(const struct RinVkInstance_T* instance) {
     uint32_t index;
     if (!instance) return 0;
@@ -832,8 +873,11 @@ static int instance_has_swapchains(const struct RinVkInstance_T* instance) {
         const RinVkSwapchainSlot* swapchain = &g_swapchains[index];
         const uint32_t state =
             __atomic_load_n(&swapchain->state, __ATOMIC_ACQUIRE);
-        if ((state == 1u || state == 2u) && swapchain->surface &&
-            swapchain->surface->owner_instance == instance)
+        if ((state == 1u || state == 2u) &&
+            ((swapchain->surface &&
+              swapchain->surface->owner_instance == instance) ||
+             (swapchain->native_window_surface &&
+              swapchain->native_window_surface->owner_instance == instance)))
             return 1;
     }
     return 0;
@@ -1328,6 +1372,37 @@ static RinVulkanProductPlatformV4* product_v4_for_base(
     return platform->base == base ? platform : NULL;
 }
 
+static int product_v4_memory_mapping_available_for_profile(
+        const RinGpuVulkanPhysicalDeviceV2* profile) {
+    RinVulkanProductPlatformV1* product;
+    RinVulkanProductPlatformV2* product_v2;
+    RinVulkanProductPlatformV3* product_v3;
+    RinVulkanProductPlatformV4* product_v4;
+    RinVulkanProductStatusV1 status;
+    int available = 0;
+    if (!profile || profile->iommu_domain_cookie == 0u ||
+        profile->device_epoch == 0u)
+        return 0;
+    product = acquire_product();
+    if (!product) return 0;
+    product_v2 = product_v2_for_base(product);
+    product_v3 = product_v2 ? product_v3_for_base(product_v2) : NULL;
+    product_v4 = product_v3 ? product_v4_for_base(product_v3) : NULL;
+    memset(&status, 0, sizeof(status));
+    if (product_v4 &&
+        product->get_status(product->context, &status) ==
+            RIN_VULKAN_PRODUCT_OK &&
+        status.struct_size == sizeof(status) &&
+        status.version == RIN_VULKAN_PRODUCT_PLATFORM_VERSION &&
+        status.flags == RIN_VULKAN_PRODUCT_STATUS_READY &&
+        status.iommu_domain_cookie == profile->iommu_domain_cookie &&
+        status.device_epoch == profile->device_epoch &&
+        status.queue_count != 0u)
+        available = 1;
+    release_product();
+    return available;
+}
+
 static RinVulkanWsiPlatformV1* acquire_wsi(void) {
     uint32_t attempt;
     for (attempt = 0u; attempt < RIN_VK_ICD_CALL_RETRIES; ++attempt) {
@@ -1411,6 +1486,43 @@ static int physical_profile_has_present_queue(
             return 1;
     }
     return 0;
+}
+
+static int physical_profile_supports_native_window_wsi(
+        const RinGpuVulkanPhysicalDeviceV2* profile) {
+    uint32_t queue_index;
+    uint32_t memory_index;
+    int transfer_queue = 0;
+    int cpu_visible_memory = 0;
+    if (!profile ||
+        !product_v4_memory_mapping_available_for_profile(profile) ||
+        profile->queue_family_count == 0u ||
+        profile->queue_family_count > RIN_GPU_VULKAN_MAX_QUEUE_FAMILIES ||
+        profile->memory_type_count == 0u ||
+        profile->memory_type_count > RIN_GPU_VULKAN_MAX_MEMORY_TYPES ||
+        profile->max_image_dimension_2d == 0u)
+        return 0;
+    for (queue_index = 0u; queue_index < profile->queue_family_count;
+         ++queue_index) {
+        const RinGpuVulkanQueueFamilyV1* queue =
+            &profile->queue_families[queue_index];
+        if (queue->queue_count != 0u &&
+            (queue->flags & (RIN_GPU_VK_QUEUE_TRANSFER |
+                             RIN_GPU_VK_QUEUE_GRAPHICS |
+                             RIN_GPU_VK_QUEUE_COMPUTE)) != 0u) {
+            transfer_queue = 1;
+            break;
+        }
+    }
+    for (memory_index = 0u; memory_index < profile->memory_type_count;
+         ++memory_index) {
+        if ((profile->memory_types[memory_index].property_flags &
+             RIN_GPU_VK_MEMORY_HOST_VISIBLE) != 0u) {
+            cpu_visible_memory = 1;
+            break;
+        }
+    }
+    return transfer_queue && cpu_visible_memory;
 }
 
 static RinVkResult map_result(int result) {
@@ -1712,6 +1824,32 @@ static RinVkDisplaySurfaceSlot* reserve_display_surface_slot(
     return NULL;
 }
 
+static RinVkNativeWindowSurfaceSlot* reserve_native_window_surface_slot(
+        uint32_t* index_out) {
+    uint32_t index;
+    for (index = 0u; index < RIN_VK_MAX_NATIVE_WINDOW_SURFACES; ++index) {
+        RinVkNativeWindowSurfaceSlot* slot =
+            &g_native_window_surfaces[index];
+        uint32_t expected = 0u;
+        uint32_t generation;
+        if (!__atomic_compare_exchange_n(&slot->state, &expected, 2u, 0,
+                                         __ATOMIC_ACQUIRE,
+                                         __ATOMIC_RELAXED))
+            continue;
+        generation = slot->generation;
+        if (generation == UINT32_MAX) {
+            __atomic_store_n(&slot->state, 3u, __ATOMIC_RELEASE);
+            continue;
+        }
+        memset(slot, 0, sizeof(*slot));
+        slot->generation = generation + 1u;
+        __atomic_store_n(&slot->state, 2u, __ATOMIC_RELEASE);
+        *index_out = index;
+        return slot;
+    }
+    return NULL;
+}
+
 static void clear_display_mode_slot(RinVkDisplayModeSlot* slot) {
     uint32_t generation;
     if (!slot) return;
@@ -1722,6 +1860,19 @@ static void clear_display_mode_slot(RinVkDisplayModeSlot* slot) {
 }
 
 static void clear_display_surface_slot(RinVkDisplaySurfaceSlot* slot) {
+    uint32_t generation;
+    if (!slot) return;
+    if (__atomic_load_n(&slot->active_queries, __ATOMIC_ACQUIRE) != 0u ||
+        __atomic_load_n(&slot->swapchain_count, __ATOMIC_ACQUIRE) != 0u)
+        return;
+    generation = slot->generation;
+    memset(slot, 0, sizeof(*slot));
+    slot->generation = generation;
+    __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
+}
+
+static void clear_native_window_surface_slot(
+        RinVkNativeWindowSurfaceSlot* slot) {
     uint32_t generation;
     if (!slot) return;
     if (__atomic_load_n(&slot->active_queries, __ATOMIC_ACQUIRE) != 0u ||
@@ -1756,6 +1907,103 @@ static int wsi_zero_u32_words(const uint32_t* values, uint32_t count) {
     for (index = 0u; index < count; ++index)
         if (values[index] != 0u) return 0;
     return 1;
+}
+
+static RinVkResult native_window_query_ops(
+        const RinRuntimeCompositorGpuSurfaceOpsV1* ops,
+        RinRuntimeGuiHandle window_handle,
+        RinRuntimeCompositorGpuSurfaceV1* snapshot_out) {
+    RinRuntimeCompositorGpuSurfaceV1 snapshot;
+    int callback_result;
+    if (!ops || !snapshot_out || window_handle == 0u ||
+        ops->struct_size != sizeof(*ops) ||
+        ops->version != RIN_RUNTIME_COMPOSITOR_GPU_SURFACE_OPS_V1_VERSION ||
+        !ops->query || !ops->import_frame ||
+        !wsi_zero_words(ops->reserved, 2u))
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    memset(&snapshot, 0, sizeof(snapshot));
+    snapshot.struct_size = sizeof(snapshot);
+    snapshot.version = RIN_RUNTIME_COMPOSITOR_GPU_SURFACE_V1_VERSION;
+    callback_result = ops->query(ops->context, window_handle, &snapshot);
+    if (callback_result == RIN_RESULT_BUSY ||
+        callback_result == RIN_ERROR_BUSY ||
+        callback_result == RIN_ERROR_WOULD_BLOCK)
+        return RIN_VK_NOT_READY;
+    if (callback_result != RIN_RESULT_OK)
+        return RIN_VK_ERROR_SURFACE_LOST_KHR;
+    if (snapshot.struct_size != sizeof(snapshot) ||
+        snapshot.version != RIN_RUNTIME_COMPOSITOR_GPU_SURFACE_V1_VERSION ||
+        snapshot.width == 0u || snapshot.height == 0u ||
+        snapshot.surface_generation == 0u || snapshot.reserved0 != 0u ||
+        snapshot.supported_frame_formats == 0u ||
+        (snapshot.supported_frame_formats &
+         ~(RIN_RUNTIME_COMPOSITOR_GPU_SURFACE_FORMAT_BGRA8_BIT |
+           RIN_RUNTIME_COMPOSITOR_GPU_SURFACE_FORMAT_RGBA8_BIT)) != 0u ||
+        !wsi_zero_words(snapshot.reserved, 2u))
+        return RIN_VK_ERROR_SURFACE_LOST_KHR;
+    *snapshot_out = snapshot;
+    return RIN_VK_SUCCESS;
+}
+
+static RinVkResult native_window_surface_snapshot(
+        RinVkSurfaceKHR surface_handle,
+        struct RinVkInstance_T* expected_instance,
+        RinRuntimeCompositorGpuSurfaceV1* snapshot_out,
+        RinVkNativeWindowSurfaceSlot** surface_out) {
+    uint32_t index_field = (uint32_t)(surface_handle & UINT64_C(0xffff));
+    uint32_t generation = (uint32_t)(surface_handle >> 16u);
+    RinVkNativeWindowSurfaceSlot* surface;
+    RinRuntimeCompositorGpuSurfaceOpsV1 ops;
+    RinRuntimeCompositorGpuSurfaceV1 snapshot;
+    RinRuntimeGuiHandle window_handle;
+    RinVkResult result;
+    if (snapshot_out) memset(snapshot_out, 0, sizeof(*snapshot_out));
+    if (surface_out) *surface_out = NULL;
+    if (!snapshot_out || (surface_handle >> 48u) !=
+                             RIN_VK_NATIVE_WINDOW_SURFACE_TAG ||
+        index_field == 0u ||
+        index_field > RIN_VK_MAX_NATIVE_WINDOW_SURFACES || generation == 0u)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    surface = &g_native_window_surfaces[index_field - 1u];
+    sync_lock();
+    if (__atomic_load_n(&surface->state, __ATOMIC_ACQUIRE) != 1u ||
+        surface->generation != generation || !surface->owner_instance ||
+        (expected_instance && surface->owner_instance != expected_instance)) {
+        sync_unlock();
+        return RIN_VK_ERROR_SURFACE_LOST_KHR;
+    }
+    if (surface->active_queries == UINT32_MAX) {
+        sync_unlock();
+        return RIN_VK_ERROR_TOO_MANY_OBJECTS;
+    }
+    __atomic_add_fetch(&surface->active_queries, 1u, __ATOMIC_ACQUIRE);
+    ops = surface->surface_ops;
+    window_handle = surface->window_handle;
+    sync_unlock();
+
+    result = native_window_query_ops(&ops, window_handle, &snapshot);
+    sync_lock();
+    if (result == RIN_VK_SUCCESS &&
+        (__atomic_load_n(&surface->state, __ATOMIC_ACQUIRE) != 1u ||
+        surface->generation != generation ||
+         (expected_instance &&
+          surface->owner_instance != expected_instance)))
+        result = RIN_VK_ERROR_OUT_OF_DATE_KHR;
+    if (result == RIN_VK_SUCCESS) {
+        surface->width = snapshot.width;
+        surface->height = snapshot.height;
+        surface->supported_frame_formats =
+            snapshot.supported_frame_formats;
+        surface->surface_generation = snapshot.surface_generation;
+        *snapshot_out = snapshot;
+        if (surface_out) *surface_out = surface;
+    }
+    __atomic_sub_fetch(&surface->active_queries, 1u, __ATOMIC_RELEASE);
+    if (__atomic_load_n(&surface->state, __ATOMIC_ACQUIRE) == 2u &&
+        __atomic_load_n(&surface->active_queries, __ATOMIC_ACQUIRE) == 0u)
+        clear_native_window_surface_slot(surface);
+    sync_unlock();
+    return result;
 }
 
 static RinVkResult map_wsi_platform_result(int result) {
@@ -5096,7 +5344,8 @@ int rin_gpu_vulkan_icd_unbind_product_platform(
         return RIN_GPU_VULKAN_BUSY;
     }
     if (__atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
-        resource_slots_active() || submission_slots_active()) {
+        resource_slots_active() || submission_slots_active() ||
+        native_window_swapchains_active()) {
         __atomic_store_n(&g_product_binding, (uintptr_t)platform,
                          __ATOMIC_RELEASE);
         return RIN_GPU_VULKAN_BUSY;
@@ -5187,7 +5436,8 @@ int rin_gpu_vulkan_icd_unbind_product_platform_v2(
         return RIN_GPU_VULKAN_BUSY;
     }
     if (__atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
-        resource_slots_active() || submission_slots_active()) {
+        resource_slots_active() || submission_slots_active() ||
+        native_window_swapchains_active()) {
         __atomic_store_n(&g_product_binding,
                          (uintptr_t)platform->base,
                          __ATOMIC_RELEASE);
@@ -5247,7 +5497,8 @@ int rin_gpu_vulkan_icd_unbind_product_platform_v3(
         platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V3_VERSION ||
         !platform->base ||
         __atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
-        resource_slots_active() || submission_slots_active()) {
+        resource_slots_active() || submission_slots_active() ||
+        native_window_swapchains_active()) {
         __atomic_store_n(&g_product_binding_v3, (uintptr_t)platform,
                          __ATOMIC_RELEASE);
         return RIN_GPU_VULKAN_BUSY;
@@ -5304,7 +5555,8 @@ int rin_gpu_vulkan_icd_unbind_product_platform_v4(
         platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V4_VERSION ||
         !platform->base || !platform->context ||
         __atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
-        resource_slots_active() || submission_slots_active()) {
+        resource_slots_active() || submission_slots_active() ||
+        native_window_swapchains_active()) {
         __atomic_store_n(&g_product_binding_v4, (uintptr_t)platform,
                          __ATOMIC_RELEASE);
         return RIN_GPU_VULKAN_BUSY;
@@ -5578,7 +5830,7 @@ RinVkResult RIN_VKAPI_CALL vkEnumerateInstanceVersion(
 RinVkResult RIN_VKAPI_CALL vkEnumerateInstanceExtensionProperties(
         const char* layer_name, uint32_t* property_count,
         RinVkExtensionProperties* properties) {
-    RinVkExtensionProperties extensions[3];
+    RinVkExtensionProperties extensions[4];
     uint32_t capacity;
     uint32_t available = 1u;
     uint32_t count;
@@ -5592,15 +5844,22 @@ RinVkResult RIN_VKAPI_CALL vkEnumerateInstanceExtensionProperties(
     memcpy(extensions[0].extensionName, RIN_VK_EXT_DEBUG_UTILS_EXTENSION,
            sizeof(RIN_VK_EXT_DEBUG_UTILS_EXTENSION));
     extensions[0].specVersion = RIN_VK_DEBUG_UTILS_SPEC_VERSION;
+    memcpy(extensions[1].extensionName, RIN_VK_KHR_SURFACE_EXTENSION,
+           sizeof(RIN_VK_KHR_SURFACE_EXTENSION));
+    extensions[1].specVersion = RIN_VK_KHR_SURFACE_SPEC_VERSION;
+    available = 2u;
     if (wsi_display_surface_available()) {
-        memcpy(extensions[1].extensionName, RIN_VK_KHR_SURFACE_EXTENSION,
-               sizeof(RIN_VK_KHR_SURFACE_EXTENSION));
-        extensions[1].specVersion = RIN_VK_KHR_SURFACE_SPEC_VERSION;
         memcpy(extensions[2].extensionName, RIN_VK_KHR_DISPLAY_EXTENSION,
                sizeof(RIN_VK_KHR_DISPLAY_EXTENSION));
         extensions[2].specVersion = RIN_VK_KHR_DISPLAY_SPEC_VERSION;
         available = 3u;
     }
+    memcpy(extensions[available].extensionName,
+           RIN_VK_RINOS_NATIVE_WINDOW_SURFACE_EXTENSION,
+           sizeof(RIN_VK_RINOS_NATIVE_WINDOW_SURFACE_EXTENSION));
+    extensions[available].specVersion =
+        RIN_VK_RINOS_NATIVE_WINDOW_SURFACE_SPEC_VERSION;
+    ++available;
     capacity = *property_count;
     if (!properties) {
         *property_count = available;
@@ -5916,6 +6175,7 @@ RinVkResult RIN_VKAPI_CALL vkEnumerateDeviceExtensionProperties(
     uint32_t available = 3u;
     uint32_t count;
     uint32_t index;
+    int swapchain_available = 0;
     if (!property_count) return RIN_VK_ERROR_INITIALIZATION_FAILED;
     if (!physical_slot(physical_device, NULL))
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
@@ -5925,11 +6185,15 @@ RinVkResult RIN_VKAPI_CALL vkEnumerateDeviceExtensionProperties(
     }
     memset(extensions, 0, sizeof(extensions));
     if (get_physical_profile(physical_device, &profile) ==
-            RIN_GPU_VULKAN_OK &&
-        wsi_display_surface_available() &&
-        physical_profile_has_present_queue(&profile) &&
-        wsi_resolve_device_generation(&profile, &device_generation) ==
-            RIN_VK_SUCCESS && device_generation != 0u) {
+        RIN_GPU_VULKAN_OK) {
+        swapchain_available =
+            physical_profile_supports_native_window_wsi(&profile);
+        if (wsi_display_surface_available() &&
+            wsi_resolve_device_generation(&profile, &device_generation) ==
+                RIN_VK_SUCCESS && device_generation != 0u)
+            swapchain_available = 1;
+    }
+    if (swapchain_available) {
         memcpy(extensions[3].extensionName, RIN_VK_KHR_SWAPCHAIN_EXTENSION,
                sizeof(RIN_VK_KHR_SWAPCHAIN_EXTENSION));
         extensions[3].specVersion = RIN_VK_KHR_SWAPCHAIN_SPEC_VERSION;
@@ -6657,10 +6921,78 @@ RinVkResult RIN_VKAPI_CALL vkCreateDisplayPlaneSurfaceKHR(
     return RIN_VK_SUCCESS;
 }
 
+RinVkResult RIN_VKAPI_CALL vkCreateRinOSNativeWindowSurfaceV1(
+        RinVkInstance instance_handle,
+        const RinVkRinOSNativeWindowSurfaceCreateInfoV1* create_info,
+        const void* allocator, RinVkSurfaceKHR* surface_out) {
+    struct RinVkInstance_T* instance = instance_slot(instance_handle);
+    RinVkNativeWindowSurfaceSlot* surface;
+    RinRuntimeCompositorGpuSurfaceV1 snapshot;
+    uint32_t slot_index = 0u;
+    RinVkResult result;
+    (void)allocator;
+    if (!surface_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    *surface_out = 0u;
+    if (!instance || !create_info ||
+        !instance->surface_enabled ||
+        !instance->native_window_surface_enabled ||
+        create_info->struct_size != sizeof(*create_info) ||
+        create_info->version !=
+            RIN_VK_RINOS_NATIVE_WINDOW_SURFACE_SPEC_VERSION ||
+        create_info->window_handle == 0u || !create_info->surface_ops ||
+        !wsi_zero_words(create_info->reserved, 2u))
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    result = native_window_query_ops(create_info->surface_ops,
+                                     create_info->window_handle, &snapshot);
+    if (result != RIN_VK_SUCCESS) return result;
+    surface = reserve_native_window_surface_slot(&slot_index);
+    if (!surface) return RIN_VK_ERROR_TOO_MANY_OBJECTS;
+    surface->owner_instance = instance;
+    surface->window_handle = create_info->window_handle;
+    surface->surface_ops = *create_info->surface_ops;
+    surface->width = snapshot.width;
+    surface->height = snapshot.height;
+    surface->supported_frame_formats = snapshot.supported_frame_formats;
+    surface->surface_generation = snapshot.surface_generation;
+    if (__atomic_load_n(&instance->state, __ATOMIC_ACQUIRE) != 1u) {
+        clear_native_window_surface_slot(surface);
+        return RIN_VK_ERROR_SURFACE_LOST_KHR;
+    }
+    __atomic_store_n(&surface->state, 1u, __ATOMIC_RELEASE);
+    *surface_out = resource_handle(RIN_VK_NATIVE_WINDOW_SURFACE_TAG,
+                                   slot_index, surface->generation);
+    return RIN_VK_SUCCESS;
+}
+
 void RIN_VKAPI_CALL vkDestroySurfaceKHR(RinVkInstance instance_handle,
                                         RinVkSurfaceKHR surface_handle,
                                         const void* allocator) {
     struct RinVkInstance_T* instance = instance_slot(instance_handle);
+    if ((surface_handle >> 48u) == RIN_VK_NATIVE_WINDOW_SURFACE_TAG) {
+        uint32_t index_field =
+            (uint32_t)(surface_handle & UINT64_C(0xffff));
+        uint32_t generation = (uint32_t)(surface_handle >> 16u);
+        RinVkNativeWindowSurfaceSlot* surface;
+        (void)allocator;
+        if (!instance || index_field == 0u ||
+            index_field > RIN_VK_MAX_NATIVE_WINDOW_SURFACES ||
+            generation == 0u)
+            return;
+        surface = &g_native_window_surfaces[index_field - 1u];
+        sync_lock();
+        if (__atomic_load_n(&surface->state, __ATOMIC_ACQUIRE) == 1u &&
+            surface->generation == generation &&
+            surface->owner_instance == instance &&
+            __atomic_load_n(&surface->swapchain_count, __ATOMIC_ACQUIRE) ==
+                0u) {
+            __atomic_store_n(&surface->state, 2u, __ATOMIC_RELEASE);
+            if (__atomic_load_n(&surface->active_queries,
+                                __ATOMIC_ACQUIRE) == 0u)
+                clear_native_window_surface_slot(surface);
+        }
+        sync_unlock();
+        return;
+    }
     uint32_t index_field = (uint32_t)(surface_handle & UINT64_C(0xffff));
     uint32_t generation = (uint32_t)(surface_handle >> 16u);
     RinVkDisplaySurfaceSlot* surface;
@@ -6949,6 +7281,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateInstance(
     uint32_t debug_utils_enabled = 0u;
     uint32_t surface_enabled = 0u;
     uint32_t display_enabled = 0u;
+    uint32_t native_window_surface_enabled = 0u;
     int result;
     (void)allocator;
 
@@ -6961,7 +7294,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateInstance(
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
     /* Instance layers are owned and dispatched by the Vulkan loader.  The
      * enabled layer names may remain in the ICD call; do not resolve them. */
-    if (create_info->enabledExtensionCount > 3u ||
+    if (create_info->enabledExtensionCount > 4u ||
         (create_info->enabledExtensionCount != 0u &&
          !create_info->ppEnabledExtensionNames))
         return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
@@ -6980,13 +7313,16 @@ RinVkResult RIN_VKAPI_CALL vkCreateInstance(
             surface_enabled = 1u;
         } else if (name_equal(name, RIN_VK_KHR_DISPLAY_EXTENSION)) {
             display_enabled = 1u;
+        } else if (name_equal(
+                       name, RIN_VK_RINOS_NATIVE_WINDOW_SURFACE_EXTENSION)) {
+            native_window_surface_enabled = 1u;
         } else {
             return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
     }
     }
     if ((display_enabled && !surface_enabled) ||
-        ((surface_enabled || display_enabled) &&
-         !wsi_display_surface_available()))
+        (native_window_surface_enabled && !surface_enabled) ||
+        (display_enabled && !wsi_display_surface_available()))
         return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
     if (!collect_instance_create_chain(create_info->pNext,
                                        debug_utils_enabled,
@@ -7044,6 +7380,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateInstance(
     slot->debug_utils_enabled = debug_utils_enabled;
     slot->surface_enabled = surface_enabled;
     slot->display_enabled = display_enabled;
+    slot->native_window_surface_enabled = native_window_surface_enabled;
     slot->runtime_handle = 0u;
     result = call_create_instance(runtime, &request, &slot->runtime_handle);
     release_runtime();
@@ -7057,6 +7394,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateInstance(
         slot->debug_utils_enabled = 0u;
         slot->surface_enabled = 0u;
         slot->display_enabled = 0u;
+        slot->native_window_surface_enabled = 0u;
         slot->runtime_handle = 0u;
         __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
         return map_result(result);
@@ -7107,6 +7445,7 @@ void RIN_VKAPI_CALL vkDestroyInstance(RinVkInstance instance,
     slot->debug_utils_enabled = 0u;
     slot->surface_enabled = 0u;
     slot->display_enabled = 0u;
+    slot->native_window_surface_enabled = 0u;
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
 }
 
@@ -7125,6 +7464,22 @@ static void wsi_cleanup_instance(struct RinVkInstance_T* instance) {
                 if (__atomic_load_n(&surface->active_queries,
                                     __ATOMIC_ACQUIRE) == 0u)
                     clear_display_surface_slot(surface);
+                else
+                    ++active;
+            }
+        }
+        for (index = 0u; index < RIN_VK_MAX_NATIVE_WINDOW_SURFACES;
+             ++index) {
+            RinVkNativeWindowSurfaceSlot* surface =
+                &g_native_window_surfaces[index];
+            if (__atomic_load_n(&surface->state, __ATOMIC_ACQUIRE) != 0u &&
+                surface->owner_instance == instance) {
+                __atomic_store_n(&surface->state, 2u, __ATOMIC_RELEASE);
+                if (__atomic_load_n(&surface->active_queries,
+                                    __ATOMIC_ACQUIRE) == 0u &&
+                    __atomic_load_n(&surface->swapchain_count,
+                                    __ATOMIC_ACQUIRE) == 0u)
+                    clear_native_window_surface_slot(surface);
                 else
                     ++active;
             }
@@ -7241,6 +7596,25 @@ RinVkResult RIN_VKAPI_CALL vkGetPhysicalDeviceSurfaceSupportKHR(
     if (!supported_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
     *supported_out = 0u;
     physical = physical_slot(physical_device, &instance);
+    if (physical &&
+        (surface_handle >> 48u) == RIN_VK_NATIVE_WINDOW_SURFACE_TAG) {
+        RinRuntimeCompositorGpuSurfaceV1 snapshot;
+        uint32_t transfer_flags;
+        result = get_physical_profile(physical_device, &profile);
+        if (result != RIN_GPU_VULKAN_OK) return map_result(result);
+        result = native_window_surface_snapshot(surface_handle, instance,
+                                                &snapshot, NULL);
+        if (result != RIN_VK_SUCCESS) return result;
+        if (queue_family_index >= profile.queue_family_count)
+            return RIN_VK_ERROR_INITIALIZATION_FAILED;
+        transfer_flags = profile.queue_families[queue_family_index].flags &
+            (RIN_GPU_VK_QUEUE_TRANSFER | RIN_GPU_VK_QUEUE_GRAPHICS |
+             RIN_GPU_VK_QUEUE_COMPUTE);
+        *supported_out =
+            profile.queue_families[queue_family_index].queue_count != 0u &&
+            transfer_flags != 0u;
+        return RIN_VK_SUCCESS;
+    }
     if (!physical || (surface_handle >> 48u) != RIN_VK_SURFACE_TAG ||
         index_field == 0u || index_field > RIN_VK_MAX_DISPLAY_SURFACES ||
         generation == 0u)
@@ -7557,6 +7931,78 @@ static int surface_properties_valid(
     return 1;
 }
 
+static RinVkResult query_native_window_surface_properties(
+        RinVkPhysicalDevice physical_device,
+        RinVkSurfaceKHR surface_handle,
+        RinVulkanWsiSurfacePropertiesV4* properties_out) {
+    struct RinVkInstance_T* instance = NULL;
+    struct RinVkPhysicalDevice_T* physical;
+    RinGpuVulkanPhysicalDeviceV2 profile;
+    RinRuntimeCompositorGpuSurfaceV1 snapshot;
+    RinVkNativeWindowSurfaceSlot* surface = NULL;
+    RinVkFormatProperties format_properties;
+    RinVulkanWsiSurfacePropertiesV4 properties;
+    RinVkResult result;
+    int profile_result;
+    if (!properties_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    memset(properties_out, 0, sizeof(*properties_out));
+    physical = physical_slot(physical_device, &instance);
+    if (!physical || !instance || !instance->surface_enabled ||
+        (surface_handle >> 48u) != RIN_VK_NATIVE_WINDOW_SURFACE_TAG)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    profile_result = get_physical_profile(physical_device, &profile);
+    if (profile_result != RIN_GPU_VULKAN_OK) return map_result(profile_result);
+    result = native_window_surface_snapshot(surface_handle, instance,
+                                            &snapshot, &surface);
+    if (result != RIN_VK_SUCCESS) return result;
+    if (!surface || profile.max_image_dimension_2d == 0u ||
+        snapshot.width > profile.max_image_dimension_2d ||
+        snapshot.height > profile.max_image_dimension_2d ||
+        (snapshot.supported_frame_formats &
+         RIN_RUNTIME_COMPOSITOR_GPU_SURFACE_FORMAT_RGBA8_BIT) == 0u)
+        return RIN_VK_ERROR_FORMAT_NOT_SUPPORTED;
+    memset(&format_properties, 0, sizeof(format_properties));
+    vkGetPhysicalDeviceFormatProperties(
+        physical_device, RIN_VK_FORMAT_R8G8B8A8_UNORM,
+        &format_properties);
+    if ((format_properties.optimalTilingFeatures &
+         RIN_VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) == 0u)
+        return RIN_VK_ERROR_FORMAT_NOT_SUPPORTED;
+
+    memset(&properties, 0, sizeof(properties));
+    properties.struct_size = sizeof(properties);
+    properties.version = RIN_VULKAN_WSI_PLATFORM_V4_VERSION;
+    properties.min_image_count = 2u;
+    properties.max_image_count = RIN_VK_MAX_SWAPCHAIN_IMAGES;
+    properties.current_extent_width = snapshot.width;
+    properties.current_extent_height = snapshot.height;
+    properties.min_image_extent_width = 1u;
+    properties.min_image_extent_height = 1u;
+    properties.max_image_extent_width = profile.max_image_dimension_2d;
+    properties.max_image_extent_height = profile.max_image_dimension_2d;
+    properties.max_image_array_layers = 1u;
+    properties.supported_transforms =
+        RIN_VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    properties.current_transform =
+        RIN_VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    properties.supported_composite_alpha =
+        RIN_VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    properties.supported_usage_flags =
+        RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+        RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+        RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    properties.format_count = 1u;
+    properties.formats[0].format = RIN_VK_FORMAT_R8G8B8A8_UNORM;
+    properties.formats[0].color_space =
+        RIN_VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    properties.present_mode_count = 1u;
+    properties.present_modes[0] = RIN_VK_PRESENT_MODE_FIFO_KHR;
+    if (!surface_properties_valid(&properties, &profile))
+        return RIN_VK_ERROR_DEVICE_LOST;
+    *properties_out = properties;
+    return RIN_VK_SUCCESS;
+}
+
 static RinVkResult query_surface_properties_v4(
         RinVkPhysicalDevice physical_device, RinVkSurfaceKHR surface_handle,
         RinVulkanWsiSurfacePropertiesV4* properties_out) {
@@ -7568,6 +8014,9 @@ static RinVkResult query_surface_properties_v4(
     int platform_result;
     if (!properties_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
     memset(properties_out, 0, sizeof(*properties_out));
+    if ((surface_handle >> 48u) == RIN_VK_NATIVE_WINDOW_SURFACE_TAG)
+        return query_native_window_surface_properties(
+            physical_device, surface_handle, properties_out);
     result = begin_surface_query(physical_device, surface_handle,
                                  &profile, &lease);
     if (result != RIN_VK_SUCCESS) return result;
@@ -7705,7 +8154,19 @@ static void clear_swapchain_slot(RinVkSwapchainSlot* slot) {
 
 static int swapchain_surface_current(const RinVkSwapchainSlot* swapchain) {
     const RinVkDisplaySurfaceSlot* surface;
-    if (!swapchain || !swapchain->surface) return 0;
+    if (!swapchain) return 0;
+    if (swapchain->native_window_surface) {
+        const RinVkNativeWindowSurfaceSlot* native_surface =
+            swapchain->native_window_surface;
+        return __atomic_load_n(&native_surface->state, __ATOMIC_ACQUIRE) ==
+                   1u &&
+               native_surface->generation == swapchain->surface_generation &&
+               native_surface->surface_generation ==
+                   swapchain->native_surface_generation &&
+               native_surface->width == swapchain->image_extent.width &&
+               native_surface->height == swapchain->image_extent.height;
+    }
+    if (!swapchain->surface) return 0;
     surface = swapchain->surface;
     return __atomic_load_n(&surface->state, __ATOMIC_ACQUIRE) == 1u &&
            surface->generation == swapchain->surface_generation &&
@@ -8118,16 +8579,21 @@ RinVkResult RIN_VKAPI_CALL vkCreateSwapchainKHR(
     RinVkSurfaceQueryLease lease;
     RinVkSwapchainSlot* swapchain = NULL;
     RinVkSwapchainSlot* old_swapchain = NULL;
+    RinVkNativeWindowSurfaceSlot* native_surface = NULL;
+    RinRuntimeCompositorGpuSurfaceV1 native_snapshot;
+    struct RinVkInstance_T* surface_instance = NULL;
     uint32_t slot_index = 0u;
     uint32_t index;
     uint32_t supported_queue = 0u;
     RinVkResult result = RIN_VK_ERROR_INITIALIZATION_FAILED;
     int surface_counted = 0;
+    int native_surface_counted = 0;
     (void)allocator;
 
     if (!swapchain_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
     *swapchain_out = 0u;
     memset(&lease, 0, sizeof(lease));
+    memset(&native_snapshot, 0, sizeof(native_snapshot));
     if (!device || !create_info ||
         create_info->sType != RIN_VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR ||
         create_info->pNext || create_info->flags != 0u ||
@@ -8141,8 +8607,22 @@ RinVkResult RIN_VKAPI_CALL vkCreateSwapchainKHR(
         create_info->presentMode > RIN_VK_PRESENT_MODE_FIFO_RELAXED_KHR)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
 
-    result = begin_surface_query((RinVkPhysicalDevice)device->physical_device,
-                                 create_info->surface, &profile, &lease);
+    if ((create_info->surface >> 48u) ==
+        RIN_VK_NATIVE_WINDOW_SURFACE_TAG) {
+        if (!physical_slot((RinVkPhysicalDevice)device->physical_device,
+                           &surface_instance) ||
+            !surface_instance ||
+            surface_instance->runtime_handle != device->owner_instance)
+            return RIN_VK_ERROR_INITIALIZATION_FAILED;
+        profile = device->physical_profile;
+        result = native_window_surface_snapshot(
+            create_info->surface, surface_instance, &native_snapshot,
+            &native_surface);
+    } else {
+        result = begin_surface_query(
+            (RinVkPhysicalDevice)device->physical_device,
+            create_info->surface, &profile, &lease);
+    }
     if (result != RIN_VK_SUCCESS) return result;
     if (profile.device_epoch != device->physical_profile.device_epoch ||
         profile.device_epoch != device->plan.device_epoch) {
@@ -8198,8 +8678,16 @@ RinVkResult RIN_VKAPI_CALL vkCreateSwapchainKHR(
     if (create_info->oldSwapchain != 0u) {
         old_swapchain = swapchain_slot(device_handle,
                                        create_info->oldSwapchain);
-        if (!old_swapchain || old_swapchain->surface != lease.surface ||
-            old_swapchain->surface_generation != lease.surface_generation) {
+        if (!old_swapchain ||
+            (native_surface
+                 ? (old_swapchain->native_window_surface != native_surface ||
+                    old_swapchain->surface_generation !=
+                        native_surface->generation ||
+                    old_swapchain->native_surface_generation !=
+                        native_snapshot.surface_generation)
+                 : (old_swapchain->surface != lease.surface ||
+                    old_swapchain->surface_generation !=
+                        lease.surface_generation))) {
             result = RIN_VK_ERROR_INITIALIZATION_FAILED;
             goto done;
         }
@@ -8211,16 +8699,24 @@ RinVkResult RIN_VKAPI_CALL vkCreateSwapchainKHR(
     }
     swapchain->owner = device;
     swapchain->surface = lease.surface;
+    swapchain->native_window_surface = native_surface;
     swapchain->surface_handle = create_info->surface;
-    swapchain->surface_generation = lease.surface_generation;
-    swapchain->output_generation = lease.output_generation;
-    swapchain->device_generation = lease.device_generation;
-    swapchain->mode_cookie = lease.mode_cookie;
+    swapchain->surface_generation = native_surface
+                                       ? native_surface->generation
+                                       : lease.surface_generation;
+    swapchain->native_surface_generation =
+        native_surface ? native_snapshot.surface_generation : 0u;
+    swapchain->output_generation = native_surface ? 0u
+                                                  : lease.output_generation;
+    swapchain->device_generation = native_surface ? 0u
+                                                  : lease.device_generation;
+    swapchain->mode_cookie = native_surface ? 0u : lease.mode_cookie;
     swapchain->present_mode = create_info->presentMode;
     swapchain->image_format = create_info->imageFormat;
     swapchain->image_color_space = create_info->imageColorSpace;
     swapchain->image_extent = create_info->imageExtent;
-    swapchain->image_usage = create_info->imageUsage;
+    swapchain->image_usage = create_info->imageUsage |
+        (native_surface ? RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0u);
     swapchain->presentation_display_id = slot_index + 1u;
     swapchain->next_frame_id = 1u;
     for (index = 0u; index < create_info->minImageCount; ++index) {
@@ -8228,17 +8724,33 @@ RinVkResult RIN_VKAPI_CALL vkCreateSwapchainKHR(
         if (result != RIN_VK_SUCCESS) goto rollback;
     }
     sync_lock();
-    if (__atomic_load_n(&lease.surface->state, __ATOMIC_ACQUIRE) != 1u ||
-        lease.surface->generation != lease.surface_generation ||
-        lease.surface->swapchain_count == UINT32_MAX) {
-        sync_unlock();
-        result = RIN_VK_ERROR_OUT_OF_DATE_KHR;
-        goto rollback;
+    if (native_surface) {
+        if (__atomic_load_n(&native_surface->state, __ATOMIC_ACQUIRE) != 1u ||
+            native_surface->generation != swapchain->surface_generation ||
+            native_surface->surface_generation !=
+                swapchain->native_surface_generation ||
+            native_surface->swapchain_count == UINT32_MAX) {
+            sync_unlock();
+            result = RIN_VK_ERROR_OUT_OF_DATE_KHR;
+            goto rollback;
+        }
+        __atomic_add_fetch(&native_surface->swapchain_count, 1u,
+                           __ATOMIC_RELEASE);
+        native_surface_counted = 1;
+    } else {
+        if (__atomic_load_n(&lease.surface->state, __ATOMIC_ACQUIRE) != 1u ||
+            lease.surface->generation != lease.surface_generation ||
+            lease.surface->swapchain_count == UINT32_MAX) {
+            sync_unlock();
+            result = RIN_VK_ERROR_OUT_OF_DATE_KHR;
+            goto rollback;
+        }
+        __atomic_add_fetch(&lease.surface->swapchain_count, 1u,
+                           __ATOMIC_RELEASE);
+        surface_counted = 1;
     }
-    __atomic_add_fetch(&lease.surface->swapchain_count, 1u, __ATOMIC_RELEASE);
-    surface_counted = 1;
     sync_unlock();
-    result = end_surface_query(&lease);
+    result = lease.surface ? end_surface_query(&lease) : RIN_VK_SUCCESS;
     memset(&lease, 0, sizeof(lease));
     if (result != RIN_VK_SUCCESS) goto rollback;
     __atomic_store_n(&swapchain->state, 1u, __ATOMIC_RELEASE);
@@ -8249,6 +8761,16 @@ RinVkResult RIN_VKAPI_CALL vkCreateSwapchainKHR(
     return RIN_VK_SUCCESS;
 
 rollback:
+    if (native_surface_counted && swapchain &&
+        swapchain->native_window_surface) {
+        RinVkNativeWindowSurfaceSlot* surface =
+            swapchain->native_window_surface;
+        __atomic_sub_fetch(&surface->swapchain_count, 1u, __ATOMIC_RELEASE);
+        native_surface_counted = 0;
+        if (__atomic_load_n(&surface->state, __ATOMIC_ACQUIRE) == 2u &&
+            __atomic_load_n(&surface->active_queries, __ATOMIC_ACQUIRE) == 0u)
+            clear_native_window_surface_slot(surface);
+    }
     if (surface_counted && swapchain && swapchain->surface) {
         RinVkDisplaySurfaceSlot* surface = swapchain->surface;
         __atomic_sub_fetch(&surface->swapchain_count, 1u, __ATOMIC_RELEASE);
@@ -8278,6 +8800,15 @@ done:
                             __ATOMIC_ACQUIRE) == 0u)
             clear_display_surface_slot(swapchain->surface);
     }
+    if (native_surface_counted && swapchain &&
+        swapchain->native_window_surface) {
+        RinVkNativeWindowSurfaceSlot* surface =
+            swapchain->native_window_surface;
+        __atomic_sub_fetch(&surface->swapchain_count, 1u, __ATOMIC_RELEASE);
+        if (__atomic_load_n(&surface->state, __ATOMIC_ACQUIRE) == 2u &&
+            __atomic_load_n(&surface->active_queries, __ATOMIC_ACQUIRE) == 0u)
+            clear_native_window_surface_slot(surface);
+    }
     return result;
 }
 
@@ -8286,9 +8817,11 @@ void RIN_VKAPI_CALL vkDestroySwapchainKHR(
         const void* allocator) {
     RinVkSwapchainSlot* swapchain = swapchain_slot(device, swapchain_handle);
     RinVkDisplaySurfaceSlot* surface;
+    RinVkNativeWindowSurfaceSlot* native_surface;
     (void)allocator;
     if (!swapchain || !swapchain_destroy_images(device, swapchain)) return;
     surface = swapchain->surface;
+    native_surface = swapchain->native_window_surface;
     clear_swapchain_slot(swapchain);
     if (surface &&
         __atomic_sub_fetch(&surface->swapchain_count, 1u, __ATOMIC_RELEASE) ==
@@ -8296,6 +8829,13 @@ void RIN_VKAPI_CALL vkDestroySwapchainKHR(
         __atomic_load_n(&surface->state, __ATOMIC_ACQUIRE) == 2u &&
         __atomic_load_n(&surface->active_queries, __ATOMIC_ACQUIRE) == 0u)
         clear_display_surface_slot(surface);
+    if (native_surface &&
+        __atomic_sub_fetch(&native_surface->swapchain_count, 1u,
+                           __ATOMIC_RELEASE) == 0u &&
+        __atomic_load_n(&native_surface->state, __ATOMIC_ACQUIRE) == 2u &&
+        __atomic_load_n(&native_surface->active_queries,
+                        __ATOMIC_ACQUIRE) == 0u)
+        clear_native_window_surface_slot(native_surface);
 }
 
 RinVkResult RIN_VKAPI_CALL vkGetSwapchainImagesKHR(
@@ -8361,6 +8901,12 @@ RinVkResult RIN_VKAPI_CALL vkAcquireNextImageKHR(
             (RinVkPhysicalDevice)device->physical_device,
             swapchain->surface_handle, &capabilities);
         if (result != RIN_VK_SUCCESS) return result;
+        if (capabilities.currentExtent.width != UINT32_MAX &&
+            (capabilities.currentExtent.width !=
+                 swapchain->image_extent.width ||
+             capabilities.currentExtent.height !=
+                 swapchain->image_extent.height))
+            return RIN_VK_ERROR_OUT_OF_DATE_KHR;
 
         sync_lock();
         if (semaphore_handle != 0u) {
@@ -8584,6 +9130,12 @@ RinVkResult RIN_VKAPI_CALL vkQueuePresentKHR(
         uint64_t platform_token = 0u;
         int platform_result;
         RinVkResult result;
+
+        if (swapchain->native_window_surface) {
+            result = native_window_swapchain_present(
+                queue, swapchain, image_index);
+            goto present_result;
+        }
 
         device_wsi_lock(device);
         if (__atomic_load_n(&swapchain->retired, __ATOMIC_ACQUIRE) != 0u ||
@@ -9065,7 +9617,10 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
         return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
     swapchain_enabled =
         (uint32_t)swapchain_extension_enabled(create_info);
-    if (swapchain_enabled && !instance->surface_enabled)
+    if (swapchain_enabled &&
+        (!instance->surface_enabled ||
+         (!instance->display_enabled &&
+          !instance->native_window_surface_enabled)))
         return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
     if (create_info->queueCreateInfoCount == 0u ||
         create_info->queueCreateInfoCount >
@@ -9116,19 +9671,28 @@ RinVkResult RIN_VKAPI_CALL vkCreateDevice(
     }
     if (swapchain_enabled) {
         uint64_t device_generation = 0u;
-        RinVkResult generation_result;
-        if (!wsi_display_surface_available() ||
-            !physical_profile_has_present_queue(&profile)) {
+        RinVkResult generation_result = RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
+        const int native_supported =
+            instance->native_window_surface_enabled &&
+            physical_profile_supports_native_window_wsi(&profile);
+        const int display_supported =
+            instance->display_enabled && wsi_display_surface_available() &&
+            physical_profile_has_present_queue(&profile);
+        if (!native_supported && !display_supported) {
             release_runtime();
             return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
         }
-        generation_result =
-            wsi_resolve_device_generation(&profile, &device_generation);
-        if (generation_result != RIN_VK_SUCCESS || device_generation == 0u) {
-            release_runtime();
-            return generation_result == RIN_VK_ERROR_EXTENSION_NOT_PRESENT
-                       ? RIN_VK_ERROR_EXTENSION_NOT_PRESENT
-                       : generation_result;
+        if (display_supported) {
+            generation_result =
+                wsi_resolve_device_generation(&profile, &device_generation);
+            if ((generation_result != RIN_VK_SUCCESS ||
+                 device_generation == 0u) && !native_supported) {
+                release_runtime();
+                return generation_result ==
+                               RIN_VK_ERROR_EXTENSION_NOT_PRESENT
+                           ? RIN_VK_ERROR_EXTENSION_NOT_PRESENT
+                           : generation_result;
+            }
         }
     }
     for (index = 0u; index < RIN_GPU_VULKAN_MAX_QUEUE_FAMILIES; ++index) {
@@ -10448,6 +11012,398 @@ static int build_image_barrier_operation(
     operation->destination_height = src_queue_family;
     operation->filter = dst_queue_family;
     return 1;
+}
+
+static int record_native_window_image_barrier(
+        RinVkCommandBuffer command_buffer, struct RinVkDevice_T* device,
+        RinVkImage image_handle, uint32_t old_layout, uint32_t new_layout,
+        uint64_t src_stage, uint64_t src_access,
+        uint64_t dst_stage, uint64_t dst_access) {
+    RinGpuVulkanCommandBufferV1* core =
+        (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
+    RinVkImageSubresourceRange range;
+    RinGpuVulkanTransferOpV2 operation;
+    struct RinVkDevice_T* command_owner = NULL;
+    memset(&range, 0, sizeof(range));
+    range.aspectMask = RIN_VK_IMAGE_ASPECT_COLOR_BIT;
+    range.levelCount = 1u;
+    range.layerCount = 1u;
+    if (!command_owner_device(core, &command_owner) ||
+        command_owner != device ||
+        !build_image_barrier_operation(
+            core, device, RIN_VK_QUEUE_FAMILY_IGNORED,
+            RIN_VK_QUEUE_FAMILY_IGNORED, old_layout, new_layout,
+            image_handle, &range, src_stage, src_access, dst_stage,
+            dst_access, &operation))
+        return 0;
+    record_transfer_ops(core, &operation, 1u, NULL, 0u);
+    return core->record_error == 0u;
+}
+
+static RinVkResult native_window_readback_import(
+        struct RinVkQueue_T* queue, RinVkSwapchainSlot* swapchain,
+        uint32_t image_index, uint64_t expected_surface_generation) {
+    struct RinVkDevice_T* device;
+    RinVkImageSlot* image;
+    RinVkBufferCreateInfo buffer_info;
+    RinVkMemoryRequirements requirements;
+    RinVkMemoryAllocateInfo allocation_info;
+    RinVkCommandPoolCreateInfo pool_info;
+    RinVkCommandBufferAllocateInfo command_allocate_info;
+    RinVkCommandBufferBeginInfo command_begin_info;
+    RinVkFenceCreateInfo fence_info;
+    RinVkSubmitInfo submit_info;
+    RinVkMappedMemoryRange mapped_range;
+    RinVkBufferImageCopy copy_region;
+    RinVkCommandPool command_pool = (RinVkCommandPool)0;
+    RinVkCommandBuffer command_buffer = NULL;
+    RinVkBuffer staging_buffer = 0u;
+    RinVkDeviceMemory staging_memory = 0u;
+    RinVkFence fence = 0u;
+    RinVkResult result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+    RinRuntimeCompositorGpuSurfaceV1 snapshot;
+    RinRuntimeCompositorGpuFrameV1 frame;
+    RinVkNativeWindowSurfaceSlot* surface = NULL;
+    void* mapped = NULL;
+    void* frame_pixels = NULL;
+    uint64_t frame_bytes;
+    uint32_t row_pitch;
+    uint32_t memory_type = UINT32_MAX;
+    uint32_t coherent = 0u;
+    uint32_t index;
+    int submitted = 0;
+    int gpu_complete = 0;
+    int mapped_active = 0;
+
+    if (!queue || !swapchain || !swapchain->native_window_surface ||
+        image_index >= swapchain->image_count ||
+        !(device = queue->device) || queue->device != swapchain->owner ||
+        swapchain->image_extent.width > UINT32_MAX / 4u ||
+        (uint64_t)swapchain->image_extent.width *
+                swapchain->image_extent.height > UINT64_MAX / 4u)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    row_pitch = swapchain->image_extent.width * 4u;
+    frame_bytes = (uint64_t)row_pitch * swapchain->image_extent.height;
+    if (frame_bytes == 0u || frame_bytes > SIZE_MAX)
+        return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+    image = image_slot((RinVkDevice)device, swapchain->images[image_index]);
+    if (!image || image->format != RIN_VK_FORMAT_R8G8B8A8_UNORM ||
+        (image->usage & RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0u ||
+        image->current_layout != RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR ||
+        image->swapchain_owner != swapchain)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+
+    memset(&buffer_info, 0, sizeof(buffer_info));
+    buffer_info.sType = RIN_VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.size = frame_bytes;
+    buffer_info.usage = RIN_VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    buffer_info.sharingMode = RIN_VK_SHARING_MODE_EXCLUSIVE;
+    result = vkCreateBuffer((RinVkDevice)device, &buffer_info, NULL,
+                            &staging_buffer);
+    if (result != RIN_VK_SUCCESS) goto cleanup;
+    memset(&requirements, 0, sizeof(requirements));
+    vkGetBufferMemoryRequirements((RinVkDevice)device, staging_buffer,
+                                  &requirements);
+    if (requirements.size < frame_bytes || requirements.size == 0u) {
+        result = RIN_VK_ERROR_DEVICE_LOST;
+        goto cleanup;
+    }
+    for (index = 0u;
+         index < device->physical_profile.memory_type_count && index < 32u;
+         ++index) {
+        const uint32_t flags =
+            device->physical_profile.memory_types[index].property_flags;
+        if ((requirements.memoryTypeBits & (UINT32_C(1) << index)) == 0u ||
+            (flags & RIN_GPU_VK_MEMORY_HOST_VISIBLE) == 0u)
+            continue;
+        if (memory_type == UINT32_MAX ||
+            ((flags & RIN_GPU_VK_MEMORY_HOST_COHERENT) != 0u && !coherent)) {
+            memory_type = index;
+            coherent = (flags & RIN_GPU_VK_MEMORY_HOST_COHERENT) != 0u;
+        }
+    }
+    if (memory_type == UINT32_MAX) {
+        result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        goto cleanup;
+    }
+    memset(&allocation_info, 0, sizeof(allocation_info));
+    allocation_info.sType = RIN_VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocation_info.allocationSize = requirements.size;
+    allocation_info.memoryTypeIndex = memory_type;
+    result = vkAllocateMemory((RinVkDevice)device, &allocation_info, NULL,
+                              &staging_memory);
+    if (result != RIN_VK_SUCCESS) goto cleanup;
+    result = vkBindBufferMemory((RinVkDevice)device, staging_buffer,
+                                staging_memory, 0u);
+    if (result != RIN_VK_SUCCESS) goto cleanup;
+
+    memset(&pool_info, 0, sizeof(pool_info));
+    pool_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pool_info.flags = RIN_VK_COMMAND_POOL_CREATE_TRANSIENT_BIT |
+                      RIN_VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    pool_info.queueFamilyIndex = queue->queue_family_index;
+    result = vkCreateCommandPool((RinVkDevice)device, &pool_info, NULL,
+                                 &command_pool);
+    if (result != RIN_VK_SUCCESS) goto cleanup;
+    memset(&command_allocate_info, 0, sizeof(command_allocate_info));
+    command_allocate_info.sType =
+        RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    command_allocate_info.commandPool = command_pool;
+    command_allocate_info.level = 0;
+    command_allocate_info.commandBufferCount = 1u;
+    result = vkAllocateCommandBuffers((RinVkDevice)device,
+                                      &command_allocate_info,
+                                      &command_buffer);
+    if (result != RIN_VK_SUCCESS) goto cleanup;
+    memset(&command_begin_info, 0, sizeof(command_begin_info));
+    command_begin_info.sType =
+        RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    command_begin_info.flags = RIN_VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    result = vkBeginCommandBuffer(command_buffer, &command_begin_info);
+    if (result != RIN_VK_SUCCESS) goto cleanup;
+    if (!record_native_window_image_barrier(
+            command_buffer, device, swapchain->images[image_index],
+            RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+            RIN_VK_ACCESS_2_MEMORY_WRITE_BIT,
+            RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            RIN_VK_ACCESS_2_TRANSFER_READ_BIT)) {
+        result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        goto cleanup;
+    }
+    memset(&copy_region, 0, sizeof(copy_region));
+    copy_region.imageSubresource.aspectMask = RIN_VK_IMAGE_ASPECT_COLOR_BIT;
+    copy_region.imageSubresource.layerCount = 1u;
+    copy_region.imageExtent.width = swapchain->image_extent.width;
+    copy_region.imageExtent.height = swapchain->image_extent.height;
+    copy_region.imageExtent.depth = 1u;
+    vkCmdCopyImageToBuffer(command_buffer, swapchain->images[image_index],
+                           RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           staging_buffer, 1u, &copy_region);
+    if (((RinGpuVulkanCommandBufferV1*)(void*)command_buffer)->record_error !=
+        0u) {
+        result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        goto cleanup;
+    }
+    if (!record_native_window_image_barrier(
+            command_buffer, device, swapchain->images[image_index],
+            RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            RIN_VK_ACCESS_2_TRANSFER_READ_BIT,
+            RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+            RIN_VK_ACCESS_2_MEMORY_READ_BIT)) {
+        result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        goto cleanup;
+    }
+    {
+        RinGpuVulkanTransferOpV2 host_barrier;
+        RinGpuVulkanCommandBufferV1* core =
+            (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
+        if (!build_memory_barrier_operation(
+                RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                RIN_VK_PIPELINE_STAGE_2_HOST_BIT,
+                RIN_VK_ACCESS_2_HOST_READ_BIT, &host_barrier)) {
+            result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+            goto cleanup;
+        }
+        record_transfer_ops(core, &host_barrier, 1u, NULL, 0u);
+        if (core->record_error != 0u) {
+            result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+            goto cleanup;
+        }
+    }
+    result = vkEndCommandBuffer(command_buffer);
+    if (result != RIN_VK_SUCCESS) goto cleanup;
+    memset(&fence_info, 0, sizeof(fence_info));
+    fence_info.sType = RIN_VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    result = vkCreateFence((RinVkDevice)device, &fence_info, NULL, &fence);
+    if (result != RIN_VK_SUCCESS) goto cleanup;
+    memset(&submit_info, 0, sizeof(submit_info));
+    submit_info.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1u;
+    submit_info.pCommandBuffers = &command_buffer;
+    result = vkQueueSubmit(queue, 1u, &submit_info, fence);
+    if (result != RIN_VK_SUCCESS) goto cleanup;
+    submitted = 1;
+    result = vkWaitForFences((RinVkDevice)device, 1u, &fence, 1u,
+                             UINT64_MAX);
+    if (result != RIN_VK_SUCCESS) goto cleanup;
+    gpu_complete = 1;
+
+    result = vkMapMemory((RinVkDevice)device, staging_memory, 0u,
+                         frame_bytes, 0u, &mapped);
+    if (result != RIN_VK_SUCCESS) goto cleanup;
+    mapped_active = 1;
+    if (!coherent) {
+        memset(&mapped_range, 0, sizeof(mapped_range));
+        mapped_range.sType = RIN_VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+        mapped_range.memory = staging_memory;
+        mapped_range.offset = 0u;
+        mapped_range.size = frame_bytes;
+        result = vkInvalidateMappedMemoryRanges((RinVkDevice)device, 1u,
+                                                &mapped_range);
+        if (result != RIN_VK_SUCCESS) goto cleanup;
+    }
+    frame_pixels = malloc((size_t)frame_bytes);
+    if (!frame_pixels) {
+        result = RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+        goto cleanup;
+    }
+    memcpy(frame_pixels, mapped, (size_t)frame_bytes);
+    vkUnmapMemory((RinVkDevice)device, staging_memory);
+    mapped_active = 0;
+
+cleanup:
+    if (submitted && !gpu_complete) {
+        free(frame_pixels);
+        return result;
+    }
+    if (mapped_active) {
+        vkUnmapMemory((RinVkDevice)device, staging_memory);
+        mapped_active = 0;
+    }
+    if (fence != 0u) {
+        vkDestroyFence((RinVkDevice)device, fence, NULL);
+        if (fence_slot((RinVkDevice)device, fence))
+            result = RIN_VK_ERROR_DEVICE_LOST;
+    }
+    if (command_pool != (RinVkCommandPool)0) {
+        RinGpuVulkanCommandBufferV1* core_buffer =
+            (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
+        vkDestroyCommandPool((RinVkDevice)device, command_pool, NULL);
+        if (core_buffer && core_buffer->state != 0u)
+            result = RIN_VK_ERROR_DEVICE_LOST;
+    }
+    if (staging_buffer != 0u) {
+        vkDestroyBuffer((RinVkDevice)device, staging_buffer, NULL);
+        if (buffer_slot((RinVkDevice)device, staging_buffer))
+            result = RIN_VK_ERROR_DEVICE_LOST;
+        else
+            staging_buffer = 0u;
+    }
+    if (staging_memory != 0u && staging_buffer == 0u) {
+        vkFreeMemory((RinVkDevice)device, staging_memory, NULL);
+        if (memory_slot((RinVkDevice)device, staging_memory))
+            result = RIN_VK_ERROR_DEVICE_LOST;
+        else
+            staging_memory = 0u;
+    }
+    if (result != RIN_VK_SUCCESS || !frame_pixels) {
+        free(frame_pixels);
+        return result != RIN_VK_SUCCESS ? result
+                                        : RIN_VK_ERROR_MEMORY_MAP_FAILED;
+    }
+
+    result = native_window_surface_snapshot(
+        swapchain->surface_handle,
+        swapchain->native_window_surface->owner_instance,
+        &snapshot, &surface);
+    if (result == RIN_VK_SUCCESS &&
+        (snapshot.surface_generation != expected_surface_generation ||
+         snapshot.surface_generation != swapchain->native_surface_generation ||
+         snapshot.width != swapchain->image_extent.width ||
+         snapshot.height != swapchain->image_extent.height))
+        result = RIN_VK_ERROR_OUT_OF_DATE_KHR;
+    if (result == RIN_VK_SUCCESS &&
+        (snapshot.supported_frame_formats &
+         RIN_RUNTIME_COMPOSITOR_GPU_SURFACE_FORMAT_RGBA8_BIT) == 0u)
+        result = RIN_VK_ERROR_FORMAT_NOT_SUPPORTED;
+    if (result == RIN_VK_SUCCESS) {
+        memset(&frame, 0, sizeof(frame));
+        frame.struct_size = sizeof(frame);
+        frame.version = RIN_RUNTIME_COMPOSITOR_GPU_FRAME_V1_VERSION;
+        frame.pixels = frame_pixels;
+        frame.bytes = frame_bytes;
+        frame.width = swapchain->image_extent.width;
+        frame.height = swapchain->image_extent.height;
+        frame.row_pitch = row_pitch;
+        frame.format = RIN_RUNTIME_COMPOSITOR_GPU_PIXEL_RGBA8;
+        {
+            int callback_result = surface->surface_ops.import_frame(
+                surface->surface_ops.context, surface->window_handle,
+                expected_surface_generation, &frame);
+            if (callback_result == RIN_RESULT_BUSY ||
+                callback_result == RIN_ERROR_BUSY ||
+                callback_result == RIN_ERROR_WOULD_BLOCK)
+                result = RIN_VK_NOT_READY;
+            else if (callback_result != RIN_RESULT_OK)
+                result = RIN_VK_ERROR_SURFACE_LOST_KHR;
+        }
+    }
+    free(frame_pixels);
+    return result;
+}
+
+static RinVkResult native_window_swapchain_present(
+        struct RinVkQueue_T* queue, RinVkSwapchainSlot* swapchain,
+        uint32_t image_index) {
+    struct RinVkDevice_T* device;
+    RinVkNativeWindowSurfaceSlot* surface;
+    RinVkImageSlot* image;
+    RinRuntimeCompositorGpuSurfaceV1 snapshot;
+    uint64_t frame_id;
+    RinVkResult result;
+    if (!queue || !swapchain || !(device = queue->device) ||
+        swapchain->owner != device ||
+        !(surface = swapchain->native_window_surface) ||
+        image_index >= swapchain->image_count)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    result = native_window_surface_snapshot(
+        swapchain->surface_handle, surface->owner_instance, &snapshot, NULL);
+    if (result != RIN_VK_SUCCESS) return result;
+    if (snapshot.surface_generation != swapchain->native_surface_generation ||
+        snapshot.width != swapchain->image_extent.width ||
+        snapshot.height != swapchain->image_extent.height)
+        return RIN_VK_ERROR_OUT_OF_DATE_KHR;
+
+    device_wsi_lock(device);
+    if (__atomic_load_n(&swapchain->retired, __ATOMIC_ACQUIRE) != 0u ||
+        !swapchain_surface_current(swapchain) ||
+        swapchain->image_states[image_index] !=
+            RIN_VK_SWAPCHAIN_IMAGE_ACQUIRED ||
+        swapchain->acquired_frame_ids[image_index] == 0u) {
+        device_wsi_unlock(device);
+        return RIN_VK_ERROR_OUT_OF_DATE_KHR;
+    }
+    frame_id = swapchain->acquired_frame_ids[image_index];
+    image = image_slot((RinVkDevice)device, swapchain->images[image_index]);
+    if (!image || !image->memory ||
+        image->memory_generation != image->memory->generation ||
+        image->memory->owner != device ||
+        image->memory->product_allocation == 0u ||
+        image->memory_offset > image->memory->requested_size ||
+        image->memory_size > image->memory->requested_size -
+                                 image->memory_offset ||
+        image->swapchain_owner != swapchain ||
+        image->current_layout != RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR) {
+        device_wsi_unlock(device);
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    }
+    swapchain->image_states[image_index] =
+        RIN_VK_SWAPCHAIN_IMAGE_PRESENT_PENDING;
+    device_wsi_unlock(device);
+
+    result = native_window_readback_import(
+        queue, swapchain, image_index, snapshot.surface_generation);
+    device_wsi_lock(device);
+    if (swapchain->image_states[image_index] !=
+            RIN_VK_SWAPCHAIN_IMAGE_PRESENT_PENDING ||
+        swapchain->acquired_frame_ids[image_index] != frame_id) {
+        result = RIN_VK_ERROR_DEVICE_LOST;
+    } else if (result == RIN_VK_SUCCESS) {
+        swapchain->image_states[image_index] =
+            RIN_VK_SWAPCHAIN_IMAGE_AVAILABLE;
+        swapchain->acquired_frame_ids[image_index] = 0u;
+        swapchain->present_tokens[image_index] = 0u;
+    } else {
+        swapchain->image_states[image_index] =
+            RIN_VK_SWAPCHAIN_IMAGE_ACQUIRED;
+    }
+    device_wsi_unlock(device);
+    return result;
 }
 
 static int build_event_dependency_info(
@@ -16549,6 +17505,9 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetInstanceProcAddr(
         if (name_equal(name, "vkGetPhysicalDeviceSurfacePresentModesKHR"))
             return (RinVkVoidFunction)vkGetPhysicalDeviceSurfacePresentModesKHR;
     }
+    if (instance_value->native_window_surface_enabled &&
+        name_equal(name, "vkCreateRinOSNativeWindowSurfaceV1"))
+        return (RinVkVoidFunction)vkCreateRinOSNativeWindowSurfaceV1;
     if (instance_value->display_enabled) {
         if (name_equal(name, "vkGetPhysicalDeviceDisplayPropertiesKHR"))
             return (RinVkVoidFunction)vkGetPhysicalDeviceDisplayPropertiesKHR;
