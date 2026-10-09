@@ -6,7 +6,8 @@ set(RINGPU_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../RinGPU" CACHE PATH
 if(NOT EXISTS "${RINGPU_DIR}/CMakeLists.txt")
     message(FATAL_ERROR "RinGPU is required; set RINGPU_DIR to its checkout")
 endif()
-set(RINRUNTIME_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../RinRuntime/include")
+set(RINRUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../rinruntime")
+set(RINRUNTIME_INCLUDE_DIR "${RINRUNTIME_DIR}/include")
 if(NOT EXISTS "${RINRUNTIME_INCLUDE_DIR}/rinruntime/window.h")
     message(FATAL_ERROR "RinRuntime window ABI is required by RinOS WSI")
 endif()
@@ -54,8 +55,7 @@ if(RINVULKAN_BUILD_RINOS_NATIVE_WINDOW_EXAMPLE)
     set(RINRUNTIME_BUILD_GUI ON)
     set(RINRUNTIME_BUILD_TESTS OFF)
     set(RINRUNTIME_BUILD_EXAMPLES OFF)
-    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../rinruntime"
-        "rinruntime-build" EXCLUDE_FROM_ALL)
+    add_subdirectory("${RINRUNTIME_DIR}" "rinruntime-build" EXCLUDE_FROM_ALL)
     add_executable(rinvulkan-native-window-surface-example
         examples/rinos_native_window_surface.c)
     target_compile_features(rinvulkan-native-window-surface-example
