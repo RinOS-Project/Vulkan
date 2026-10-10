@@ -163,6 +163,21 @@ if(BUILD_TESTING)
         RinVulkan::RinVulkan)
     add_test(NAME rinvulkan-native-window
         COMMAND rinvulkan-native-window-test)
+    add_executable(rinvulkan-sdk-target-backend-test
+        tests/rinvulkan_sdk_target_backend_test.c)
+    target_compile_features(rinvulkan-sdk-target-backend-test
+        PRIVATE c_std_11)
+    target_include_directories(rinvulkan-sdk-target-backend-test PRIVATE
+        ${RINGPU_DIR}/../../RinOS-SDK/include)
+    if(MSVC)
+        target_compile_options(rinvulkan-sdk-target-backend-test
+            PRIVATE /W4)
+    else()
+        target_compile_options(rinvulkan-sdk-target-backend-test
+            PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+    add_test(NAME rinvulkan-sdk-target-backend
+        COMMAND rinvulkan-sdk-target-backend-test)
     add_executable(rinvulkan-buffer-ownership-test
         tests/rinvulkan_buffer_ownership_test.c
         src/buffer_ownership.c)
