@@ -177,6 +177,12 @@ typedef struct RinGpuVulkanTransferOpV2 {
             uint32_t copy_height;
         } image_to_buffer_region;
         struct {
+            uint32_t image_offset_x;
+            uint32_t image_offset_y;
+            uint32_t copy_width;
+            uint32_t copy_height;
+        } buffer_to_image_region;
+        struct {
             uint32_t src_stage_mask;
             uint32_t src_access_mask;
             uint32_t dst_stage_mask;

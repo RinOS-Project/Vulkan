@@ -630,6 +630,40 @@ int rin_gpu_vulkan_command_buffer_record_transfer_ops(
              (operation->size_bytes & 3u) != 0u))
             return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
         if (operation->type ==
+            RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_TO_IMAGE) {
+            uint64_t row_bytes;
+            uint64_t row_pitch;
+            uint64_t copied_bytes;
+            const uint32_t copy_width =
+                operation->buffer_to_image_region.copy_width;
+            const uint32_t copy_height =
+                operation->buffer_to_image_region.copy_height;
+            const uint32_t offset_x =
+                operation->buffer_to_image_region.image_offset_x;
+            const uint32_t offset_y =
+                operation->buffer_to_image_region.image_offset_y;
+            if (operation->source_width == 0u ||
+                operation->source_height == 0u ||
+                operation->destination_width < copy_width ||
+                operation->destination_height < copy_height ||
+                copy_width == 0u || copy_height == 0u ||
+                offset_x > operation->source_width ||
+                copy_width > operation->source_width - offset_x ||
+                offset_y > operation->source_height ||
+                copy_height > operation->source_height - offset_y ||
+                copy_height > UINT64_MAX / (uint64_t)copy_width / 4u ||
+                operation->filter != 0u || operation->sample_count != 0u)
+                return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
+            row_bytes = (uint64_t)copy_width * 4u;
+            row_pitch = (uint64_t)operation->destination_width * 4u;
+            if (copy_height - 1u >
+                (UINT64_MAX - row_bytes) / row_pitch)
+                return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
+            copied_bytes = row_bytes * copy_height;
+            if (operation->size_bytes != copied_bytes)
+                return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
+        }
+        if (operation->type ==
             RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_TO_BUFFER_REGION) {
             uint64_t copied_bytes;
             const uint32_t copy_width =

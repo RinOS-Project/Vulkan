@@ -4150,6 +4150,104 @@ static int translate_routed_process_commands(
             copy->buffer_image_height_texels = image_height;
             copy->bytes_per_texel = bytes_per_texel;
         } else if (operation->type ==
+                   RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_TO_IMAGE) {
+            const RinVkCommandResourceUse* buffer_use =
+                process_buffer_use_for_operation(
+                    uses, use_count, operation_index,
+                    RIN_VK_COMMAND_RESOURCE_ACCESS_READ);
+            const RinVkCommandResourceUse* image_use =
+                process_image_use_for_operation(
+                    uses, use_count, operation_index,
+                    RIN_VK_COMMAND_RESOURCE_ACCESS_WRITE);
+            RinVkBufferSlot* buffer;
+            RinVkImageSlot* image;
+            RinGpuBackendBufferToImageCopyV1* copy;
+            uint32_t bytes_per_texel;
+            uint64_t row_bytes;
+            uint64_t row_pitch;
+            uint64_t source_span;
+            uint64_t copied_bytes;
+            uint64_t buffer_address;
+            uint64_t image_address;
+            const uint32_t copy_width =
+                operation->buffer_to_image_region.copy_width;
+            const uint32_t copy_height =
+                operation->buffer_to_image_region.copy_height;
+            const uint32_t image_offset_x =
+                operation->buffer_to_image_region.image_offset_x;
+            const uint32_t image_offset_y =
+                operation->buffer_to_image_region.image_offset_y;
+            const uint32_t row_length = operation->destination_width;
+            const uint32_t image_height = operation->destination_height;
+
+            if (!buffer_use || !image_use || buffer_use == image_use ||
+                !(buffer = buffer_slot((RinVkDevice)slot->owner,
+                                       (RinVkBuffer)buffer_use->resource_handle)) ||
+                !(image = image_slot((RinVkDevice)slot->owner,
+                                     (RinVkImage)image_use->resource_handle)) ||
+                !buffer->memory || !image->memory ||
+                buffer->memory->owner != slot->owner ||
+                image->memory->owner != slot->owner ||
+                buffer->memory->product_allocation !=
+                    operation->source_allocation ||
+                image->memory->product_allocation !=
+                    operation->destination_allocation ||
+                buffer->size < buffer_use->offset ||
+                buffer_use->size > buffer->size - buffer_use->offset ||
+                image->memory_size != image_use->size ||
+                (buffer->usage & RIN_VK_BUFFER_USAGE_TRANSFER_SRC_BIT) == 0u ||
+                (image->usage & RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u ||
+                image->width != operation->source_width ||
+                image->height != operation->source_height ||
+                row_length < copy_width || image_height < copy_height ||
+                copy_width == 0u || copy_height == 0u ||
+                image_offset_x > image->width ||
+                copy_width > image->width - image_offset_x ||
+                image_offset_y > image->height ||
+                copy_height > image->height - image_offset_y ||
+                operation->filter != 0u || operation->sample_count != 0u)
+                goto unsupported;
+            bytes_per_texel = image_format_bytes(image->format);
+            if (bytes_per_texel != 4u ||
+                copy_width > UINT64_MAX / bytes_per_texel ||
+                copy_height > UINT64_MAX / copy_width / bytes_per_texel)
+                goto unsupported;
+            row_bytes = (uint64_t)copy_width * bytes_per_texel;
+            row_pitch = (uint64_t)row_length * bytes_per_texel;
+            if (copy_height - 1u >
+                (UINT64_MAX - row_bytes) / row_pitch)
+                goto unsupported;
+            source_span = (uint64_t)(copy_height - 1u) * row_pitch +
+                          row_bytes;
+            copied_bytes = row_bytes * copy_height;
+            if (buffer_use->size != source_span ||
+                operation->size_bytes != copied_bytes ||
+                !checked_buffer_address(buffer, buffer_use->offset,
+                                        buffer_use->size, &buffer_address) ||
+                !checked_image_address(image, 0u, image->memory_size,
+                                       &image_address) ||
+                buffer_address != operation->source_gpu_address ||
+                image_address != operation->destination_gpu_address)
+                goto unsupported;
+            command = &commands[command_count++];
+            command->type = RIN_GPU_BACKEND_COMMAND_COPY_BUFFER_TO_IMAGE;
+            copy = &command->value.buffer_to_image_copy;
+            copy->buffer_cookie = buffer_use->resource_handle;
+            copy->buffer_offset = buffer_use->offset;
+            copy->buffer_size_bytes = source_span;
+            copy->buffer_row_pitch_bytes = row_pitch;
+            copy->image_cookie = image_use->resource_handle;
+            copy->image_mip_level = 0u;
+            copy->image_array_layer = 0u;
+            copy->image_width = image->width;
+            copy->image_height = image->height;
+            copy->image_offset_x = image_offset_x;
+            copy->image_offset_y = image_offset_y;
+            copy->copy_width = copy_width;
+            copy->copy_height = copy_height;
+            copy->buffer_image_height_texels = image_height;
+            copy->bytes_per_texel = bytes_per_texel;
+        } else if (operation->type ==
                    RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER) {
             RinVkImageSlot* image;
             RinGpuBackendGraphicsBarrierV2 barrier;
@@ -13243,6 +13341,7 @@ void RIN_VKAPI_CALL vkCmdCopyBufferToImage(
     memset(operations, 0, sizeof(operations));
     if (region_count == 0u ||
         region_count > RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS || !regions ||
+        region_count > RIN_VK_MAX_COMMAND_RESOURCE_USES / 2u ||
         !command_owner_device(core, &owner) ||
         !image_layout_transfer_destination_valid(dst_image_layout)) {
         valid = 0;
@@ -13259,16 +13358,56 @@ void RIN_VKAPI_CALL vkCmdCopyBufferToImage(
     for (index = 0u; valid && index < region_count; ++index) {
         uint64_t source_address;
         uint64_t destination_address;
-        uint64_t size = destination->memory_size;
-        if (regions[index].bufferRowLength != 0u ||
-            regions[index].bufferImageHeight != 0u ||
-            !image_region_valid(destination,
-                                &regions[index].imageSubresource,
-                                &regions[index].imageOffset,
-                                &regions[index].imageExtent) ||
-            !checked_buffer_address(source, regions[index].bufferOffset, size,
+        uint64_t bytes_per_texel;
+        uint64_t row_bytes;
+        uint64_t row_pitch;
+        uint64_t source_span;
+        uint64_t copied_bytes;
+        uint32_t row_length;
+        uint32_t image_height;
+        const RinVkBufferImageCopy* region = &regions[index];
+        if (!image_buffer_region_valid(destination,
+                                       &region->imageSubresource,
+                                       &region->imageOffset,
+                                       &region->imageExtent) ||
+            region->bufferOffset % 4u != 0u ||
+            (region->bufferRowLength != 0u &&
+             region->bufferRowLength < region->imageExtent.width) ||
+            (region->bufferImageHeight != 0u &&
+             region->bufferImageHeight < region->imageExtent.height)) {
+            valid = 0;
+            break;
+        }
+        bytes_per_texel = image_format_bytes(destination->format);
+        row_length = region->bufferRowLength != 0u
+                         ? region->bufferRowLength
+                         : region->imageExtent.width;
+        image_height = region->bufferImageHeight != 0u
+                           ? region->bufferImageHeight
+                           : region->imageExtent.height;
+        if (bytes_per_texel != 4u || row_length < region->imageExtent.width ||
+            image_height < region->imageExtent.height ||
+            region->imageExtent.width > UINT64_MAX / bytes_per_texel ||
+            region->imageExtent.height > UINT64_MAX /
+                (uint64_t)region->imageExtent.width / bytes_per_texel) {
+            valid = 0;
+            break;
+        }
+        row_bytes = (uint64_t)region->imageExtent.width * bytes_per_texel;
+        row_pitch = (uint64_t)row_length * bytes_per_texel;
+        if (region->imageExtent.height - 1u >
+            (UINT64_MAX - row_bytes) / row_pitch) {
+            valid = 0;
+            break;
+        }
+        source_span = (uint64_t)(region->imageExtent.height - 1u) *
+                          row_pitch +
+                      row_bytes;
+        copied_bytes = row_bytes * region->imageExtent.height;
+        if (!checked_buffer_address(source, region->bufferOffset, source_span,
                                     &source_address) ||
-            !checked_image_address(destination, 0u, size,
+            !checked_image_address(destination, 0u,
+                                   destination->memory_size,
                                    &destination_address)) {
             valid = 0;
             break;
@@ -13279,15 +13418,27 @@ void RIN_VKAPI_CALL vkCmdCopyBufferToImage(
             destination->memory->product_allocation;
         operations[index].source_gpu_address = source_address;
         operations[index].destination_gpu_address = destination_address;
-        operations[index].size_bytes = size;
+        operations[index].size_bytes = copied_bytes;
+        operations[index].source_width = destination->width;
+        operations[index].source_height = destination->height;
+        operations[index].destination_width = row_length;
+        operations[index].destination_height = image_height;
+        operations[index].buffer_to_image_region.image_offset_x =
+            (uint32_t)region->imageOffset.x;
+        operations[index].buffer_to_image_region.image_offset_y =
+            (uint32_t)region->imageOffset.y;
+        operations[index].buffer_to_image_region.copy_width =
+            region->imageExtent.width;
+        operations[index].buffer_to_image_region.copy_height =
+            region->imageExtent.height;
         resource_uses[resource_use_count].operation_index = index;
         resource_uses[resource_use_count].resource_kind =
             RIN_VK_COMMAND_RESOURCE_USE_BUFFER;
         resource_uses[resource_use_count].access =
             RIN_VK_COMMAND_RESOURCE_ACCESS_READ;
         resource_uses[resource_use_count].resource_handle = src_buffer;
-        resource_uses[resource_use_count].offset = regions[index].bufferOffset;
-        resource_uses[resource_use_count].size = size;
+        resource_uses[resource_use_count].offset = region->bufferOffset;
+        resource_uses[resource_use_count].size = source_span;
         ++resource_use_count;
         resource_uses[resource_use_count].operation_index = index;
         resource_uses[resource_use_count].resource_kind =
