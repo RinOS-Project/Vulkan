@@ -3683,6 +3683,22 @@ static RinVulkanProductPlatformV3* bound_product_v3(void) {
     return base ? product_v3_for_base(base) : NULL;
 }
 
+static int routed_process_commands_v6_available(
+        const RinVkSubmissionSlot* slot) {
+    RinVulkanProductPlatformV3* product_v3;
+    RinVulkanProductPlatformV4* product_v4;
+    RinVulkanProductPlatformV5* product_v5;
+
+    if (!slot || !slot->owner || slot->command_buffer_count == 0u ||
+        slot->routed_packet.op_count == 0u || slot->command_stream_packet ||
+        slot->compute_packet || slot->graphics_packet)
+        return 0;
+    product_v3 = bound_product_v3();
+    product_v4 = product_v3 ? product_v4_for_base(product_v3) : NULL;
+    product_v5 = product_v4 ? product_v5_for_base(product_v4) : NULL;
+    return product_v5 && product_v6_for_base(product_v5) != NULL;
+}
+
 static int build_native_wait_list(
         const RinVkSubmissionSlot* slot,
         const RinVulkanProductPlatformV2* product_v2,
@@ -3766,6 +3782,10 @@ static int submission_native_waits_available(
     uint32_t wait_count = 0u;
     uint32_t wait_mask = 0u;
     RinVulkanProductPlatformV3* product_v3 = bound_product_v3();
+    /* V6 accepts canonical commands, not native queue-wait records. Keep
+     * these submissions pending until their real semaphore dependencies are
+     * complete instead of routing them through the older opaque-cookie path. */
+    if (routed_process_commands_v6_available(slot)) return 0;
     if (product_v3 && build_native_wait_list(
                           slot, product_v3->base, waits, scoped_waits,
                           &wait_count, &wait_mask))
@@ -4718,6 +4738,7 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
     uint32_t wait_count = 0u;
     uint32_t wait_mask = 0u;
     uint64_t command_cookie;
+    int use_process_commands_v6 = 0;
     int use_v2 = 0;
     int use_v3 = 0;
     int product_result;
@@ -4744,22 +4765,28 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
         ? product_v6_for_base(product_v5_for_base(
               product_v4_for_base(product_v3)))
         : NULL;
+    use_process_commands_v6 =
+        product_v6 && slot->routed_packet.op_count != 0u &&
+        !slot->command_stream_packet && !slot->compute_packet &&
+        !slot->graphics_packet;
     if (!submission_waits_satisfied(slot)) {
-        if (product_v3 && build_native_wait_list(
-                              slot, product_v3->base, waits, scoped_waits,
-                              &wait_count, &wait_mask)) {
-            use_v3 = 1;
-        } else if (product_v2) {
-            uint32_t index;
-            int all_commands = 1;
-            for (index = 0u; index < slot->wait_semaphore_count; ++index)
-                if (slot->wait_execution_scopes[index] !=
-                    RIN_VULKAN_PRODUCT_SCOPE_ALL_COMMANDS)
-                    all_commands = 0;
-            if (all_commands && build_native_wait_list(
-                                    slot, product_v2, waits, NULL,
-                                    &wait_count, &wait_mask))
-                use_v2 = 1;
+        if (!use_process_commands_v6) {
+            if (product_v3 && build_native_wait_list(
+                                  slot, product_v3->base, waits, scoped_waits,
+                                  &wait_count, &wait_mask)) {
+                use_v3 = 1;
+            } else if (product_v2) {
+                uint32_t index;
+                int all_commands = 1;
+                for (index = 0u; index < slot->wait_semaphore_count; ++index)
+                    if (slot->wait_execution_scopes[index] !=
+                        RIN_VULKAN_PRODUCT_SCOPE_ALL_COMMANDS)
+                        all_commands = 0;
+                if (all_commands && build_native_wait_list(
+                                        slot, product_v2, waits, NULL,
+                                        &wait_count, &wait_mask))
+                    use_v2 = 1;
+            }
         }
         if (!use_v2 && !use_v3) {
             release_product();
@@ -4779,10 +4806,7 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
     memset(&submission_v3, 0, sizeof(submission_v3));
     memset(&process_receipt, 0, sizeof(process_receipt));
     memset(&process_status, 0, sizeof(process_status));
-    if (product_v6 && !use_v2 && !use_v3 &&
-        slot->routed_packet.op_count != 0u &&
-        !slot->command_stream_packet && !slot->compute_packet &&
-        !slot->graphics_packet) {
+    if (use_process_commands_v6 && !use_v2 && !use_v3) {
         product_result = submit_canonical_process_commands(
             product_v6, slot, &process_receipt);
         if (product_result == RIN_VULKAN_PRODUCT_OK &&

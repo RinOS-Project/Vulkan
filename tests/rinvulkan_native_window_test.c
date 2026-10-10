@@ -70,6 +70,9 @@ typedef struct TestProductAdapters {
     uint32_t canonical_resolve_command_count;
     uint32_t canonical_graphics_barrier_count;
     RinGpuBackendGraphicsBarrierV2 canonical_last_graphics_barrier;
+    uint32_t defer_next_process_completion;
+    uint32_t deferred_completion_queue_id;
+    uint64_t deferred_completion_value;
     uint64_t next_mapping_lease;
     TestMemoryMapping mappings[RIN_GPU_VULKAN_SOFTWARE_MAX_ALLOCATIONS];
     TestResourceBinding resources[RIN_GPU_VULKAN_SOFTWARE_MAX_ALLOCATIONS];
@@ -79,6 +82,9 @@ typedef struct TestProductAdapters {
     uint32_t resource_unbind_calls;
     uint32_t active_resource_count;
 } TestProductAdapters;
+
+static uint32_t g_opaque_process_prepare_calls;
+static uint32_t g_opaque_process_submit_calls;
 
 #if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
 typedef struct RuntimeExportPeer {
@@ -397,6 +403,7 @@ static int test_prepare_submission_v2(
     RinGpuVulkanSoftwarePlatformV1* software =
         (RinGpuVulkanSoftwarePlatformV1*)context;
     int result;
+    ++g_opaque_process_prepare_calls;
     if (!software || !submission_out)
         return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
     if (wait_count != 0u) return RIN_VULKAN_PRODUCT_UNSUPPORTED;
@@ -419,6 +426,7 @@ static int test_submit_v2(
         uint32_t resource_count) {
     RinGpuVulkanSoftwarePlatformV1* software =
         (RinGpuVulkanSoftwarePlatformV1*)context;
+    ++g_opaque_process_submit_calls;
     if (!software || !submission ||
         submission->struct_size != sizeof(*submission) ||
         submission->version != RIN_VULKAN_PRODUCT_SUBMISSION_V2_VERSION ||
@@ -436,6 +444,7 @@ static int test_prepare_submission_v3(
     RinGpuVulkanSoftwarePlatformV1* software =
         (RinGpuVulkanSoftwarePlatformV1*)context;
     int result;
+    ++g_opaque_process_prepare_calls;
     if (!software || !submission_out)
         return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
     if (wait_count != 0u) return RIN_VULKAN_PRODUCT_UNSUPPORTED;
@@ -458,6 +467,7 @@ static int test_submit_v3(
         uint32_t resource_count) {
     RinGpuVulkanSoftwarePlatformV1* software =
         (RinGpuVulkanSoftwarePlatformV1*)context;
+    ++g_opaque_process_submit_calls;
     if (!software || !submission ||
         submission->struct_size != sizeof(*submission) ||
         submission->version != RIN_VULKAN_PRODUCT_SUBMISSION_V3_VERSION ||
@@ -732,15 +742,22 @@ static int test_submit_process_commands_v6(
     uint32_t pending_after = 0u;
     uint32_t operation_count = 0u;
     uint32_t index;
+    uint64_t previous_completed_value;
+    uint32_t defer_completion;
     int result;
     if (!adapters || !adapters->software || !commands || !receipt_out ||
-        command_count == 0u || resource_count == 0u || !resources ||
+        command_count == 0u ||
+        resource_count > RIN_VULKAN_PRODUCT_MAX_RESOURCES_PER_SUBMISSION ||
+        (resource_count != 0u && !resources) ||
         queue_id >= adapters->software->queue_count)
         return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
     memset(&packet, 0, sizeof(packet));
     packet.struct_size = sizeof(packet);
     packet.version = RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_3;
     packet.product_queue_id = queue_id;
+    previous_completed_value =
+        adapters->software->completed_values[queue_id];
+    defer_completion = adapters->defer_next_process_completion;
     for (index = 0u; index < command_count; ++index) {
         const RinGpuBackendCommandV1* command = &commands[index];
         RinGpuVulkanTransferOpV2* operation;
@@ -1434,6 +1451,19 @@ static int test_submit_process_commands_v6(
                     resources[index].required_gpu_access);
         return result;
     }
+    if (defer_completion != 0u) {
+        const uint32_t report_index =
+            (adapters->software->report_tail +
+             RIN_GPU_VULKAN_SOFTWARE_MAX_REPORTS - 1u) %
+            RIN_GPU_VULKAN_SOFTWARE_MAX_REPORTS;
+        adapters->software->completed_values[queue_id] =
+            previous_completed_value;
+        adapters->software->reports[report_index].completed_values[queue_id] =
+            previous_completed_value;
+        adapters->defer_next_process_completion = 0u;
+        adapters->deferred_completion_queue_id = queue_id;
+        adapters->deferred_completion_value = submission.completion_value;
+    }
     memset(receipt_out, 0, sizeof(*receipt_out));
     receipt_out->struct_size = sizeof(*receipt_out);
     receipt_out->version =
@@ -1485,6 +1515,162 @@ static void initialize_product_adapters(
         test_submit_process_commands_v6;
 }
 
+typedef struct TestRecordedBarrier {
+    RinVkCommandPool pool;
+    RinVkCommandBuffer command_buffer;
+} TestRecordedBarrier;
+
+static RinVkResult record_process_wait_barrier(
+        RinVkDevice device, TestRecordedBarrier* recorded) {
+    RinVkCommandPoolCreateInfo pool_info;
+    RinVkCommandBufferAllocateInfo allocate_info;
+    RinVkCommandBufferBeginInfo begin_info;
+    RinVkMemoryBarrier2 barrier;
+    RinVkDependencyInfo dependency;
+    RinVkResult result;
+
+    if (!device || !recorded) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    memset(recorded, 0, sizeof(*recorded));
+    memset(&pool_info, 0, sizeof(pool_info));
+    pool_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pool_info.queueFamilyIndex = 0u;
+    result = vkCreateCommandPool(device, &pool_info, NULL, &recorded->pool);
+    if (result != RIN_VK_SUCCESS) return result;
+    memset(&allocate_info, 0, sizeof(allocate_info));
+    allocate_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocate_info.commandPool = recorded->pool;
+    allocate_info.level = RIN_VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocate_info.commandBufferCount = 1u;
+    result = vkAllocateCommandBuffers(device, &allocate_info,
+                                      &recorded->command_buffer);
+    if (result != RIN_VK_SUCCESS) return result;
+    memset(&begin_info, 0, sizeof(begin_info));
+    begin_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    result = vkBeginCommandBuffer(recorded->command_buffer, &begin_info);
+    if (result != RIN_VK_SUCCESS) return result;
+
+    memset(&barrier, 0, sizeof(barrier));
+    barrier.sType = RIN_VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    barrier.srcAccessMask = RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    barrier.dstStageMask = RIN_VK_PIPELINE_STAGE_2_HOST_BIT;
+    barrier.dstAccessMask = RIN_VK_ACCESS_2_HOST_READ_BIT;
+    memset(&dependency, 0, sizeof(dependency));
+    dependency.sType = RIN_VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.memoryBarrierCount = 1u;
+    dependency.pMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(recorded->command_buffer, &dependency);
+    return vkEndCommandBuffer(recorded->command_buffer);
+}
+
+static RinVkResult test_process_submit_wait_completion(
+        RinVkDevice device, RinVkQueue producer_queue,
+        RinVkQueue consumer_queue, TestProductAdapters* adapters) {
+    RinVkSemaphoreCreateInfo semaphore_info;
+    RinVkSemaphore semaphore = 0u;
+    TestRecordedBarrier producer;
+    TestRecordedBarrier consumer;
+    RinVkSubmitInfo submit;
+    const RinVkCommandBuffer* command_buffer;
+    const uint64_t* semaphore_handle;
+    const uint32_t wait_stage = RIN_VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    const uint32_t submits_before = adapters->canonical_submit_calls;
+    const uint32_t opaque_prepares_before =
+        g_opaque_process_prepare_calls;
+    const uint32_t opaque_submits_before = g_opaque_process_submit_calls;
+    RinVkResult result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+
+    memset(&producer, 0, sizeof(producer));
+    memset(&consumer, 0, sizeof(consumer));
+    memset(&semaphore_info, 0, sizeof(semaphore_info));
+    semaphore_info.sType = RIN_VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    if (vkCreateSemaphore(device, &semaphore_info, NULL, &semaphore) !=
+            RIN_VK_SUCCESS ||
+        record_process_wait_barrier(device, &producer) != RIN_VK_SUCCESS ||
+        record_process_wait_barrier(device, &consumer) != RIN_VK_SUCCESS)
+        goto done;
+
+    adapters->deferred_completion_value = 0u;
+    adapters->defer_next_process_completion = 1u;
+    command_buffer = &producer.command_buffer;
+    semaphore_handle = &semaphore;
+    memset(&submit, 0, sizeof(submit));
+    submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1u;
+    submit.pCommandBuffers = command_buffer;
+    submit.signalSemaphoreCount = 1u;
+    submit.pSignalSemaphores = semaphore_handle;
+    result = vkQueueSubmit(producer_queue, 1u, &submit, 0u);
+    if (result != RIN_VK_SUCCESS ||
+        adapters->canonical_submit_calls != submits_before + 1u ||
+        g_opaque_process_prepare_calls != opaque_prepares_before ||
+        g_opaque_process_submit_calls != opaque_submits_before) {
+        fprintf(stderr,
+                "process wait producer submit: result=%d canonical=%u expected=%u\n",
+                result, adapters->canonical_submit_calls,
+                submits_before + 1u);
+        goto done;
+    }
+    if (adapters->deferred_completion_value == 0u ||
+        adapters->deferred_completion_queue_id >=
+            adapters->software->queue_count ||
+        adapters->software->completed_values[
+            adapters->deferred_completion_queue_id] >=
+            adapters->deferred_completion_value) {
+        fprintf(stderr, "process wait producer completion was not deferred\n");
+        result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        goto done;
+    }
+
+    command_buffer = &consumer.command_buffer;
+    memset(&submit, 0, sizeof(submit));
+    submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.waitSemaphoreCount = 1u;
+    submit.pWaitSemaphores = semaphore_handle;
+    submit.pWaitDstStageMask = &wait_stage;
+    submit.commandBufferCount = 1u;
+    submit.pCommandBuffers = command_buffer;
+    result = vkQueueSubmit(consumer_queue, 1u, &submit, 0u);
+    if (result != RIN_VK_SUCCESS ||
+        adapters->canonical_submit_calls != submits_before + 1u ||
+        g_opaque_process_prepare_calls != opaque_prepares_before ||
+        g_opaque_process_submit_calls != opaque_submits_before) {
+        fprintf(stderr,
+                "process wait consumer enqueue: result=%d canonical=%u expected=%u\n",
+                result, adapters->canonical_submit_calls,
+                submits_before + 1u);
+        goto done;
+    }
+    if (adapters->software->completed_values[
+            adapters->deferred_completion_queue_id] >=
+        adapters->deferred_completion_value) {
+        fprintf(stderr, "process wait producer completion was not deferred\n");
+        result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        goto done;
+    }
+    adapters->software->completed_values[
+        adapters->deferred_completion_queue_id] =
+        adapters->deferred_completion_value;
+    result = vkQueueWaitIdle(consumer_queue);
+    if (result != RIN_VK_SUCCESS ||
+        adapters->canonical_submit_calls != submits_before + 2u ||
+        g_opaque_process_prepare_calls != opaque_prepares_before ||
+        g_opaque_process_submit_calls != opaque_submits_before) {
+        fprintf(stderr,
+                "process wait consumer completion: result=%d canonical=%u expected=%u\n",
+                result, adapters->canonical_submit_calls,
+                submits_before + 2u);
+        goto done;
+    }
+    result = RIN_VK_SUCCESS;
+
+done:
+    if (producer.pool != 0u) vkDestroyCommandPool(device, producer.pool, NULL);
+    if (consumer.pool != 0u) vkDestroyCommandPool(device, consumer.pool, NULL);
+    if (semaphore != 0u) vkDestroySemaphore(device, semaphore, NULL);
+    return result;
+}
+
 static void make_profile(RinGpuVulkanPhysicalDeviceV2* profile) {
     memset(profile, 0, sizeof(*profile));
     profile->struct_size = sizeof(*profile);
@@ -1501,7 +1687,7 @@ static void make_profile(RinGpuVulkanPhysicalDeviceV2* profile) {
     profile->queue_families[0].flags = RIN_GPU_VK_QUEUE_GRAPHICS |
                                        RIN_GPU_VK_QUEUE_COMPUTE |
                                        RIN_GPU_VK_QUEUE_TRANSFER;
-    profile->queue_families[0].queue_count = 1u;
+    profile->queue_families[0].queue_count = 2u;
     profile->queue_families[0].timestamp_valid_bits = 64u;
     profile->memory_heap_count = 2u;
     profile->memory_heaps[0].size_bytes = UINT64_C(512) * 1024u * 1024u;
@@ -1681,6 +1867,8 @@ static RinVkResult record_and_submit_buffer_copy(
     RinVkSubmitInfo submit;
     RinVkFenceCreateInfo fence_info;
     RinVkFence fence = 0u;
+    const uint32_t submits_before =
+        product_adapters ? product_adapters->canonical_submit_calls : 0u;
     RinVkResult result = RIN_VK_ERROR_INITIALIZATION_FAILED;
     void* mapped = NULL;
 
@@ -1771,7 +1959,7 @@ static RinVkResult record_and_submit_buffer_copy(
     if (result != RIN_VK_SUCCESS) goto done;
     result = vkWaitForFences(device, 1u, &fence, 1u, UINT64_MAX);
     if (result != RIN_VK_SUCCESS) goto done;
-    if (product_adapters->canonical_submit_calls != 1u ||
+    if (product_adapters->canonical_submit_calls != submits_before + 1u ||
         product_adapters->canonical_command_count != 1u ||
         vkMapMemory(device, destination_memory, 0u, buffer_size, 0u,
                     &mapped) != RIN_VK_SUCCESS) {
@@ -2477,7 +2665,8 @@ int main(void) {
     RinVkDeviceCreateInfo device_info;
     RinVkDevice device = NULL;
     RinVkQueue queue = NULL;
-    const float queue_priority = 1.0f;
+    RinVkQueue second_queue = NULL;
+    const float queue_priorities[2] = {1.0f, 1.0f};
     RinVkSwapchainCreateInfoKHR swapchain_info;
     RinVkSwapchainKHR swapchain = 0u;
     RinVkImage images[2];
@@ -2660,8 +2849,8 @@ int main(void) {
     memset(&queue_info, 0, sizeof(queue_info));
     queue_info.sType = RIN_VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
     queue_info.queueFamilyIndex = 0u;
-    queue_info.queueCount = 1u;
-    queue_info.pQueuePriorities = &queue_priority;
+    queue_info.queueCount = 2u;
+    queue_info.pQueuePriorities = queue_priorities;
     memset(&synchronization2, 0, sizeof(synchronization2));
     synchronization2.sType =
         RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
@@ -2678,6 +2867,18 @@ int main(void) {
     device_created = 1u;
     vkGetDeviceQueue(device, 0u, 0u, &queue);
     CHECK(queue != NULL);
+    vkGetDeviceQueue(device, 0u, 1u, &second_queue);
+    CHECK(second_queue != NULL && second_queue != queue);
+    {
+        const RinVkResult process_wait_result =
+            test_process_submit_wait_completion(
+                device, queue, second_queue, &product_adapters);
+        if (process_wait_result != RIN_VK_SUCCESS)
+            fprintf(stderr,
+                    "process-submit completion-gated wait returned %d\n",
+                    process_wait_result);
+        CHECK(process_wait_result == RIN_VK_SUCCESS);
+    }
 
     {
         RinVkSemaphore empty_scope_semaphore = 0u;
@@ -2772,7 +2973,7 @@ int main(void) {
                     record_result);
         CHECK(record_result == RIN_VK_SUCCESS);
     }
-    CHECK(product_adapters.canonical_submit_calls == 5u &&
+    CHECK(product_adapters.canonical_submit_calls == 7u &&
           product_adapters.canonical_command_count == 10u);
     memset(&present, 0, sizeof(present));
     present.sType = RIN_VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
