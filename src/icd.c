@@ -3859,6 +3859,30 @@ static const RinVkCommandResourceUse* process_image_use_for_operation(
     return found;
 }
 
+static const RinVkCommandResourceUse* process_buffer_use_for_operation(
+        const RinVkCommandResourceUse uses[], uint32_t use_count,
+        uint32_t operation_index, uint32_t required_access) {
+    const RinVkCommandResourceUse* found = NULL;
+    uint32_t index;
+    for (index = 0u; index < use_count; ++index) {
+        if (uses[index].operation_index != operation_index ||
+            uses[index].resource_kind != RIN_VK_COMMAND_RESOURCE_USE_BUFFER ||
+            uses[index].access != required_access)
+            continue;
+        if (uses[index].resource_handle == 0u || found)
+            return NULL;
+        found = &uses[index];
+    }
+    return found;
+}
+
+static int checked_buffer_address(const RinVkBufferSlot* buffer,
+                                  uint64_t offset, uint64_t size,
+                                  uint64_t* address_out);
+static int checked_image_address(const RinVkImageSlot* image,
+                                 uint64_t offset, uint64_t size,
+                                 uint64_t* address_out);
+
 static int process_vulkan_barrier_to_backend(
         uint32_t source_stage_mask, uint32_t source_access_mask,
         uint32_t destination_stage_mask,
@@ -3970,7 +3994,163 @@ static int translate_routed_process_commands(
             &slot->routed_packet.operations[operation_index];
         RinGpuBackendCommandV1* command;
         if (operation->reserved != 0u) goto protocol_error;
-        if (operation->type == RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER) {
+        if (operation->type == RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_COPY) {
+            const RinVkCommandResourceUse* source_use =
+                process_buffer_use_for_operation(
+                    uses, use_count, operation_index,
+                    RIN_VK_COMMAND_RESOURCE_ACCESS_READ);
+            const RinVkCommandResourceUse* destination_use =
+                process_buffer_use_for_operation(
+                    uses, use_count, operation_index,
+                    RIN_VK_COMMAND_RESOURCE_ACCESS_WRITE);
+            RinVkBufferSlot* source;
+            RinVkBufferSlot* destination;
+            uint64_t source_address;
+            uint64_t destination_address;
+            if (!source_use || !destination_use ||
+                source_use == destination_use ||
+                operation->source_allocation == 0u ||
+                operation->destination_allocation == 0u ||
+                operation->size_bytes == 0u ||
+                operation->source_width != 0u ||
+                operation->source_height != 0u ||
+                operation->destination_width != 0u ||
+                operation->destination_height != 0u ||
+                operation->filter != 0u || operation->sample_count != 0u ||
+                operation->clear_value[0] != 0u ||
+                operation->clear_value[1] != 0u ||
+                operation->clear_value[2] != 0u ||
+                operation->clear_value[3] != 0u ||
+                source_use->size != operation->size_bytes ||
+                destination_use->size != operation->size_bytes ||
+                !(source = buffer_slot((RinVkDevice)slot->owner,
+                                       (RinVkBuffer)source_use->resource_handle)) ||
+                !(destination = buffer_slot(
+                      (RinVkDevice)slot->owner,
+                      (RinVkBuffer)destination_use->resource_handle)) ||
+                !source->memory || !destination->memory ||
+                (source->usage & RIN_VK_BUFFER_USAGE_TRANSFER_SRC_BIT) == 0u ||
+                (destination->usage & RIN_VK_BUFFER_USAGE_TRANSFER_DST_BIT) == 0u ||
+                source->memory->product_allocation !=
+                    operation->source_allocation ||
+                destination->memory->product_allocation !=
+                    operation->destination_allocation ||
+                !checked_buffer_address(source, source_use->offset,
+                                        source_use->size, &source_address) ||
+                !checked_buffer_address(destination, destination_use->offset,
+                                        destination_use->size,
+                                        &destination_address) ||
+                source_address != operation->source_gpu_address ||
+                destination_address != operation->destination_gpu_address)
+                goto unsupported;
+            command = &commands[command_count++];
+            command->type = RIN_GPU_BACKEND_COMMAND_COPY_BUFFER;
+            command->value.buffer_copy.source_cookie =
+                source_use->resource_handle;
+            command->value.buffer_copy.source_offset = source_use->offset;
+            command->value.buffer_copy.destination_cookie =
+                destination_use->resource_handle;
+            command->value.buffer_copy.destination_offset =
+                destination_use->offset;
+            command->value.buffer_copy.size_bytes = operation->size_bytes;
+        } else if (operation->type ==
+                   RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_TO_BUFFER_REGION) {
+            const RinVkCommandResourceUse* image_use =
+                process_image_use_for_operation(
+                    uses, use_count, operation_index,
+                    RIN_VK_COMMAND_RESOURCE_ACCESS_READ);
+            const RinVkCommandResourceUse* buffer_use =
+                process_buffer_use_for_operation(
+                    uses, use_count, operation_index,
+                    RIN_VK_COMMAND_RESOURCE_ACCESS_WRITE);
+            RinVkImageSlot* image;
+            RinVkBufferSlot* buffer;
+            RinGpuBackendImageToBufferCopyV1* copy;
+            uint32_t bytes_per_texel;
+            uint64_t row_bytes;
+            uint64_t row_pitch;
+            uint64_t destination_span;
+            uint64_t copied_bytes;
+            uint64_t image_address;
+            uint64_t buffer_address;
+            const uint32_t copy_width =
+                operation->image_to_buffer_region.copy_width;
+            const uint32_t copy_height =
+                operation->image_to_buffer_region.copy_height;
+            const uint32_t image_offset_x =
+                operation->image_to_buffer_region.image_offset_x;
+            const uint32_t image_offset_y =
+                operation->image_to_buffer_region.image_offset_y;
+            const uint32_t row_length = operation->destination_width;
+            const uint32_t image_height = operation->destination_height;
+
+            if (!image_use || !buffer_use || image_use == buffer_use ||
+                !(image = image_slot((RinVkDevice)slot->owner,
+                                     (RinVkImage)image_use->resource_handle)) ||
+                !(buffer = buffer_slot((RinVkDevice)slot->owner,
+                                       (RinVkBuffer)buffer_use->resource_handle)) ||
+                !image->memory || !buffer->memory ||
+                image->memory->owner != slot->owner ||
+                buffer->memory->owner != slot->owner ||
+                image->memory->product_allocation !=
+                    operation->source_allocation ||
+                buffer->memory->product_allocation !=
+                    operation->destination_allocation ||
+                image->memory_size != image_use->size ||
+                (image->usage & RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0u ||
+                (buffer->usage & RIN_VK_BUFFER_USAGE_TRANSFER_DST_BIT) == 0u ||
+                image->width != operation->source_width ||
+                image->height != operation->source_height ||
+                row_length < copy_width || image_height < copy_height ||
+                copy_width == 0u || copy_height == 0u ||
+                image_offset_x > image->width ||
+                copy_width > image->width - image_offset_x ||
+                image_offset_y > image->height ||
+                copy_height > image->height - image_offset_y ||
+                operation->filter != 0u || operation->sample_count != 0u)
+                goto unsupported;
+            bytes_per_texel = image_format_bytes(image->format);
+            if (bytes_per_texel == 0u ||
+                copy_width > UINT64_MAX / bytes_per_texel ||
+                copy_height > UINT64_MAX / copy_width / bytes_per_texel)
+                goto unsupported;
+            row_bytes = (uint64_t)copy_width * bytes_per_texel;
+            row_pitch = (uint64_t)row_length * bytes_per_texel;
+            if (copy_height - 1u >
+                (UINT64_MAX - row_bytes) / row_pitch)
+                goto unsupported;
+            destination_span = (uint64_t)(copy_height - 1u) * row_pitch +
+                               row_bytes;
+            copied_bytes = row_bytes * copy_height;
+            if (buffer_use->size != destination_span ||
+                operation->size_bytes != copied_bytes ||
+                !checked_image_address(image, 0u, image->memory_size,
+                                       &image_address) ||
+                !checked_buffer_address(buffer, buffer_use->offset,
+                                        buffer_use->size, &buffer_address) ||
+                image_address != operation->source_gpu_address ||
+                buffer_address != operation->destination_gpu_address)
+                goto unsupported;
+            command = &commands[command_count++];
+            command->type = RIN_GPU_BACKEND_COMMAND_COPY_IMAGE_TO_BUFFER;
+            copy = &command->value.image_to_buffer_copy;
+            copy->buffer_cookie = buffer_use->resource_handle;
+            copy->buffer_offset = buffer_use->offset;
+            copy->buffer_size_bytes = destination_span;
+            copy->buffer_row_pitch_bytes = row_pitch;
+            copy->image_cookie = image_use->resource_handle;
+            copy->image_mip_level = 0u;
+            copy->image_array_layer = 0u;
+            copy->image_width = image->width;
+            copy->image_height = image->height;
+            copy->image_offset_x = image_offset_x;
+            copy->image_offset_y = image_offset_y;
+            copy->copy_width = copy_width;
+            copy->copy_height = copy_height;
+            copy->buffer_image_height_texels = image_height;
+            copy->bytes_per_texel = bytes_per_texel;
+        } else if (operation->type ==
+                   RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER) {
             RinVkImageSlot* image;
             RinGpuBackendGraphicsBarrierV2 barrier;
             uint32_t before_state;
@@ -9443,8 +9623,6 @@ RinVkResult RIN_VKAPI_CALL vkGetSwapchainImagesKHR(
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
     swapchain = swapchain_slot(device, swapchain_handle);
     if (!swapchain) return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    if (!swapchain_surface_current(swapchain))
-        return RIN_VK_ERROR_OUT_OF_DATE_KHR;
     if (!images) {
         *image_count = swapchain->image_count;
         return RIN_VK_SUCCESS;
