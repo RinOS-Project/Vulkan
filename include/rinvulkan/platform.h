@@ -4,11 +4,16 @@
 
 #include <stdint.h>
 
+#include <ringpu/compatibility.h>
+#include <ringpu/backend_command_v1.h>
+
 #define RIN_VULKAN_PRODUCT_PLATFORM_VERSION 1u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V2_VERSION 2u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V3_VERSION 3u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V4_VERSION 4u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V5_VERSION 5u
+#define RIN_VULKAN_PRODUCT_PLATFORM_V6_VERSION 6u
+#define RIN_VULKAN_PRODUCT_PROCESS_SUBMIT_RECEIPT_V1_VERSION 1u
 #define RIN_VULKAN_PRODUCT_MEMORY_VERSION 1u
 #define RIN_VULKAN_PRODUCT_MAX_QUEUES 8u
 #define RIN_VULKAN_PRODUCT_MAX_RESOURCES_PER_SUBMISSION 8u
@@ -312,6 +317,38 @@ typedef struct RinVulkanProductPlatformV5 {
     RinVulkanProductUnbindResourceV5Fn unbind_resource;
     uint64_t reserved[2];
 } RinVulkanProductPlatformV5;
+
+/* V6 adds a canonical process-submit route. The callback receives copied,
+ * API-independent RinGPU commands and returns the physical driver's real
+ * completion receipt. It is used only when the ICD has no native queue waits;
+ * command buffers requiring another command family stay on their admitted
+ * versioned path until that path can preserve their semantics. */
+typedef struct RinVulkanProductProcessSubmitReceiptV1 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint32_t queue_id;
+    uint32_t reserved0;
+    uint64_t sequence;
+    uint64_t completion_value;
+    uint64_t device_epoch;
+    uint64_t iommu_map_generation;
+    uint64_t reserved[2];
+} RinVulkanProductProcessSubmitReceiptV1;
+
+typedef int (*RinVulkanProductSubmitProcessCommandsV6Fn)(
+    void* context, uint32_t queue_id,
+    const RinGpuBackendCommandV1* commands, uint32_t command_count,
+    const RinVulkanProductResourceV1* resources, uint32_t resource_count,
+    RinVulkanProductProcessSubmitReceiptV1* receipt_out);
+
+typedef struct RinVulkanProductPlatformV6 {
+    uint32_t struct_size;
+    uint32_t version;
+    RinVulkanProductPlatformV5* base;
+    void* context;
+    RinVulkanProductSubmitProcessCommandsV6Fn submit_process_commands;
+    uint64_t reserved[2];
+} RinVulkanProductPlatformV6;
 
 #ifdef __cplusplus
 static_assert(sizeof(RinVulkanProductResourceV1) == 16u,

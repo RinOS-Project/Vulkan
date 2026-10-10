@@ -617,6 +617,7 @@ static uintptr_t g_product_binding_v2;
 static uintptr_t g_product_binding_v3;
 static uintptr_t g_product_binding_v4;
 static uintptr_t g_product_binding_v5;
+static uintptr_t g_product_binding_v6;
 static uint32_t g_active_product_calls;
 static uintptr_t g_wsi_binding;
 static uint32_t g_active_wsi_calls;
@@ -1383,6 +1384,17 @@ static RinVulkanProductPlatformV5* product_v5_for_base(
     if (binding == 0u || binding == RIN_VK_ICD_BINDING_TRANSITION)
         return NULL;
     platform = (RinVulkanProductPlatformV5*)binding;
+    return platform->base == base ? platform : NULL;
+}
+
+static RinVulkanProductPlatformV6* product_v6_for_base(
+        const RinVulkanProductPlatformV5* base) {
+    const uintptr_t binding =
+        __atomic_load_n(&g_product_binding_v6, __ATOMIC_ACQUIRE);
+    RinVulkanProductPlatformV6* platform;
+    if (binding == 0u || binding == RIN_VK_ICD_BINDING_TRANSITION)
+        return NULL;
+    platform = (RinVulkanProductPlatformV6*)binding;
     return platform->base == base ? platform : NULL;
 }
 
@@ -3805,15 +3817,228 @@ static void complete_submission_waits(RinVkSubmissionSlot* slot) {
     }
 }
 
+static int process_image_layout_to_state(uint32_t layout,
+                                         uint32_t* state_out) {
+    if (!state_out) return 0;
+    switch (layout) {
+    case RIN_VK_IMAGE_LAYOUT_UNDEFINED:
+        *state_out = RIN_GPU_IMAGE_STATE_UNDEFINED;
+        return 1;
+    case RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+        *state_out = RIN_GPU_IMAGE_STATE_COPY_SOURCE;
+        return 1;
+    case RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+        *state_out = RIN_GPU_IMAGE_STATE_COPY_DESTINATION;
+        return 1;
+    case RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+        *state_out = RIN_GPU_IMAGE_STATE_COLOR_TARGET;
+        return 1;
+    case RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+        *state_out = RIN_GPU_IMAGE_STATE_PRESENT;
+        return 1;
+    default:
+        /* GENERAL and extension layouts have no lossless RinGPU image-state
+         * equivalent. Do not infer a state from the adjacent access masks. */
+        return 0;
+    }
+}
+
+static const RinVkCommandResourceUse* process_image_use_for_operation(
+        const RinVkCommandResourceUse uses[], uint32_t use_count,
+        uint32_t operation_index, uint32_t required_access) {
+    const RinVkCommandResourceUse* found = NULL;
+    uint32_t index;
+    for (index = 0u; index < use_count; ++index) {
+        if (uses[index].operation_index != operation_index ||
+            uses[index].resource_kind != RIN_VK_COMMAND_RESOURCE_USE_IMAGE)
+            continue;
+        if ((uses[index].access & required_access) != required_access || found)
+            return NULL;
+        found = &uses[index];
+    }
+    return found;
+}
+
+static int translate_routed_process_commands(
+        RinVkSubmissionSlot* slot, RinGpuBackendCommandV1** commands_out,
+        uint32_t* command_count_out) {
+    RinVkCommandResourceUse uses[RIN_VK_MAX_SUBMISSION_RESOURCE_USES];
+    RinGpuBackendCommandV1* commands;
+    uint32_t use_count = 0u;
+    uint32_t command_count = 0u;
+    uint32_t operation_index;
+    uint32_t capacity;
+    if (commands_out) *commands_out = NULL;
+    if (command_count_out) *command_count_out = 0u;
+    if (!slot || !slot->owner || !commands_out || !command_count_out ||
+        slot->command_stream_packet || slot->compute_packet ||
+        slot->graphics_packet ||
+        slot->routed_packet.struct_size != sizeof(slot->routed_packet) ||
+        slot->routed_packet.version != RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_3 ||
+        slot->routed_packet.reserved != 0u ||
+        slot->routed_packet.reserved_route != 0u ||
+        slot->routed_packet.product_queue_id != slot->queue_id ||
+        slot->routed_packet.op_count == 0u ||
+        slot->routed_packet.op_count > RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS ||
+        slot->routed_packet.op_count > UINT32_MAX / 2u ||
+        !snapshot_command_resource_uses(
+            slot->command_buffers, slot->command_buffer_count,
+            slot->routed_packet.op_count, uses, &use_count))
+        return RIN_VULKAN_PRODUCT_UNSUPPORTED;
+
+    capacity = slot->routed_packet.op_count * 2u;
+    commands = (RinGpuBackendCommandV1*)calloc(capacity, sizeof(*commands));
+    if (!commands) return RIN_VULKAN_PRODUCT_NO_SPACE;
+    for (operation_index = 0u;
+         operation_index < slot->routed_packet.op_count; ++operation_index) {
+        const RinGpuVulkanTransferOpV2* operation =
+            &slot->routed_packet.operations[operation_index];
+        RinGpuBackendCommandV1* command;
+        if (operation->reserved != 0u) goto protocol_error;
+        if (operation->type == RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER) {
+            RinVkImageSlot* image;
+            uint32_t before_state;
+            uint32_t after_state;
+            if (operation->source_allocation == 0u ||
+                operation->destination_height != RIN_VK_QUEUE_FAMILY_IGNORED ||
+                operation->filter != RIN_VK_QUEUE_FAMILY_IGNORED ||
+                operation->destination_width == 0u ||
+                !process_image_layout_to_state(operation->source_width,
+                                               &before_state) ||
+                !process_image_layout_to_state(operation->source_height,
+                                               &after_state) ||
+                !(image = image_slot((RinVkDevice)slot->owner,
+                    (RinVkImage)operation->source_allocation)) ||
+                !image->memory ||
+                image->memory->product_allocation !=
+                    operation->destination_allocation ||
+                image->memory_size != operation->size_bytes ||
+                operation->destination_width !=
+                    image_format_aspects(image->format))
+                goto unsupported;
+            command = &commands[command_count++];
+            command->type = RIN_GPU_BACKEND_COMMAND_TRANSITION_IMAGE;
+            command->value.image_transition.image_cookie =
+                operation->source_allocation;
+            command->value.image_transition.transition.abi_version =
+                RIN_GPU_ABI_VERSION;
+            command->value.image_transition.transition.struct_size =
+                sizeof(command->value.image_transition.transition);
+            command->value.image_transition.transition.base_mip_level = 0u;
+            command->value.image_transition.transition.mip_level_count = 1u;
+            command->value.image_transition.transition.base_array_layer = 0u;
+            command->value.image_transition.transition.array_layer_count = 1u;
+            command->value.image_transition.transition.before_state =
+                before_state;
+            command->value.image_transition.transition.after_state =
+                after_state;
+            command->value.image_transition.transition.aspect_mask =
+                operation->destination_width;
+
+            command = &commands[command_count++];
+            command->type = RIN_GPU_BACKEND_COMMAND_GRAPHICS_BARRIER_V2;
+            command->value.graphics_barrier_v2.source_stage =
+                operation->barrier.src_stage_mask;
+            command->value.graphics_barrier_v2.destination_stage =
+                operation->barrier.dst_stage_mask;
+            command->value.graphics_barrier_v2.source_access =
+                operation->barrier.src_access_mask;
+            command->value.graphics_barrier_v2.destination_access =
+                operation->barrier.dst_access_mask;
+        } else if (operation->type ==
+                   RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_CLEAR) {
+            const RinVkCommandResourceUse* use =
+                process_image_use_for_operation(
+                    uses, use_count, operation_index,
+                    RIN_VK_COMMAND_RESOURCE_ACCESS_WRITE);
+            RinVkImageSlot* image;
+            if (!use || operation->source_allocation != 0u ||
+                use->resource_handle == 0u ||
+                !(image = image_slot((RinVkDevice)slot->owner,
+                    (RinVkImage)use->resource_handle)) ||
+                image->format != RIN_VK_FORMAT_R8G8B8A8_UNORM ||
+                !image->memory ||
+                image->memory->product_allocation !=
+                    operation->destination_allocation ||
+                image->memory_size != operation->size_bytes)
+                goto unsupported;
+            command = &commands[command_count++];
+            command->type = RIN_GPU_BACKEND_COMMAND_CLEAR_IMAGE;
+            command->value.image_clear.destination_cookie =
+                use->resource_handle;
+            command->value.image_clear.mip_level = 0u;
+            command->value.image_clear.array_layer = 0u;
+            command->value.image_clear.aspects = RIN_VK_IMAGE_ASPECT_COLOR_BIT;
+            memcpy(&command->value.image_clear.color_red,
+                   &operation->clear_value[0], sizeof(float));
+            memcpy(&command->value.image_clear.color_green,
+                   &operation->clear_value[1], sizeof(float));
+            memcpy(&command->value.image_clear.color_blue,
+                   &operation->clear_value[2], sizeof(float));
+            memcpy(&command->value.image_clear.color_alpha,
+                   &operation->clear_value[3], sizeof(float));
+        } else if (operation->type ==
+                   RIN_GPU_VULKAN_TRANSFER_OP_MEMORY_BARRIER) {
+            command = &commands[command_count++];
+            command->type = RIN_GPU_BACKEND_COMMAND_GRAPHICS_BARRIER_V2;
+            command->value.graphics_barrier_v2.source_stage =
+                operation->barrier.src_stage_mask;
+            command->value.graphics_barrier_v2.destination_stage =
+                operation->barrier.dst_stage_mask;
+            command->value.graphics_barrier_v2.source_access =
+                operation->barrier.src_access_mask;
+            command->value.graphics_barrier_v2.destination_access =
+                operation->barrier.dst_access_mask;
+        } else {
+            goto unsupported;
+        }
+    }
+    if (command_count == 0u) goto unsupported;
+    *commands_out = commands;
+    *command_count_out = command_count;
+    return RIN_VULKAN_PRODUCT_OK;
+
+protocol_error:
+    free(commands);
+    return RIN_VULKAN_PRODUCT_PROTOCOL;
+unsupported:
+    free(commands);
+    return RIN_VULKAN_PRODUCT_UNSUPPORTED;
+}
+
+static int submit_canonical_process_commands(
+        RinVulkanProductPlatformV6* platform,
+        RinVkSubmissionSlot* slot,
+        RinVulkanProductProcessSubmitReceiptV1* receipt_out) {
+    RinGpuBackendCommandV1* commands = NULL;
+    uint32_t command_count = 0u;
+    int result;
+    if (!platform || !slot || !receipt_out)
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    memset(receipt_out, 0, sizeof(*receipt_out));
+    result = translate_routed_process_commands(
+        slot, &commands, &command_count);
+    if (result != RIN_VULKAN_PRODUCT_OK) return result;
+    result = platform->submit_process_commands(
+        platform->context, slot->queue_id, commands, command_count,
+        slot->resource_count == 0u ? NULL : slot->resources,
+        slot->resource_count, receipt_out);
+    free(commands);
+    return result;
+}
+
 static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
     RinVulkanProductPlatformV1* product;
     RinVulkanProductSubmissionV1 submission;
     RinVulkanProductPlatformV2* product_v2;
     RinVulkanProductPlatformV3* product_v3;
+    RinVulkanProductPlatformV6* product_v6;
     RinVulkanProductSubmissionV2 submission_v2;
     RinVulkanProductSubmissionV2 immutable_submission_v2;
     RinVulkanProductSubmissionV3 submission_v3;
     RinVulkanProductSubmissionV3 immutable_submission_v3;
+    RinVulkanProductProcessSubmitReceiptV1 process_receipt;
+    RinVulkanProductStatusV1 process_status;
     RinVulkanProductSubmissionWaitV1 waits[
         RIN_VULKAN_PRODUCT_MAX_SUBMISSION_WAITS];
     RinVulkanProductSubmissionWaitV1 immutable_waits[
@@ -3847,6 +4072,10 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
     }
     product_v2 = product_v2_for_base(product);
     product_v3 = product_v2 ? product_v3_for_base(product_v2) : NULL;
+    product_v6 = product_v3
+        ? product_v6_for_base(product_v5_for_base(
+              product_v4_for_base(product_v3)))
+        : NULL;
     if (!submission_waits_satisfied(slot)) {
         if (product_v3 && build_native_wait_list(
                               slot, product_v3->base, waits, scoped_waits,
@@ -3880,7 +4109,54 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
     memset(&submission, 0, sizeof(submission));
     memset(&submission_v2, 0, sizeof(submission_v2));
     memset(&submission_v3, 0, sizeof(submission_v3));
-    if (use_v3) {
+    memset(&process_receipt, 0, sizeof(process_receipt));
+    memset(&process_status, 0, sizeof(process_status));
+    if (product_v6 && !use_v2 && !use_v3 &&
+        slot->routed_packet.op_count != 0u &&
+        !slot->command_stream_packet && !slot->compute_packet &&
+        !slot->graphics_packet) {
+        product_result = submit_canonical_process_commands(
+            product_v6, slot, &process_receipt);
+        if (product_result == RIN_VULKAN_PRODUCT_OK &&
+            (process_receipt.struct_size != sizeof(process_receipt) ||
+             process_receipt.version !=
+                 RIN_VULKAN_PRODUCT_PROCESS_SUBMIT_RECEIPT_V1_VERSION ||
+             process_receipt.queue_id != slot->queue_id ||
+             process_receipt.reserved0 != 0u ||
+             process_receipt.sequence == 0u ||
+             process_receipt.completion_value == 0u ||
+             process_receipt.device_epoch !=
+                 slot->owner->plan.device_epoch ||
+             process_receipt.iommu_map_generation == 0u ||
+             !wsi_zero_words(process_receipt.reserved, 2u)))
+            product_result = RIN_VULKAN_PRODUCT_PROTOCOL;
+        if (product_result == RIN_VULKAN_PRODUCT_OK &&
+            (product->get_status(product->context, &process_status) !=
+                 RIN_VULKAN_PRODUCT_OK ||
+             process_status.struct_size != sizeof(process_status) ||
+             process_status.version != RIN_VULKAN_PRODUCT_PLATFORM_VERSION ||
+             process_status.flags != RIN_VULKAN_PRODUCT_STATUS_READY ||
+             process_status.iommu_domain_cookie !=
+                 slot->owner->plan.iommu_domain_cookie ||
+             process_status.device_epoch !=
+                 process_receipt.device_epoch ||
+             process_status.iommu_map_generation !=
+                 process_receipt.iommu_map_generation ||
+             process_receipt.queue_id >= process_status.queue_count))
+            product_result = RIN_VULKAN_PRODUCT_PROTOCOL;
+        if (product_result == RIN_VULKAN_PRODUCT_OK) {
+            submission.struct_size = sizeof(submission);
+            submission.version = RIN_VULKAN_PRODUCT_PLATFORM_VERSION;
+            submission.queue_id = process_receipt.queue_id;
+            submission.sequence = process_receipt.sequence;
+            submission.completion_value = process_receipt.completion_value;
+            submission.iommu_domain_cookie =
+                process_status.iommu_domain_cookie;
+            submission.iommu_map_generation =
+                process_receipt.iommu_map_generation;
+            submission.device_epoch = process_receipt.device_epoch;
+        }
+    } else if (use_v3) {
         memcpy(immutable_waits, waits, sizeof(waits));
         memcpy(immutable_scoped_waits, scoped_waits, sizeof(scoped_waits));
         product_result = product_v3->prepare_submission_v3(
@@ -4035,6 +4311,8 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
         return RIN_VK_NOT_READY;
     }
     release_product();
+    if (product_result == RIN_VULKAN_PRODUCT_UNSUPPORTED)
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
     if (product_result != RIN_VULKAN_PRODUCT_OK)
         return map_product_result(product_result);
     slot->sequence = submission.sequence;
@@ -5718,6 +5996,8 @@ int rin_gpu_vulkan_icd_unbind_product_platform_v5(
     RinVulkanProductPlatformV5* platform) {
     uintptr_t expected;
     if (!platform) return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    if (__atomic_load_n(&g_product_binding_v6, __ATOMIC_ACQUIRE) != 0u)
+        return RIN_GPU_VULKAN_BUSY;
     expected = (uintptr_t)platform;
     if (!__atomic_compare_exchange_n(
             &g_product_binding_v5, &expected,
@@ -5736,6 +6016,68 @@ int rin_gpu_vulkan_icd_unbind_product_platform_v5(
         return RIN_GPU_VULKAN_BUSY;
     }
     __atomic_store_n(&g_product_binding_v5, 0u, __ATOMIC_RELEASE);
+    return RIN_GPU_VULKAN_OK;
+}
+
+int rin_gpu_vulkan_icd_bind_product_platform_v6(
+    RinVulkanProductPlatformV6* platform) {
+    uintptr_t expected = 0u;
+    uintptr_t runtime_binding;
+    uintptr_t v5_binding;
+    if (!platform || (uintptr_t)platform == RIN_VK_ICD_BINDING_TRANSITION ||
+        platform->struct_size != sizeof(*platform) ||
+        platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V6_VERSION ||
+        !platform->base || !platform->context ||
+        !platform->submit_process_commands ||
+        !wsi_zero_words(platform->reserved, 2u))
+        return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    if (!__atomic_compare_exchange_n(&g_product_binding_v6, &expected,
+                                     RIN_VK_ICD_BINDING_TRANSITION, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        return RIN_GPU_VULKAN_BUSY;
+    runtime_binding =
+        __atomic_load_n(&g_runtime_binding, __ATOMIC_ACQUIRE);
+    v5_binding =
+        __atomic_load_n(&g_product_binding_v5, __ATOMIC_ACQUIRE);
+    if (runtime_binding == 0u ||
+        runtime_binding == RIN_VK_ICD_BINDING_TRANSITION ||
+        v5_binding != (uintptr_t)platform->base ||
+        !platform->base->base ||
+        !product_platform_ready(
+            platform->base->base->base->base->base) ||
+        __atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
+        resource_slots_active() || submission_slots_active() ||
+        native_window_swapchains_active()) {
+        __atomic_store_n(&g_product_binding_v6, 0u, __ATOMIC_RELEASE);
+        return RIN_GPU_VULKAN_BUSY;
+    }
+    __atomic_store_n(&g_product_binding_v6, (uintptr_t)platform,
+                     __ATOMIC_RELEASE);
+    return RIN_GPU_VULKAN_OK;
+}
+
+int rin_gpu_vulkan_icd_unbind_product_platform_v6(
+    RinVulkanProductPlatformV6* platform) {
+    uintptr_t expected;
+    if (!platform) return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    expected = (uintptr_t)platform;
+    if (!__atomic_compare_exchange_n(
+            &g_product_binding_v6, &expected,
+            RIN_VK_ICD_BINDING_TRANSITION, 0, __ATOMIC_ACQ_REL,
+            __ATOMIC_RELAXED))
+        return expected == 0u ? RIN_GPU_VULKAN_NOT_INITIALIZED
+                              : RIN_GPU_VULKAN_BUSY;
+    if (platform->struct_size != sizeof(*platform) ||
+        platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V6_VERSION ||
+        !platform->base || !platform->context ||
+        __atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
+        resource_slots_active() || submission_slots_active() ||
+        native_window_swapchains_active()) {
+        __atomic_store_n(&g_product_binding_v6, (uintptr_t)platform,
+                         __ATOMIC_RELEASE);
+        return RIN_GPU_VULKAN_BUSY;
+    }
+    __atomic_store_n(&g_product_binding_v6, 0u, __ATOMIC_RELEASE);
     return RIN_GPU_VULKAN_OK;
 }
 
@@ -12870,8 +13212,6 @@ void RIN_VKAPI_CALL vkCmdClearColorImage(
                                       0) ||
         (image->usage & RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u ||
         !image_subresource_range_valid(image, &ranges[0]) ||
-        color->uint32[1] != 0u || color->uint32[2] != 0u ||
-        color->uint32[3] != 0u ||
         !checked_image_address(image, 0u, image->memory_size,
                                &destination_address)) {
         valid = 0;
@@ -12881,7 +13221,8 @@ void RIN_VKAPI_CALL vkCmdClearColorImage(
     operation.destination_allocation = image->memory->product_allocation;
     operation.destination_gpu_address = destination_address;
     operation.size_bytes = image->memory_size;
-    operation.clear_value[0] = color->uint32[0];
+    memcpy(operation.clear_value, color->uint32,
+           sizeof(operation.clear_value));
     resource_use.operation_index = 0u;
     resource_use.resource_kind = RIN_VK_COMMAND_RESOURCE_USE_IMAGE;
     resource_use.access = RIN_VK_COMMAND_RESOURCE_ACCESS_WRITE;

@@ -64,6 +64,9 @@ typedef struct TestProductAdapters {
     RinVulkanProductPlatformV3 v3;
     RinVulkanProductPlatformV4 v4;
     RinVulkanProductPlatformV5 v5;
+    RinVulkanProductPlatformV6 v6;
+    uint32_t canonical_submit_calls;
+    uint32_t canonical_command_count;
     uint64_t next_mapping_lease;
     TestMemoryMapping mappings[RIN_GPU_VULKAN_SOFTWARE_MAX_ALLOCATIONS];
     TestResourceBinding resources[RIN_GPU_VULKAN_SOFTWARE_MAX_ALLOCATIONS];
@@ -635,6 +638,174 @@ static const TestResourceBinding* test_find_resource_binding(
     return NULL;
 }
 
+static int test_backend_state_to_vk_layout(uint32_t state,
+                                           uint32_t* layout_out) {
+    if (!layout_out) return 0;
+    switch (state) {
+    case RIN_GPU_IMAGE_STATE_UNDEFINED:
+        *layout_out = RIN_VK_IMAGE_LAYOUT_UNDEFINED;
+        return 1;
+    case RIN_GPU_IMAGE_STATE_COPY_SOURCE:
+        *layout_out = RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        return 1;
+    case RIN_GPU_IMAGE_STATE_COPY_DESTINATION:
+        *layout_out = RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        return 1;
+    case RIN_GPU_IMAGE_STATE_COLOR_TARGET:
+        *layout_out = RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        return 1;
+    case RIN_GPU_IMAGE_STATE_PRESENT:
+        *layout_out = RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int test_submit_process_commands_v6(
+        void* context, uint32_t queue_id,
+        const RinGpuBackendCommandV1* commands, uint32_t command_count,
+        const RinVulkanProductResourceV1* resources, uint32_t resource_count,
+        RinVulkanProductProcessSubmitReceiptV1* receipt_out) {
+    TestProductAdapters* adapters = (TestProductAdapters*)context;
+    RinGpuVulkanTransferPacketV3 packet;
+    RinVulkanProductSubmissionV1 submission;
+    uint64_t pending_image = 0u;
+    uint32_t pending_before = 0u;
+    uint32_t pending_after = 0u;
+    uint32_t operation_count = 0u;
+    uint32_t index;
+    int result;
+    if (!adapters || !adapters->software || !commands || !receipt_out ||
+        command_count == 0u || resource_count == 0u || !resources ||
+        queue_id >= adapters->software->queue_count)
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    memset(&packet, 0, sizeof(packet));
+    packet.struct_size = sizeof(packet);
+    packet.version = RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_3;
+    packet.product_queue_id = queue_id;
+    for (index = 0u; index < command_count; ++index) {
+        const RinGpuBackendCommandV1* command = &commands[index];
+        RinGpuVulkanTransferOpV2* operation;
+        if (command->reserved != 0u) return RIN_VULKAN_PRODUCT_PROTOCOL;
+        if (command->type == RIN_GPU_BACKEND_COMMAND_TRANSITION_IMAGE) {
+            if (pending_image != 0u ||
+                command->value.image_transition.image_cookie == 0u ||
+                command->value.image_transition.transition.abi_version !=
+                    RIN_GPU_ABI_VERSION ||
+                command->value.image_transition.transition.struct_size !=
+                    sizeof(command->value.image_transition.transition) ||
+                command->value.image_transition.transition.base_mip_level != 0u ||
+                command->value.image_transition.transition.mip_level_count != 1u ||
+                command->value.image_transition.transition.base_array_layer != 0u ||
+                command->value.image_transition.transition.array_layer_count != 1u ||
+                command->value.image_transition.transition.flags != 0u ||
+                !test_backend_state_to_vk_layout(
+                    command->value.image_transition.transition.before_state,
+                    &pending_before) ||
+                !test_backend_state_to_vk_layout(
+                    command->value.image_transition.transition.after_state,
+                    &pending_after))
+                return RIN_VULKAN_PRODUCT_UNSUPPORTED;
+            pending_image = command->value.image_transition.image_cookie;
+            continue;
+        }
+        if (operation_count >= RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS)
+            return RIN_VULKAN_PRODUCT_LIMIT;
+        operation = &packet.operations[operation_count];
+        memset(operation, 0, sizeof(*operation));
+        if (command->type == RIN_GPU_BACKEND_COMMAND_GRAPHICS_BARRIER_V2) {
+            const TestResourceBinding* binding;
+            RinGpuVulkanSoftwareAllocationV1* allocation;
+            if (pending_image == 0u) return RIN_VULKAN_PRODUCT_UNSUPPORTED;
+            binding = test_find_resource_binding(adapters, pending_image);
+            allocation = binding
+                ? test_find_allocation(adapters->software,
+                                       binding->allocation_handle)
+                : NULL;
+            if (!binding || !allocation ||
+                command->value.graphics_barrier_v2.flags != 0u ||
+                command->value.graphics_barrier_v2.reserved != 0u)
+                return RIN_VULKAN_PRODUCT_PROTOCOL;
+            operation->type = RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER;
+            operation->source_allocation = pending_image;
+            operation->destination_allocation = binding->allocation_handle;
+            operation->destination_gpu_address = allocation->gpu_virtual_address;
+            operation->size_bytes = allocation->size_bytes;
+            operation->barrier.src_stage_mask =
+                command->value.graphics_barrier_v2.source_stage;
+            operation->barrier.dst_stage_mask =
+                command->value.graphics_barrier_v2.destination_stage;
+            operation->barrier.src_access_mask =
+                command->value.graphics_barrier_v2.source_access;
+            operation->barrier.dst_access_mask =
+                command->value.graphics_barrier_v2.destination_access;
+            operation->source_width = pending_before;
+            operation->source_height = pending_after;
+            operation->destination_width = RIN_VK_IMAGE_ASPECT_COLOR_BIT;
+            operation->destination_height = RIN_VK_QUEUE_FAMILY_IGNORED;
+            operation->filter = RIN_VK_QUEUE_FAMILY_IGNORED;
+            pending_image = 0u;
+        } else if (command->type == RIN_GPU_BACKEND_COMMAND_CLEAR_IMAGE) {
+            const TestResourceBinding* binding = test_find_resource_binding(
+                adapters, command->value.image_clear.destination_cookie);
+            RinGpuVulkanSoftwareAllocationV1* allocation = binding
+                ? test_find_allocation(adapters->software,
+                                       binding->allocation_handle)
+                : NULL;
+            if (!binding || !allocation || pending_image != 0u ||
+                command->value.image_clear.mip_level != 0u ||
+                command->value.image_clear.array_layer != 0u ||
+                command->value.image_clear.aspects !=
+                    RIN_VK_IMAGE_ASPECT_COLOR_BIT ||
+                command->value.image_clear.flags != 0u ||
+                command->value.image_clear.depth != 0.0f ||
+                command->value.image_clear.stencil != 0u ||
+                command->value.image_clear.reserved != 0u)
+                return RIN_VULKAN_PRODUCT_PROTOCOL;
+            operation->type = RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_CLEAR;
+            operation->destination_allocation = binding->allocation_handle;
+            operation->destination_gpu_address = allocation->gpu_virtual_address;
+            operation->size_bytes = allocation->size_bytes;
+            memcpy(&operation->clear_value[0],
+                   &command->value.image_clear.color_red, sizeof(float));
+            memcpy(&operation->clear_value[1],
+                   &command->value.image_clear.color_green, sizeof(float));
+            memcpy(&operation->clear_value[2],
+                   &command->value.image_clear.color_blue, sizeof(float));
+            memcpy(&operation->clear_value[3],
+                   &command->value.image_clear.color_alpha, sizeof(float));
+        } else {
+            return RIN_VULKAN_PRODUCT_UNSUPPORTED;
+        }
+        ++operation_count;
+    }
+    if (pending_image != 0u || operation_count == 0u)
+        return RIN_VULKAN_PRODUCT_PROTOCOL;
+    packet.op_count = operation_count;
+    memset(&submission, 0, sizeof(submission));
+    result = adapters->software->platform.prepare_submission(
+        adapters->software->platform.context, queue_id,
+        (uint64_t)(uintptr_t)&packet, &submission);
+    if (result != RIN_VULKAN_PRODUCT_OK) return result;
+    result = adapters->software->platform.submit(
+        adapters->software->platform.context, &submission, resources,
+        resource_count);
+    if (result != RIN_VULKAN_PRODUCT_OK) return result;
+    memset(receipt_out, 0, sizeof(*receipt_out));
+    receipt_out->struct_size = sizeof(*receipt_out);
+    receipt_out->version =
+        RIN_VULKAN_PRODUCT_PROCESS_SUBMIT_RECEIPT_V1_VERSION;
+    receipt_out->queue_id = submission.queue_id;
+    receipt_out->sequence = submission.sequence;
+    receipt_out->completion_value = submission.completion_value;
+    receipt_out->device_epoch = submission.device_epoch;
+    receipt_out->iommu_map_generation = submission.iommu_map_generation;
+    ++adapters->canonical_submit_calls;
+    adapters->canonical_command_count = command_count;
+    return RIN_VULKAN_PRODUCT_OK;
+}
+
 static void initialize_product_adapters(
         TestProductAdapters* adapters,
         RinGpuVulkanSoftwarePlatformV1* software) {
@@ -664,6 +835,12 @@ static void initialize_product_adapters(
     adapters->v5.context = adapters;
     adapters->v5.bind_resource = test_bind_resource_v5;
     adapters->v5.unbind_resource = test_unbind_resource_v5;
+    adapters->v6.struct_size = sizeof(adapters->v6);
+    adapters->v6.version = RIN_VULKAN_PRODUCT_PLATFORM_V6_VERSION;
+    adapters->v6.base = &adapters->v5;
+    adapters->v6.context = adapters;
+    adapters->v6.submit_process_commands =
+        test_submit_process_commands_v6;
 }
 
 static void make_profile(RinGpuVulkanPhysicalDeviceV2* profile) {
@@ -901,6 +1078,7 @@ int main(void) {
     uint32_t product_v3_bound = 0u;
     uint32_t product_v4_bound = 0u;
     uint32_t product_v5_bound = 0u;
+    uint32_t product_v6_bound = 0u;
     uint32_t surface_created = 0u;
     uint32_t device_created = 0u;
     uint32_t swapchain_created = 0u;
@@ -988,6 +1166,9 @@ int main(void) {
     CHECK(rin_gpu_vulkan_icd_bind_product_platform_v5(
               &product_adapters.v5) == RIN_GPU_VULKAN_OK);
     product_v5_bound = 1u;
+    CHECK(rin_gpu_vulkan_icd_bind_product_platform_v6(
+              &product_adapters.v6) == RIN_GPU_VULKAN_OK);
+    product_v6_bound = 1u;
 
 #if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
     memset(g_surfaces, 0, sizeof(g_surfaces));
@@ -1158,6 +1339,8 @@ int main(void) {
               device, queue, images[image_index], acquire_semaphore,
               render_complete_semaphore,
               compositor.expected_word) == RIN_VK_SUCCESS);
+    CHECK(product_adapters.canonical_submit_calls == 1u &&
+          product_adapters.canonical_command_count == 10u);
     memset(&present, 0, sizeof(present));
     present.sType = RIN_VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     present.waitSemaphoreCount = 1u;
@@ -1303,6 +1486,9 @@ int main(void) {
               product_adapters.resource_unbind_calls == 2u &&
               product_adapters.fail_unbind_attempts == 0u);
         swapchain_created = 0u;
+        CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v6(
+                  &product_adapters.v6) == RIN_GPU_VULKAN_OK);
+        product_v6_bound = 0u;
         CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v5(
                   &product_adapters.v5) == RIN_GPU_VULKAN_OK);
         product_v5_bound = 0u;
@@ -1330,6 +1516,9 @@ cleanup:
     if (device_created) vkDestroyDevice(device, NULL);
     if (surface_created) vkDestroySurfaceKHR(instance, surface, NULL);
     if (instance) vkDestroyInstance(instance, NULL);
+    if (product_v6_bound)
+        (void)rin_gpu_vulkan_icd_unbind_product_platform_v6(
+            &product_adapters.v6);
     if (product_v5_bound)
         (void)rin_gpu_vulkan_icd_unbind_product_platform_v5(
             &product_adapters.v5);
