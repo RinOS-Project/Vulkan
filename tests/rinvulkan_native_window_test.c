@@ -49,13 +49,29 @@ typedef struct TestMemoryMapping {
     uint32_t active;
 } TestMemoryMapping;
 
+typedef struct TestResourceBinding {
+    uint64_t resource_cookie;
+    uint64_t allocation_handle;
+    uint64_t allocation_offset;
+    uint64_t size_bytes;
+    uint32_t required_gpu_access;
+    uint32_t active;
+} TestResourceBinding;
+
 typedef struct TestProductAdapters {
     RinGpuVulkanSoftwarePlatformV1* software;
     RinVulkanProductPlatformV2 v2;
     RinVulkanProductPlatformV3 v3;
     RinVulkanProductPlatformV4 v4;
+    RinVulkanProductPlatformV5 v5;
     uint64_t next_mapping_lease;
     TestMemoryMapping mappings[RIN_GPU_VULKAN_SOFTWARE_MAX_ALLOCATIONS];
+    TestResourceBinding resources[RIN_GPU_VULKAN_SOFTWARE_MAX_ALLOCATIONS];
+    uint64_t fail_unbind_cookie;
+    uint32_t fail_unbind_attempts;
+    uint32_t resource_bind_calls;
+    uint32_t resource_unbind_calls;
+    uint32_t active_resource_count;
 } TestProductAdapters;
 
 #if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
@@ -537,6 +553,88 @@ static int test_sync_memory_v4(
     return RIN_VULKAN_PRODUCT_OK;
 }
 
+static int test_bind_resource_v5(
+        void* context, uint64_t resource_cookie, uint64_t allocation_handle,
+        uint64_t allocation_offset, uint64_t size_bytes,
+        uint32_t required_gpu_access) {
+    TestProductAdapters* adapters = (TestProductAdapters*)context;
+    RinGpuVulkanSoftwareAllocationV1* allocation;
+    uint32_t index;
+    if (!adapters || resource_cookie == 0u || allocation_handle == 0u ||
+        size_bytes == 0u || allocation_offset > UINT64_MAX - size_bytes ||
+        required_gpu_access == 0u ||
+        (required_gpu_access &
+         ~(RIN_VULKAN_PRODUCT_MEMORY_GPU_READ |
+           RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE)) != 0u)
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    allocation = test_find_allocation(adapters->software, allocation_handle);
+    if (!allocation || allocation_offset > allocation->size_bytes ||
+        size_bytes > allocation->size_bytes - allocation_offset)
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    for (index = 0u; index < RIN_GPU_VULKAN_SOFTWARE_MAX_ALLOCATIONS;
+         ++index) {
+        TestResourceBinding* binding = &adapters->resources[index];
+        if (binding->active != 0u &&
+            binding->resource_cookie == resource_cookie)
+            return RIN_VULKAN_PRODUCT_BUSY;
+    }
+    for (index = 0u; index < RIN_GPU_VULKAN_SOFTWARE_MAX_ALLOCATIONS;
+         ++index) {
+        TestResourceBinding* binding = &adapters->resources[index];
+        if (binding->active != 0u) continue;
+        binding->resource_cookie = resource_cookie;
+        binding->allocation_handle = allocation_handle;
+        binding->allocation_offset = allocation_offset;
+        binding->size_bytes = size_bytes;
+        binding->required_gpu_access = required_gpu_access;
+        binding->active = 1u;
+        ++adapters->active_resource_count;
+        ++adapters->resource_bind_calls;
+        return RIN_VULKAN_PRODUCT_OK;
+    }
+    return RIN_VULKAN_PRODUCT_LIMIT;
+}
+
+static int test_unbind_resource_v5(void* context, uint64_t resource_cookie) {
+    TestProductAdapters* adapters = (TestProductAdapters*)context;
+    uint32_t index;
+    if (!adapters || resource_cookie == 0u)
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    if (adapters->fail_unbind_cookie == resource_cookie &&
+        adapters->fail_unbind_attempts != 0u) {
+        --adapters->fail_unbind_attempts;
+        return RIN_VULKAN_PRODUCT_BUSY;
+    }
+    for (index = 0u; index < RIN_GPU_VULKAN_SOFTWARE_MAX_ALLOCATIONS;
+         ++index) {
+        TestResourceBinding* binding = &adapters->resources[index];
+        if (binding->active == 0u ||
+            binding->resource_cookie != resource_cookie)
+            continue;
+        if (adapters->active_resource_count == 0u)
+            return RIN_VULKAN_PRODUCT_PROTOCOL;
+        memset(binding, 0, sizeof(*binding));
+        --adapters->active_resource_count;
+        ++adapters->resource_unbind_calls;
+        return RIN_VULKAN_PRODUCT_OK;
+    }
+    return RIN_VULKAN_PRODUCT_STATE;
+}
+
+static const TestResourceBinding* test_find_resource_binding(
+        const TestProductAdapters* adapters, uint64_t resource_cookie) {
+    uint32_t index;
+    if (!adapters || resource_cookie == 0u) return NULL;
+    for (index = 0u; index < RIN_GPU_VULKAN_SOFTWARE_MAX_ALLOCATIONS;
+         ++index) {
+        const TestResourceBinding* binding = &adapters->resources[index];
+        if (binding->active != 0u &&
+            binding->resource_cookie == resource_cookie)
+            return binding;
+    }
+    return NULL;
+}
+
 static void initialize_product_adapters(
         TestProductAdapters* adapters,
         RinGpuVulkanSoftwarePlatformV1* software) {
@@ -560,6 +658,12 @@ static void initialize_product_adapters(
     adapters->v4.map_memory = test_map_memory_v4;
     adapters->v4.unmap_memory = test_unmap_memory_v4;
     adapters->v4.sync_memory = test_sync_memory_v4;
+    adapters->v5.struct_size = sizeof(adapters->v5);
+    adapters->v5.version = RIN_VULKAN_PRODUCT_PLATFORM_V5_VERSION;
+    adapters->v5.base = &adapters->v4;
+    adapters->v5.context = adapters;
+    adapters->v5.bind_resource = test_bind_resource_v5;
+    adapters->v5.unbind_resource = test_unbind_resource_v5;
 }
 
 static void make_profile(RinGpuVulkanPhysicalDeviceV2* profile) {
@@ -796,6 +900,7 @@ int main(void) {
     uint32_t product_v2_bound = 0u;
     uint32_t product_v3_bound = 0u;
     uint32_t product_v4_bound = 0u;
+    uint32_t product_v5_bound = 0u;
     uint32_t surface_created = 0u;
     uint32_t device_created = 0u;
     uint32_t swapchain_created = 0u;
@@ -880,6 +985,9 @@ int main(void) {
     CHECK(rin_gpu_vulkan_icd_bind_product_platform_v4(
               &product_adapters.v4) == RIN_GPU_VULKAN_OK);
     product_v4_bound = 1u;
+    CHECK(rin_gpu_vulkan_icd_bind_product_platform_v5(
+              &product_adapters.v5) == RIN_GPU_VULKAN_OK);
+    product_v5_bound = 1u;
 
 #if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
     memset(g_surfaces, 0, sizeof(g_surfaces));
@@ -1026,6 +1134,10 @@ int main(void) {
     CHECK(vkCreateSwapchainKHR(device, &swapchain_info, NULL, &swapchain) ==
           RIN_VK_SUCCESS);
     swapchain_created = 1u;
+    CHECK(product_adapters.resource_bind_calls == 2u &&
+          product_adapters.active_resource_count == 2u &&
+          rin_gpu_vulkan_icd_unbind_product_platform_v5(
+              &product_adapters.v5) == RIN_GPU_VULKAN_BUSY);
     CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v4(
               &product_adapters.v4) == RIN_GPU_VULKAN_BUSY);
     CHECK(vkGetSwapchainImagesKHR(device, swapchain, &image_count, images) ==
@@ -1155,6 +1267,47 @@ int main(void) {
     CHECK(image_index == UINT32_MAX && compositor.accepted_imports == 1u);
 #endif
 
+    {
+        RinVkImage bound_images[2];
+        uint32_t bound_image_count = 2u;
+        const TestResourceBinding* first;
+        const TestResourceBinding* second;
+        CHECK(vkGetSwapchainImagesKHR(device, swapchain, &bound_image_count,
+                                      bound_images) == RIN_VK_SUCCESS &&
+              bound_image_count == 2u);
+        first = test_find_resource_binding(&product_adapters,
+                                           bound_images[0]);
+        second = test_find_resource_binding(&product_adapters,
+                                            bound_images[1]);
+        CHECK(first != NULL && second != NULL &&
+              first->allocation_handle != second->allocation_handle &&
+              first->allocation_offset == 0u &&
+              second->allocation_offset == 0u &&
+              first->size_bytes != 0u && second->size_bytes != 0u &&
+              first->required_gpu_access ==
+                  (RIN_VULKAN_PRODUCT_MEMORY_GPU_READ |
+                   RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE) &&
+              second->required_gpu_access ==
+                  (RIN_VULKAN_PRODUCT_MEMORY_GPU_READ |
+                   RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE));
+        product_adapters.fail_unbind_cookie = bound_images[0];
+        product_adapters.fail_unbind_attempts = 1u;
+        vkDestroySwapchainKHR(device, swapchain, NULL);
+        CHECK(product_adapters.active_resource_count == 2u &&
+              product_adapters.resource_unbind_calls == 0u &&
+              vkGetSwapchainImagesKHR(device, swapchain, &bound_image_count,
+                                      bound_images) == RIN_VK_SUCCESS &&
+              bound_image_count == 2u);
+        vkDestroySwapchainKHR(device, swapchain, NULL);
+        CHECK(product_adapters.active_resource_count == 0u &&
+              product_adapters.resource_unbind_calls == 2u &&
+              product_adapters.fail_unbind_attempts == 0u);
+        swapchain_created = 0u;
+        CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v5(
+                  &product_adapters.v5) == RIN_GPU_VULKAN_OK);
+        product_v5_bound = 0u;
+    }
+
     result = RIN_VK_SUCCESS;
 cleanup:
 #if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
@@ -1177,6 +1330,9 @@ cleanup:
     if (device_created) vkDestroyDevice(device, NULL);
     if (surface_created) vkDestroySurfaceKHR(instance, surface, NULL);
     if (instance) vkDestroyInstance(instance, NULL);
+    if (product_v5_bound)
+        (void)rin_gpu_vulkan_icd_unbind_product_platform_v5(
+            &product_adapters.v5);
     if (product_v4_bound)
         (void)rin_gpu_vulkan_icd_unbind_product_platform_v4(
             &product_adapters.v4);

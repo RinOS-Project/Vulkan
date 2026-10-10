@@ -8,6 +8,7 @@
 #define RIN_VULKAN_PRODUCT_PLATFORM_V2_VERSION 2u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V3_VERSION 3u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V4_VERSION 4u
+#define RIN_VULKAN_PRODUCT_PLATFORM_V5_VERSION 5u
 #define RIN_VULKAN_PRODUCT_MEMORY_VERSION 1u
 #define RIN_VULKAN_PRODUCT_MAX_QUEUES 8u
 #define RIN_VULKAN_PRODUCT_MAX_RESOURCES_PER_SUBMISSION 8u
@@ -291,6 +292,26 @@ typedef struct RinVulkanProductPlatformV4 {
     RinVulkanProductSyncMemoryV4Fn sync_memory;
     uint64_t reserved[2];
 } RinVulkanProductPlatformV4;
+
+/* V5 binds Vulkan object cookies to their exact process-owned allocation
+ * ranges. V4 stays byte-for-byte stable; the separate extension is required
+ * by process-submit runtimes that authorize canonical commands by cookie. */
+typedef int (*RinVulkanProductBindResourceV5Fn)(
+    void* context, uint64_t resource_cookie, uint64_t allocation_handle,
+    uint64_t allocation_offset, uint64_t size_bytes,
+    uint32_t required_gpu_access);
+typedef int (*RinVulkanProductUnbindResourceV5Fn)(
+    void* context, uint64_t resource_cookie);
+
+typedef struct RinVulkanProductPlatformV5 {
+    uint32_t struct_size;
+    uint32_t version;
+    RinVulkanProductPlatformV4* base;
+    void* context;
+    RinVulkanProductBindResourceV5Fn bind_resource;
+    RinVulkanProductUnbindResourceV5Fn unbind_resource;
+    uint64_t reserved[2];
+} RinVulkanProductPlatformV5;
 
 #ifdef __cplusplus
 static_assert(sizeof(RinVulkanProductResourceV1) == 16u,
