@@ -824,6 +824,7 @@ cleanup:
     return exit_status;
 }
 
+#if !defined(RIN_VULKAN_NATIVE_WINDOW_EXAMPLE_NO_MAIN)
 int main(void) {
     return rinos_native_window_surface_main();
 }
@@ -831,3 +832,4 @@ int main(void) {
 int rinvk_native_window_surface_run(void) {
     return rinos_native_window_surface_main();
 }
+#endif
