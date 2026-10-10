@@ -3852,8 +3852,9 @@ static const RinVkCommandResourceUse* process_image_use_for_operation(
         if (uses[index].operation_index != operation_index ||
             uses[index].resource_kind != RIN_VK_COMMAND_RESOURCE_USE_IMAGE)
             continue;
-        if ((uses[index].access & required_access) != required_access || found)
-            return NULL;
+        if ((uses[index].access & required_access) != required_access)
+            continue;
+        if (uses[index].resource_handle == 0u || found) return NULL;
         found = &uses[index];
     }
     return found;
@@ -4053,6 +4054,82 @@ static int translate_routed_process_commands(
             command->value.buffer_copy.destination_offset =
                 destination_use->offset;
             command->value.buffer_copy.size_bytes = operation->size_bytes;
+        } else if (operation->type ==
+                   RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_COPY) {
+            const RinVkCommandResourceUse* source_use =
+                process_image_use_for_operation(
+                    uses, use_count, operation_index,
+                    RIN_VK_COMMAND_RESOURCE_ACCESS_READ);
+            const RinVkCommandResourceUse* destination_use =
+                process_image_use_for_operation(
+                    uses, use_count, operation_index,
+                    RIN_VK_COMMAND_RESOURCE_ACCESS_WRITE);
+            RinVkImageSlot* source;
+            RinVkImageSlot* destination;
+            RinGpuBackendImageCopyV1* copy;
+            uint64_t source_address;
+            uint64_t destination_address;
+            if (!source_use || !destination_use ||
+                source_use == destination_use ||
+                source_use->resource_handle == destination_use->resource_handle ||
+                operation->source_allocation == 0u ||
+                operation->destination_allocation == 0u ||
+                !(source = image_slot((RinVkDevice)slot->owner,
+                    (RinVkImage)source_use->resource_handle)) ||
+                !(destination = image_slot((RinVkDevice)slot->owner,
+                    (RinVkImage)destination_use->resource_handle)) ||
+                source->memory == NULL || destination->memory == NULL ||
+                source->memory->owner != slot->owner ||
+                destination->memory->owner != slot->owner ||
+                source->memory->product_allocation !=
+                    operation->source_allocation ||
+                destination->memory->product_allocation !=
+                    operation->destination_allocation ||
+                source->memory_size != source_use->size ||
+                destination->memory_size != destination_use->size ||
+                source->format != destination->format ||
+                source->width == 0u || source->height == 0u ||
+                source->width != destination->width ||
+                source->height != destination->height ||
+                source->width != operation->source_width ||
+                source->height != operation->source_height ||
+                destination->width != operation->destination_width ||
+                destination->height != operation->destination_height ||
+                source->samples != RIN_VK_SAMPLE_COUNT_1_BIT ||
+                destination->samples != RIN_VK_SAMPLE_COUNT_1_BIT ||
+                operation->filter != 0u || operation->sample_count != 0u ||
+                operation->clear_value[0] != 0u ||
+                operation->clear_value[1] != 0u ||
+                operation->clear_value[2] != 0u ||
+                operation->clear_value[3] != 0u ||
+                operation->barrier.src_stage_mask != 0u ||
+                operation->barrier.src_access_mask != 0u ||
+                operation->barrier.dst_stage_mask != 0u ||
+                operation->barrier.dst_access_mask != 0u ||
+                operation->size_bytes != source->memory_size ||
+                operation->size_bytes != destination->memory_size ||
+                (source->usage & RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0u ||
+                (destination->usage &
+                 RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u ||
+                !checked_image_address(source, 0u, source->memory_size,
+                                       &source_address) ||
+                !checked_image_address(destination, 0u,
+                                       destination->memory_size,
+                                       &destination_address) ||
+                source_address != operation->source_gpu_address ||
+                destination_address != operation->destination_gpu_address)
+                goto unsupported;
+            command = &commands[command_count++];
+            command->type = RIN_GPU_BACKEND_COMMAND_COPY_IMAGE;
+            copy = &command->value.image_copy;
+            copy->source_cookie = source_use->resource_handle;
+            copy->destination_cookie = destination_use->resource_handle;
+            memset(&copy->region, 0, sizeof(copy->region));
+            copy->region.abi_version = RIN_GPU_ABI_VERSION;
+            copy->region.struct_size = sizeof(copy->region);
+            copy->region.width = source->width;
+            copy->region.height = source->height;
+            copy->region.depth = 1u;
         } else if (operation->type ==
                    RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_TO_BUFFER_REGION) {
             const RinVkCommandResourceUse* image_use =
@@ -13261,7 +13338,7 @@ void RIN_VKAPI_CALL vkCmdCopyImage(
     }
     source = image_slot(owner, src_image);
     destination = image_slot(owner, dst_image);
-    if (!source || !destination ||
+    if (!source || !destination || source == destination ||
         !command_image_layout_matches(core, src_image, source,
                                       src_image_layout, 1) ||
         !command_image_layout_matches(core, dst_image, destination,
@@ -13293,6 +13370,10 @@ void RIN_VKAPI_CALL vkCmdCopyImage(
         operations[index].source_gpu_address = source_address;
         operations[index].destination_gpu_address = destination_address;
         operations[index].size_bytes = source->memory_size;
+        operations[index].source_width = source->width;
+        operations[index].source_height = source->height;
+        operations[index].destination_width = destination->width;
+        operations[index].destination_height = destination->height;
         if (operations[index].size_bytes != destination->memory_size)
             valid = 0;
         resource_uses[resource_use_count].operation_index = index;

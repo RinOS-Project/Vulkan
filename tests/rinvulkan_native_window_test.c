@@ -801,6 +801,86 @@ static int test_submit_process_commands_v6(
             operation->size_bytes = copy->size_bytes;
             continue;
         }
+        if (command->type == RIN_GPU_BACKEND_COMMAND_COPY_IMAGE) {
+            const RinGpuBackendImageCopyV1* copy =
+                &command->value.image_copy;
+            const RinGpuImageCopyRegionV1* region = &copy->region;
+            const TestResourceBinding* source_binding =
+                test_find_resource_binding(adapters, copy->source_cookie);
+            const TestResourceBinding* destination_binding =
+                test_find_resource_binding(adapters,
+                                           copy->destination_cookie);
+            RinGpuVulkanSoftwareAllocationV1* source_allocation =
+                source_binding
+                    ? test_find_allocation(adapters->software,
+                                           source_binding->allocation_handle)
+                    : NULL;
+            RinGpuVulkanSoftwareAllocationV1* destination_allocation =
+                destination_binding
+                    ? test_find_allocation(adapters->software,
+                                           destination_binding->allocation_handle)
+                    : NULL;
+            uint64_t copy_bytes;
+            if (pending_image != 0u || !source_binding ||
+                !destination_binding || !source_allocation ||
+                !destination_allocation ||
+                source_binding->allocation_handle ==
+                    destination_binding->allocation_handle ||
+                region->abi_version != RIN_GPU_ABI_VERSION ||
+                region->struct_size != sizeof(*region) ||
+                region->source_mip_level != 0u ||
+                region->source_array_layer != 0u ||
+                region->source_x != 0u || region->source_y != 0u ||
+                region->source_z != 0u ||
+                region->destination_mip_level != 0u ||
+                region->destination_array_layer != 0u ||
+                region->destination_x != 0u || region->destination_y != 0u ||
+                region->destination_z != 0u || region->width == 0u ||
+                region->height == 0u || region->depth != 1u ||
+                region->flags != 0u ||
+                (uint64_t)region->width > UINT64_MAX / region->height / 4u ||
+                (source_binding->required_gpu_access &
+                 RIN_VULKAN_PRODUCT_MEMORY_GPU_READ) == 0u ||
+                (destination_binding->required_gpu_access &
+                 RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE) == 0u ||
+                source_binding->size_bytes !=
+                    destination_binding->size_bytes ||
+                source_binding->allocation_offset >
+                    source_allocation->size_bytes ||
+                source_binding->size_bytes > source_allocation->size_bytes -
+                    source_binding->allocation_offset ||
+                destination_binding->allocation_offset >
+                    destination_allocation->size_bytes ||
+                destination_binding->size_bytes >
+                    destination_allocation->size_bytes -
+                        destination_binding->allocation_offset ||
+                source_binding->allocation_offset > UINT64_MAX -
+                    source_allocation->gpu_virtual_address ||
+                destination_binding->allocation_offset > UINT64_MAX -
+                    destination_allocation->gpu_virtual_address ||
+                operation_count >= RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS)
+                return RIN_VULKAN_PRODUCT_PROTOCOL;
+            copy_bytes = (uint64_t)region->width * region->height * 4u;
+            if (copy_bytes != source_binding->size_bytes)
+                return RIN_VULKAN_PRODUCT_PROTOCOL;
+            operation = &packet.operations[operation_count++];
+            operation->type = RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_COPY;
+            operation->source_allocation = source_binding->allocation_handle;
+            operation->destination_allocation =
+                destination_binding->allocation_handle;
+            operation->source_gpu_address =
+                source_allocation->gpu_virtual_address +
+                source_binding->allocation_offset;
+            operation->destination_gpu_address =
+                destination_allocation->gpu_virtual_address +
+                destination_binding->allocation_offset;
+            operation->size_bytes = copy_bytes;
+            operation->source_width = region->width;
+            operation->source_height = region->height;
+            operation->destination_width = region->width;
+            operation->destination_height = region->height;
+            continue;
+        }
         if (command->type ==
             RIN_GPU_BACKEND_COMMAND_COPY_BUFFER_TO_IMAGE) {
             const RinGpuBackendBufferToImageCopyV1* copy =
@@ -1556,7 +1636,9 @@ static RinVkResult record_buffer_image_roundtrip(
     const uint64_t readback_size = 64u;
     RinVkImageCreateInfo image_info;
     RinVkImage image = 0u;
+    RinVkImage copy_destination = 0u;
     RinVkMemoryRequirements image_requirements;
+    RinVkMemoryRequirements copy_destination_requirements;
     RinVkBufferCreateInfo buffer_info;
     RinVkBuffer upload_buffer = 0u;
     RinVkBuffer readback_buffer = 0u;
@@ -1564,6 +1646,7 @@ static RinVkResult record_buffer_image_roundtrip(
     RinVkMemoryRequirements readback_requirements;
     RinVkMemoryAllocateInfo allocation_info;
     RinVkDeviceMemory image_memory = 0u;
+    RinVkDeviceMemory copy_destination_memory = 0u;
     RinVkDeviceMemory upload_memory = 0u;
     RinVkDeviceMemory readback_memory = 0u;
     RinVkCommandPoolCreateInfo pool_info;
@@ -1574,6 +1657,7 @@ static RinVkResult record_buffer_image_roundtrip(
     RinVkImageMemoryBarrier2 barrier;
     RinVkDependencyInfo dependency;
     RinVkBufferImageCopy region;
+    RinVkImageCopy image_copy;
     RinVkSubmitInfo submit;
     RinVkFenceCreateInfo fence_info;
     RinVkFence fence = 0u;
@@ -1600,8 +1684,14 @@ static RinVkResult record_buffer_image_roundtrip(
     image_info.sharingMode = RIN_VK_SHARING_MODE_EXCLUSIVE;
     result = vkCreateImage(device, &image_info, NULL, &image);
     if (result != RIN_VK_SUCCESS) goto done;
+    result = vkCreateImage(device, &image_info, NULL, &copy_destination);
+    if (result != RIN_VK_SUCCESS) goto done;
     vkGetImageMemoryRequirements(device, image, &image_requirements);
-    if ((image_requirements.memoryTypeBits & UINT32_C(1)) == 0u) {
+    vkGetImageMemoryRequirements(device, copy_destination,
+                                 &copy_destination_requirements);
+    if ((image_requirements.memoryTypeBits & UINT32_C(1)) == 0u ||
+        (copy_destination_requirements.memoryTypeBits & UINT32_C(1)) == 0u ||
+        image_requirements.size != copy_destination_requirements.size) {
         result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
         goto done;
     }
@@ -1632,6 +1722,10 @@ static RinVkResult record_buffer_image_roundtrip(
     allocation_info.allocationSize = image_requirements.size;
     result = vkAllocateMemory(device, &allocation_info, NULL, &image_memory);
     if (result != RIN_VK_SUCCESS) goto done;
+    allocation_info.allocationSize = copy_destination_requirements.size;
+    result = vkAllocateMemory(device, &allocation_info, NULL,
+                              &copy_destination_memory);
+    if (result != RIN_VK_SUCCESS) goto done;
     allocation_info.memoryTypeIndex = 1u;
     allocation_info.allocationSize = upload_requirements.size;
     result = vkAllocateMemory(device, &allocation_info, NULL, &upload_memory);
@@ -1641,6 +1735,9 @@ static RinVkResult record_buffer_image_roundtrip(
                               &readback_memory);
     if (result != RIN_VK_SUCCESS) goto done;
     result = vkBindImageMemory(device, image, image_memory, 0u);
+    if (result != RIN_VK_SUCCESS) goto done;
+    result = vkBindImageMemory(device, copy_destination,
+                               copy_destination_memory, 0u);
     if (result != RIN_VK_SUCCESS) goto done;
     result = vkBindBufferMemory(device, upload_buffer, upload_memory, 0u);
     if (result != RIN_VK_SUCCESS) goto done;
@@ -1700,6 +1797,8 @@ static RinVkResult record_buffer_image_roundtrip(
     dependency.imageMemoryBarrierCount = 1u;
     dependency.pImageMemoryBarriers = &barrier;
     vkCmdPipelineBarrier2(command_buffer, &dependency);
+    barrier.image = copy_destination;
+    vkCmdPipelineBarrier2(command_buffer, &dependency);
 
     memset(&region, 0, sizeof(region));
     region.bufferOffset = 4u;
@@ -1719,15 +1818,36 @@ static RinVkResult record_buffer_image_roundtrip(
     barrier.srcAccessMask = RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT;
     barrier.dstStageMask = RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT;
     barrier.dstAccessMask = RIN_VK_ACCESS_2_TRANSFER_READ_BIT;
+    barrier.image = image;
+    barrier.oldLayout = RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    vkCmdPipelineBarrier2(command_buffer, &dependency);
+    memset(&image_copy, 0, sizeof(image_copy));
+    image_copy.srcSubresource.aspectMask = RIN_VK_IMAGE_ASPECT_COLOR_BIT;
+    image_copy.srcSubresource.layerCount = 1u;
+    image_copy.dstSubresource.aspectMask = RIN_VK_IMAGE_ASPECT_COLOR_BIT;
+    image_copy.dstSubresource.layerCount = 1u;
+    image_copy.extent.width = 4u;
+    image_copy.extent.height = 3u;
+    image_copy.extent.depth = 1u;
+    vkCmdCopyImage(command_buffer, image,
+                   RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   copy_destination,
+                   RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   1u, &image_copy);
+    barrier.image = copy_destination;
     barrier.oldLayout = RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     barrier.newLayout = RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     vkCmdPipelineBarrier2(command_buffer, &dependency);
     region.bufferOffset = 8u;
-    vkCmdCopyImageToBuffer(command_buffer, image,
+    vkCmdCopyImageToBuffer(command_buffer, copy_destination,
                            RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            readback_buffer, 1u, &region);
     result = vkEndCommandBuffer(command_buffer);
-    if (result != RIN_VK_SUCCESS) goto done;
+    if (result != RIN_VK_SUCCESS) {
+        fprintf(stderr, "image-copy command recording failed: %d\n", result);
+        goto done;
+    }
 
     submits_before = product_adapters->canonical_submit_calls;
     memset(&submit, 0, sizeof(submit));
@@ -1739,11 +1859,21 @@ static RinVkResult record_buffer_image_roundtrip(
     result = vkCreateFence(device, &fence_info, NULL, &fence);
     if (result != RIN_VK_SUCCESS) goto done;
     result = vkQueueSubmit(queue, 1u, &submit, fence);
-    if (result != RIN_VK_SUCCESS) goto done;
+    if (result != RIN_VK_SUCCESS) {
+        fprintf(stderr, "image-copy queue submit failed: %d\n", result);
+        goto done;
+    }
     result = vkWaitForFences(device, 1u, &fence, 1u, UINT64_MAX);
-    if (result != RIN_VK_SUCCESS) goto done;
+    if (result != RIN_VK_SUCCESS) {
+        fprintf(stderr, "image-copy completion wait failed: %d\n", result);
+        goto done;
+    }
     if (product_adapters->canonical_submit_calls != submits_before + 1u ||
-        product_adapters->canonical_command_count != 6u) {
+        product_adapters->canonical_command_count != 11u) {
+        fprintf(stderr,
+                "image-copy canonical batch mismatch: submits %u->%u, commands=%u\n",
+                submits_before, product_adapters->canonical_submit_calls,
+                product_adapters->canonical_command_count);
         result = RIN_VK_ERROR_INITIALIZATION_FAILED;
         goto done;
     }
@@ -1769,9 +1899,13 @@ done:
     if (upload_buffer != 0u) vkDestroyBuffer(device, upload_buffer, NULL);
     if (readback_buffer != 0u) vkDestroyBuffer(device, readback_buffer, NULL);
     if (image != 0u) vkDestroyImage(device, image, NULL);
+    if (copy_destination != 0u)
+        vkDestroyImage(device, copy_destination, NULL);
     if (upload_memory != 0u) vkFreeMemory(device, upload_memory, NULL);
     if (readback_memory != 0u) vkFreeMemory(device, readback_memory, NULL);
     if (image_memory != 0u) vkFreeMemory(device, image_memory, NULL);
+    if (copy_destination_memory != 0u)
+        vkFreeMemory(device, copy_destination_memory, NULL);
     return result;
 }
 
