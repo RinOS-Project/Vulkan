@@ -3859,6 +3859,81 @@ static const RinVkCommandResourceUse* process_image_use_for_operation(
     return found;
 }
 
+static int process_vulkan_barrier_to_backend(
+        uint32_t source_stage_mask, uint32_t source_access_mask,
+        uint32_t destination_stage_mask,
+        uint32_t destination_access_mask,
+        RinGpuBackendGraphicsBarrierV2* destination) {
+    const uint32_t known_stages =
+        (uint32_t)RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS;
+    const uint32_t known_access =
+        (uint32_t)RIN_GPU_VULKAN_BARRIER_ACCESS_ALL;
+    uint32_t source_stage = 0u;
+    uint32_t destination_stage = 0u;
+    uint32_t source_access = 0u;
+    uint32_t destination_access = 0u;
+    if (!destination || (source_stage_mask & ~known_stages) != 0u ||
+        (destination_stage_mask & ~known_stages) != 0u ||
+        (source_access_mask & ~known_access) != 0u ||
+        (destination_access_mask & ~known_access) != 0u ||
+        (source_stage_mask == 0u && source_access_mask != 0u) ||
+        (destination_stage_mask == 0u && destination_access_mask != 0u))
+        return 0;
+#define PROCESS_MAP_BARRIER_STAGE(source_mask, source_bit, destination_mask, destination_bit) \
+    do { \
+        if (((source_mask) & (source_bit)) != 0u) \
+            (destination_mask) |= (destination_bit); \
+    } while (0)
+#define PROCESS_MAP_BARRIER_ACCESS(source_mask, destination_mask, read_bits, write_bits) \
+    do { \
+        if (((source_mask) & (read_bits)) != 0u) \
+            (destination_mask) |= RIN_GPU_RESOURCE_READ; \
+        if (((source_mask) & (write_bits)) != 0u) \
+            (destination_mask) |= RIN_GPU_RESOURCE_WRITE; \
+    } while (0)
+#define PROCESS_MAP_BARRIER_SCOPE(stage_mask, access_mask, core_stage, core_access) \
+    do { \
+        PROCESS_MAP_BARRIER_STAGE((stage_mask), \
+            RIN_GPU_VULKAN_BARRIER_STAGE_TRANSFER, (core_stage), \
+            RIN_GPU_PIPELINE_STAGE_COPY); \
+        PROCESS_MAP_BARRIER_STAGE((stage_mask), \
+            RIN_GPU_VULKAN_BARRIER_STAGE_HOST, (core_stage), \
+            RIN_GPU_PIPELINE_STAGE_HOST); \
+        PROCESS_MAP_BARRIER_STAGE((stage_mask), \
+            RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS, (core_stage), \
+            RIN_GPU_PIPELINE_STAGE_VERTEX_INPUT | \
+                RIN_GPU_PIPELINE_STAGE_COLOR_OUTPUT); \
+        PROCESS_MAP_BARRIER_STAGE((stage_mask), \
+            RIN_GPU_VULKAN_BARRIER_STAGE_COMPUTE, (core_stage), \
+            RIN_GPU_PIPELINE_STAGE_COMPUTE_SHADER); \
+        PROCESS_MAP_BARRIER_ACCESS((access_mask), (core_access), \
+            RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_READ | \
+                RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_READ | \
+                RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ | \
+                RIN_GPU_VULKAN_BARRIER_ACCESS_COMPUTE_READ, \
+            RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_WRITE | \
+                RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_WRITE | \
+                RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_WRITE | \
+                RIN_GPU_VULKAN_BARRIER_ACCESS_COMPUTE_WRITE); \
+    } while (0)
+    PROCESS_MAP_BARRIER_SCOPE(source_stage_mask,
+                              source_access_mask, source_stage,
+                              source_access);
+    PROCESS_MAP_BARRIER_SCOPE(destination_stage_mask,
+                              destination_access_mask, destination_stage,
+                              destination_access);
+#undef PROCESS_MAP_BARRIER_SCOPE
+#undef PROCESS_MAP_BARRIER_ACCESS
+#undef PROCESS_MAP_BARRIER_STAGE
+    destination->source_stage = source_stage;
+    destination->destination_stage = destination_stage;
+    destination->source_access = source_access;
+    destination->destination_access = destination_access;
+    destination->flags = 0u;
+    destination->reserved = 0u;
+    return 1;
+}
+
 static int translate_routed_process_commands(
         RinVkSubmissionSlot* slot, RinGpuBackendCommandV1** commands_out,
         uint32_t* command_count_out) {
@@ -3897,6 +3972,7 @@ static int translate_routed_process_commands(
         if (operation->reserved != 0u) goto protocol_error;
         if (operation->type == RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER) {
             RinVkImageSlot* image;
+            RinGpuBackendGraphicsBarrierV2 barrier;
             uint32_t before_state;
             uint32_t after_state;
             if (operation->source_allocation == 0u ||
@@ -3915,6 +3991,12 @@ static int translate_routed_process_commands(
                 image->memory_size != operation->size_bytes ||
                 operation->destination_width !=
                     image_format_aspects(image->format))
+                goto unsupported;
+            if (!process_vulkan_barrier_to_backend(
+                    operation->barrier.src_stage_mask,
+                    operation->barrier.src_access_mask,
+                    operation->barrier.dst_stage_mask,
+                    operation->barrier.dst_access_mask, &barrier))
                 goto unsupported;
             command = &commands[command_count++];
             command->type = RIN_GPU_BACKEND_COMMAND_TRANSITION_IMAGE;
@@ -3937,14 +4019,7 @@ static int translate_routed_process_commands(
 
             command = &commands[command_count++];
             command->type = RIN_GPU_BACKEND_COMMAND_GRAPHICS_BARRIER_V2;
-            command->value.graphics_barrier_v2.source_stage =
-                operation->barrier.src_stage_mask;
-            command->value.graphics_barrier_v2.destination_stage =
-                operation->barrier.dst_stage_mask;
-            command->value.graphics_barrier_v2.source_access =
-                operation->barrier.src_access_mask;
-            command->value.graphics_barrier_v2.destination_access =
-                operation->barrier.dst_access_mask;
+            command->value.graphics_barrier_v2 = barrier;
         } else if (operation->type ==
                    RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_CLEAR) {
             const RinVkCommandResourceUse* use =
@@ -3979,16 +4054,16 @@ static int translate_routed_process_commands(
                    &operation->clear_value[3], sizeof(float));
         } else if (operation->type ==
                    RIN_GPU_VULKAN_TRANSFER_OP_MEMORY_BARRIER) {
+            RinGpuBackendGraphicsBarrierV2 barrier;
+            if (!process_vulkan_barrier_to_backend(
+                    operation->barrier.src_stage_mask,
+                    operation->barrier.src_access_mask,
+                    operation->barrier.dst_stage_mask,
+                    operation->barrier.dst_access_mask, &barrier))
+                goto unsupported;
             command = &commands[command_count++];
             command->type = RIN_GPU_BACKEND_COMMAND_GRAPHICS_BARRIER_V2;
-            command->value.graphics_barrier_v2.source_stage =
-                operation->barrier.src_stage_mask;
-            command->value.graphics_barrier_v2.destination_stage =
-                operation->barrier.dst_stage_mask;
-            command->value.graphics_barrier_v2.source_access =
-                operation->barrier.src_access_mask;
-            command->value.graphics_barrier_v2.destination_access =
-                operation->barrier.dst_access_mask;
+            command->value.graphics_barrier_v2 = barrier;
         } else {
             goto unsupported;
         }
