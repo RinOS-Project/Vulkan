@@ -4220,6 +4220,95 @@ static int translate_routed_process_commands(
             blit->blit.destination_height = destination->height;
             blit->blit.filter = backend_filter;
         } else if (operation->type ==
+                   RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_RESOLVE) {
+            const RinVkCommandResourceUse* source_use =
+                process_image_use_for_operation(
+                    uses, use_count, operation_index,
+                    RIN_VK_COMMAND_RESOURCE_ACCESS_READ);
+            const RinVkCommandResourceUse* destination_use =
+                process_image_use_for_operation(
+                    uses, use_count, operation_index,
+                    RIN_VK_COMMAND_RESOURCE_ACCESS_WRITE);
+            RinVkImageSlot* source;
+            RinVkImageSlot* destination;
+            RinGpuBackendImageResolveV1* resolve;
+            uint64_t source_address;
+            uint64_t destination_address;
+            uint64_t destination_bytes;
+            uint32_t sample_count;
+            if (!source_use || !destination_use ||
+                source_use == destination_use ||
+                source_use->resource_handle == destination_use->resource_handle ||
+                !image_layout_transfer_source_valid(source_use->image_layout) ||
+                !image_layout_transfer_destination_valid(
+                    destination_use->image_layout) ||
+                operation->source_allocation == 0u ||
+                operation->destination_allocation == 0u ||
+                !(source = image_slot((RinVkDevice)slot->owner,
+                    (RinVkImage)source_use->resource_handle)) ||
+                !(destination = image_slot((RinVkDevice)slot->owner,
+                    (RinVkImage)destination_use->resource_handle)) ||
+                source->memory == NULL || destination->memory == NULL ||
+                source->memory->owner != slot->owner ||
+                destination->memory->owner != slot->owner ||
+                source->memory->product_allocation !=
+                    operation->source_allocation ||
+                destination->memory->product_allocation !=
+                    operation->destination_allocation ||
+                source->memory_size != source_use->size ||
+                destination->memory_size != destination_use->size ||
+                source->format != RIN_VK_FORMAT_R8G8B8A8_UNORM ||
+                destination->format != source->format ||
+                source->width == 0u || source->height == 0u ||
+                source->width != destination->width ||
+                source->height != destination->height ||
+                source->width != operation->source_width ||
+                source->height != operation->source_height ||
+                destination->width != operation->destination_width ||
+                destination->height != operation->destination_height ||
+                (source->samples != RIN_VK_SAMPLE_COUNT_2_BIT &&
+                 source->samples != RIN_VK_SAMPLE_COUNT_4_BIT) ||
+                destination->samples != RIN_VK_SAMPLE_COUNT_1_BIT ||
+                (source->usage & RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0u ||
+                (destination->usage &
+                 RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u ||
+                operation->sample_count != source->samples ||
+                operation->filter != 0u ||
+                operation->clear_value[0] != 0u ||
+                operation->clear_value[1] != 0u ||
+                operation->clear_value[2] != 0u ||
+                operation->clear_value[3] != 0u ||
+                operation->barrier.src_stage_mask != 0u ||
+                operation->barrier.src_access_mask != 0u ||
+                operation->barrier.dst_stage_mask != 0u ||
+                operation->barrier.dst_access_mask != 0u ||
+                source->width > UINT64_MAX / source->height / 4u)
+                goto unsupported;
+            sample_count = source->samples;
+            destination_bytes = (uint64_t)source->width * source->height * 4u;
+            if (destination_bytes > UINT64_MAX / sample_count ||
+                destination->memory_size != destination_bytes ||
+                source->memory_size != destination_bytes * sample_count ||
+                operation->size_bytes != destination_bytes ||
+                !checked_image_address(source, 0u, source->memory_size,
+                                       &source_address) ||
+                !checked_image_address(destination, 0u,
+                                       destination->memory_size,
+                                       &destination_address) ||
+                source_address != operation->source_gpu_address ||
+                destination_address != operation->destination_gpu_address)
+                goto unsupported;
+            command = &commands[command_count++];
+            command->type = RIN_GPU_BACKEND_COMMAND_RESOLVE_IMAGE;
+            resolve = &command->value.image_resolve;
+            memset(resolve, 0, sizeof(*resolve));
+            resolve->source_cookie = source_use->resource_handle;
+            resolve->destination_cookie = destination_use->resource_handle;
+            resolve->resolve.abi_version = RIN_GPU_ABI_VERSION;
+            resolve->resolve.struct_size = sizeof(resolve->resolve);
+            resolve->resolve.width = source->width;
+            resolve->resolve.height = source->height;
+        } else if (operation->type ==
                    RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_TO_BUFFER_REGION) {
             const RinVkCommandResourceUse* image_use =
                 process_image_use_for_operation(

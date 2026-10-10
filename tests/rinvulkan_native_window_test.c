@@ -67,6 +67,7 @@ typedef struct TestProductAdapters {
     RinVulkanProductPlatformV6 v6;
     uint32_t canonical_submit_calls;
     uint32_t canonical_command_count;
+    uint32_t canonical_resolve_command_count;
     uint64_t next_mapping_lease;
     TestMemoryMapping mappings[RIN_GPU_VULKAN_SOFTWARE_MAX_ALLOCATIONS];
     TestResourceBinding resources[RIN_GPU_VULKAN_SOFTWARE_MAX_ALLOCATIONS];
@@ -967,6 +968,86 @@ static int test_submit_process_commands_v6(
             operation->destination_width = region->destination_width;
             operation->destination_height = region->destination_height;
             operation->filter = region->filter;
+            continue;
+        }
+        if (command->type == RIN_GPU_BACKEND_COMMAND_RESOLVE_IMAGE) {
+            const RinGpuBackendImageResolveV1* resolve =
+                &command->value.image_resolve;
+            const RinGpuBackendImageResolveDescV1* region =
+                &resolve->resolve;
+            const TestResourceBinding* source_binding =
+                test_find_resource_binding(adapters, resolve->source_cookie);
+            const TestResourceBinding* destination_binding =
+                test_find_resource_binding(adapters,
+                                           resolve->destination_cookie);
+            RinGpuVulkanSoftwareAllocationV1* source_allocation =
+                source_binding
+                    ? test_find_allocation(adapters->software,
+                                           source_binding->allocation_handle)
+                    : NULL;
+            RinGpuVulkanSoftwareAllocationV1* destination_allocation =
+                destination_binding
+                    ? test_find_allocation(adapters->software,
+                                           destination_binding->allocation_handle)
+                    : NULL;
+            uint64_t destination_bytes;
+            if (pending_image != 0u || !source_binding ||
+                !destination_binding || !source_allocation ||
+                !destination_allocation ||
+                source_binding->allocation_handle ==
+                    destination_binding->allocation_handle ||
+                region->abi_version != RIN_GPU_ABI_VERSION ||
+                region->struct_size != sizeof(*region) ||
+                region->source_mip_level != 0u ||
+                region->source_array_layer != 0u || region->source_x != 0u ||
+                region->source_y != 0u ||
+                region->destination_mip_level != 0u ||
+                region->destination_array_layer != 0u ||
+                region->destination_x != 0u || region->destination_y != 0u ||
+                region->width == 0u || region->height == 0u ||
+                region->flags != 0u || region->reserved != 0u ||
+                (uint64_t)region->width >
+                    UINT64_MAX / region->height / 4u ||
+                (source_binding->required_gpu_access &
+                 RIN_VULKAN_PRODUCT_MEMORY_GPU_READ) == 0u ||
+                (destination_binding->required_gpu_access &
+                 RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE) == 0u ||
+                source_binding->allocation_offset != 0u ||
+                destination_binding->allocation_offset != 0u ||
+                source_binding->size_bytes > source_allocation->size_bytes ||
+                destination_binding->size_bytes >
+                    destination_allocation->size_bytes ||
+                source_binding->size_bytes > UINT64_MAX / 4u ||
+                operation_count >= RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS)
+                return RIN_VULKAN_PRODUCT_PROTOCOL;
+            destination_bytes = (uint64_t)region->width * region->height * 4u;
+            if (destination_bytes != destination_binding->size_bytes ||
+                destination_bytes > UINT64_MAX / 4u ||
+                source_binding->size_bytes != destination_bytes * 4u ||
+                source_binding->size_bytes != source_allocation->size_bytes ||
+                destination_binding->size_bytes !=
+                    destination_allocation->size_bytes ||
+                source_binding->allocation_offset > UINT64_MAX -
+                    source_allocation->gpu_virtual_address ||
+                destination_binding->allocation_offset > UINT64_MAX -
+                    destination_allocation->gpu_virtual_address)
+                return RIN_VULKAN_PRODUCT_PROTOCOL;
+            operation = &packet.operations[operation_count++];
+            operation->type = RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_RESOLVE;
+            operation->source_allocation = source_binding->allocation_handle;
+            operation->destination_allocation =
+                destination_binding->allocation_handle;
+            operation->source_gpu_address =
+                source_allocation->gpu_virtual_address;
+            operation->destination_gpu_address =
+                destination_allocation->gpu_virtual_address;
+            operation->size_bytes = destination_bytes;
+            operation->source_width = region->width;
+            operation->source_height = region->height;
+            operation->destination_width = region->width;
+            operation->destination_height = region->height;
+            operation->sample_count = 4u;
+            ++adapters->canonical_resolve_command_count;
             continue;
         }
         if (command->type ==
@@ -2014,6 +2095,271 @@ done:
     return result;
 }
 
+static RinVkResult record_image_resolve_roundtrip(
+        RinVkDevice device, RinVkQueue queue,
+        TestProductAdapters* product_adapters) {
+    static const uint8_t expected_pixel[4] = {25u, 50u, 75u, 100u};
+    const uint32_t width = 4u;
+    const uint32_t height = 3u;
+    const uint32_t sample_count = 4u;
+    const uint64_t destination_bytes = (uint64_t)width * height * 4u;
+    const uint64_t source_bytes = destination_bytes * sample_count;
+    RinVkImageCreateInfo image_info;
+    RinVkImage source = 0u;
+    RinVkImage destination = 0u;
+    RinVkMemoryRequirements source_requirements;
+    RinVkMemoryRequirements destination_requirements;
+    RinVkBufferCreateInfo buffer_info;
+    RinVkBuffer readback_buffer = 0u;
+    RinVkMemoryRequirements readback_requirements;
+    RinVkMemoryAllocateInfo allocation_info;
+    RinVkDeviceMemory source_memory = 0u;
+    RinVkDeviceMemory destination_memory = 0u;
+    RinVkDeviceMemory readback_memory = 0u;
+    RinVkCommandPoolCreateInfo pool_info;
+    RinVkCommandPool pool = 0u;
+    RinVkCommandBufferAllocateInfo allocate_info;
+    RinVkCommandBuffer command_buffer = 0u;
+    RinVkCommandBufferBeginInfo begin_info;
+    RinVkImageMemoryBarrier2 barrier;
+    RinVkDependencyInfo dependency;
+    RinVkImageResolve resolve;
+    RinVkBufferImageCopy readback_region;
+    RinVkSubmitInfo submit;
+    RinVkFenceCreateInfo fence_info;
+    RinVkFence fence = 0u;
+    RinGpuVulkanSoftwareAllocationV1* source_allocation;
+    const TestResourceBinding* source_binding;
+    void* mapped = NULL;
+    uint32_t submits_before;
+    uint32_t resolves_before;
+    uint64_t pixel;
+    RinVkResult result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+
+    if (!device || !queue || !product_adapters)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    memset(&image_info, 0, sizeof(image_info));
+    image_info.sType = RIN_VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = RIN_VK_IMAGE_TYPE_2D;
+    image_info.format = RIN_VK_FORMAT_R8G8B8A8_UNORM;
+    image_info.extent.width = width;
+    image_info.extent.height = height;
+    image_info.extent.depth = 1u;
+    image_info.mipLevels = 1u;
+    image_info.arrayLayers = 1u;
+    image_info.samples = RIN_VK_SAMPLE_COUNT_4_BIT;
+    image_info.tiling = RIN_VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    image_info.sharingMode = RIN_VK_SHARING_MODE_EXCLUSIVE;
+    result = vkCreateImage(device, &image_info, NULL, &source);
+    if (result != RIN_VK_SUCCESS) goto done;
+    image_info.samples = RIN_VK_SAMPLE_COUNT_1_BIT;
+    image_info.usage = RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                       RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    result = vkCreateImage(device, &image_info, NULL, &destination);
+    if (result != RIN_VK_SUCCESS) goto done;
+    vkGetImageMemoryRequirements(device, source, &source_requirements);
+    vkGetImageMemoryRequirements(device, destination,
+                                 &destination_requirements);
+    if (source_requirements.size != source_bytes ||
+        destination_requirements.size != destination_bytes ||
+        (source_requirements.memoryTypeBits & UINT32_C(1)) == 0u ||
+        (destination_requirements.memoryTypeBits & UINT32_C(1)) == 0u) {
+        result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        goto done;
+    }
+
+    memset(&buffer_info, 0, sizeof(buffer_info));
+    buffer_info.sType = RIN_VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.size = destination_bytes;
+    buffer_info.usage = RIN_VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    buffer_info.sharingMode = RIN_VK_SHARING_MODE_EXCLUSIVE;
+    result = vkCreateBuffer(device, &buffer_info, NULL, &readback_buffer);
+    if (result != RIN_VK_SUCCESS) goto done;
+    vkGetBufferMemoryRequirements(device, readback_buffer,
+                                  &readback_requirements);
+    if ((readback_requirements.memoryTypeBits & (UINT32_C(1) << 1u)) == 0u) {
+        result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        goto done;
+    }
+
+    memset(&allocation_info, 0, sizeof(allocation_info));
+    allocation_info.sType = RIN_VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocation_info.memoryTypeIndex = 0u;
+    allocation_info.allocationSize = source_requirements.size;
+    result = vkAllocateMemory(device, &allocation_info, NULL, &source_memory);
+    if (result != RIN_VK_SUCCESS) goto done;
+    allocation_info.allocationSize = destination_requirements.size;
+    result = vkAllocateMemory(device, &allocation_info, NULL,
+                              &destination_memory);
+    if (result != RIN_VK_SUCCESS) goto done;
+    allocation_info.memoryTypeIndex = 1u;
+    allocation_info.allocationSize = readback_requirements.size;
+    result = vkAllocateMemory(device, &allocation_info, NULL,
+                              &readback_memory);
+    if (result != RIN_VK_SUCCESS) goto done;
+    result = vkBindImageMemory(device, source, source_memory, 0u);
+    if (result != RIN_VK_SUCCESS) goto done;
+    result = vkBindImageMemory(device, destination, destination_memory, 0u);
+    if (result != RIN_VK_SUCCESS) goto done;
+    result = vkBindBufferMemory(device, readback_buffer, readback_memory, 0u);
+    if (result != RIN_VK_SUCCESS) goto done;
+
+    source_binding = test_find_resource_binding(
+        product_adapters, (uint64_t)source);
+    source_allocation = source_binding
+        ? test_find_allocation(product_adapters->software,
+                               source_binding->allocation_handle)
+        : NULL;
+    if (!source_allocation || !source_allocation->bytes ||
+        source_allocation->size_bytes != source_bytes) {
+        result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        goto done;
+    }
+    for (pixel = 0u; pixel < (uint64_t)width * height; ++pixel) {
+        uint32_t sample;
+        for (sample = 0u; sample < sample_count; ++sample) {
+            uint8_t* sample_pixel = source_allocation->bytes +
+                ((uint64_t)sample * width * height + pixel) * 4u;
+            sample_pixel[0] = (uint8_t)((sample + 1u) * 10u);
+            sample_pixel[1] = (uint8_t)((sample + 1u) * 20u);
+            sample_pixel[2] = (uint8_t)((sample + 1u) * 30u);
+            sample_pixel[3] = (uint8_t)((sample + 1u) * 40u);
+        }
+    }
+    atomic_thread_fence(memory_order_release);
+    result = vkMapMemory(device, readback_memory, 0u, destination_bytes, 0u,
+                         &mapped);
+    if (result != RIN_VK_SUCCESS) goto done;
+    memset(mapped, 0xa5, (size_t)destination_bytes);
+    vkUnmapMemory(device, readback_memory);
+    mapped = NULL;
+
+    memset(&pool_info, 0, sizeof(pool_info));
+    pool_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pool_info.queueFamilyIndex = 0u;
+    result = vkCreateCommandPool(device, &pool_info, NULL, &pool);
+    if (result != RIN_VK_SUCCESS) goto done;
+    memset(&allocate_info, 0, sizeof(allocate_info));
+    allocate_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocate_info.commandPool = pool;
+    allocate_info.level = RIN_VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocate_info.commandBufferCount = 1u;
+    result = vkAllocateCommandBuffers(device, &allocate_info, &command_buffer);
+    if (result != RIN_VK_SUCCESS) goto done;
+    memset(&begin_info, 0, sizeof(begin_info));
+    begin_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    result = vkBeginCommandBuffer(command_buffer, &begin_info);
+    if (result != RIN_VK_SUCCESS) goto done;
+
+    memset(&barrier, 0, sizeof(barrier));
+    barrier.sType = RIN_VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barrier.dstStageMask = RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    barrier.dstAccessMask = RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    barrier.srcQueueFamilyIndex = RIN_VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = RIN_VK_QUEUE_FAMILY_IGNORED;
+    barrier.oldLayout = RIN_VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.image = source;
+    barrier.subresourceRange.aspectMask = RIN_VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.levelCount = 1u;
+    barrier.subresourceRange.layerCount = 1u;
+    memset(&dependency, 0, sizeof(dependency));
+    dependency.sType = RIN_VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.imageMemoryBarrierCount = 1u;
+    dependency.pImageMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(command_buffer, &dependency);
+    barrier.image = destination;
+    vkCmdPipelineBarrier2(command_buffer, &dependency);
+    barrier.srcStageMask = RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    barrier.srcAccessMask = RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    barrier.dstStageMask = RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    barrier.dstAccessMask = RIN_VK_ACCESS_2_TRANSFER_READ_BIT;
+    barrier.image = source;
+    barrier.oldLayout = RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    vkCmdPipelineBarrier2(command_buffer, &dependency);
+
+    memset(&resolve, 0, sizeof(resolve));
+    resolve.srcSubresource.aspectMask = RIN_VK_IMAGE_ASPECT_COLOR_BIT;
+    resolve.srcSubresource.layerCount = 1u;
+    resolve.dstSubresource.aspectMask = RIN_VK_IMAGE_ASPECT_COLOR_BIT;
+    resolve.dstSubresource.layerCount = 1u;
+    resolve.extent.width = width;
+    resolve.extent.height = height;
+    resolve.extent.depth = 1u;
+    vkCmdResolveImage(command_buffer, source,
+                      RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, destination,
+                      RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &resolve);
+    barrier.srcAccessMask = RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = RIN_VK_ACCESS_2_TRANSFER_READ_BIT;
+    barrier.image = destination;
+    barrier.oldLayout = RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    vkCmdPipelineBarrier2(command_buffer, &dependency);
+
+    memset(&readback_region, 0, sizeof(readback_region));
+    readback_region.imageSubresource.aspectMask =
+        RIN_VK_IMAGE_ASPECT_COLOR_BIT;
+    readback_region.imageSubresource.layerCount = 1u;
+    readback_region.imageExtent.width = width;
+    readback_region.imageExtent.height = height;
+    readback_region.imageExtent.depth = 1u;
+    vkCmdCopyImageToBuffer(command_buffer, destination,
+                           RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           readback_buffer, 1u, &readback_region);
+    result = vkEndCommandBuffer(command_buffer);
+    if (result != RIN_VK_SUCCESS) goto done;
+
+    submits_before = product_adapters->canonical_submit_calls;
+    resolves_before = product_adapters->canonical_resolve_command_count;
+    memset(&submit, 0, sizeof(submit));
+    submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1u;
+    submit.pCommandBuffers = &command_buffer;
+    memset(&fence_info, 0, sizeof(fence_info));
+    fence_info.sType = RIN_VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    result = vkCreateFence(device, &fence_info, NULL, &fence);
+    if (result != RIN_VK_SUCCESS) goto done;
+    result = vkQueueSubmit(queue, 1u, &submit, fence);
+    if (result != RIN_VK_SUCCESS) goto done;
+    result = vkWaitForFences(device, 1u, &fence, 1u, UINT64_MAX);
+    if (result != RIN_VK_SUCCESS) goto done;
+    if (product_adapters->canonical_submit_calls != submits_before + 1u ||
+        product_adapters->canonical_resolve_command_count !=
+            resolves_before + 1u) {
+        result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        goto done;
+    }
+    result = vkMapMemory(device, readback_memory, 0u, destination_bytes, 0u,
+                         &mapped);
+    if (result != RIN_VK_SUCCESS) goto done;
+    for (pixel = 0u; pixel < (uint64_t)width * height; ++pixel) {
+        if (memcmp((const uint8_t*)mapped + pixel * sizeof(expected_pixel),
+                   expected_pixel, sizeof(expected_pixel)) != 0) {
+            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+            goto done;
+        }
+    }
+    result = RIN_VK_SUCCESS;
+
+done:
+    if (mapped) vkUnmapMemory(device, readback_memory);
+    if (fence != 0u) vkDestroyFence(device, fence, NULL);
+    if (pool != 0u) vkDestroyCommandPool(device, pool, NULL);
+    if (readback_buffer != 0u)
+        vkDestroyBuffer(device, readback_buffer, NULL);
+    if (source != 0u) vkDestroyImage(device, source, NULL);
+    if (destination != 0u) vkDestroyImage(device, destination, NULL);
+    if (readback_memory != 0u)
+        vkFreeMemory(device, readback_memory, NULL);
+    if (source_memory != 0u) vkFreeMemory(device, source_memory, NULL);
+    if (destination_memory != 0u)
+        vkFreeMemory(device, destination_memory, NULL);
+    return result;
+}
+
 int main(void) {
     RinGpuVulkanPhysicalDeviceV2 profile;
     RinGpuVulkanRuntimeV1 runtime;
@@ -2343,6 +2689,8 @@ int main(void) {
                                         &product_adapters) == RIN_VK_SUCCESS);
     CHECK(record_buffer_image_roundtrip(device, queue,
                                         &product_adapters) == RIN_VK_SUCCESS);
+    CHECK(record_image_resolve_roundtrip(device, queue,
+                                         &product_adapters) == RIN_VK_SUCCESS);
     {
         RinVkResult record_result = record_present_layout_and_clear(
             device, queue, images[image_index], acquire_semaphore,
@@ -2352,7 +2700,7 @@ int main(void) {
                     record_result);
         CHECK(record_result == RIN_VK_SUCCESS);
     }
-    CHECK(product_adapters.canonical_submit_calls == 3u &&
+    CHECK(product_adapters.canonical_submit_calls == 4u &&
           product_adapters.canonical_command_count == 10u);
     memset(&present, 0, sizeof(present));
     present.sType = RIN_VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
