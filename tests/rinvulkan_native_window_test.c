@@ -1568,12 +1568,14 @@ static RinVkResult test_process_submit_wait_completion(
         RinVkQueue consumer_queue, TestProductAdapters* adapters) {
     RinVkSemaphoreCreateInfo semaphore_info;
     RinVkSemaphore semaphore = 0u;
+    RinVkSemaphore timeline_semaphore = 0u;
+    RinVkSemaphoreTypeCreateInfo semaphore_type_info;
     TestRecordedBarrier producer;
     TestRecordedBarrier consumer;
-    RinVkSubmitInfo submit;
-    const RinVkCommandBuffer* command_buffer;
-    const uint64_t* semaphore_handle;
-    const uint32_t wait_stage = RIN_VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    RinVkSemaphoreSubmitInfo signal_infos[2];
+    RinVkSemaphoreSubmitInfo wait_infos[2];
+    RinVkCommandBufferSubmitInfo command_buffer_info;
+    RinVkSubmitInfo2 submit;
     const uint32_t submits_before = adapters->canonical_submit_calls;
     const uint32_t opaque_prepares_before =
         g_opaque_process_prepare_calls;
@@ -1585,22 +1587,41 @@ static RinVkResult test_process_submit_wait_completion(
     memset(&semaphore_info, 0, sizeof(semaphore_info));
     semaphore_info.sType = RIN_VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     if (vkCreateSemaphore(device, &semaphore_info, NULL, &semaphore) !=
-            RIN_VK_SUCCESS ||
+            RIN_VK_SUCCESS)
+        goto done;
+    memset(&semaphore_type_info, 0, sizeof(semaphore_type_info));
+    semaphore_type_info.sType =
+        RIN_VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+    semaphore_type_info.semaphoreType = RIN_VK_SEMAPHORE_TYPE_TIMELINE;
+    semaphore_info.pNext = &semaphore_type_info;
+    if (vkCreateSemaphore(device, &semaphore_info, NULL,
+                          &timeline_semaphore) != RIN_VK_SUCCESS ||
         record_process_wait_barrier(device, &producer) != RIN_VK_SUCCESS ||
         record_process_wait_barrier(device, &consumer) != RIN_VK_SUCCESS)
         goto done;
 
     adapters->deferred_completion_value = 0u;
     adapters->defer_next_process_completion = 1u;
-    command_buffer = &producer.command_buffer;
-    semaphore_handle = &semaphore;
+    memset(&command_buffer_info, 0, sizeof(command_buffer_info));
+    command_buffer_info.sType =
+        RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+    command_buffer_info.commandBuffer = producer.command_buffer;
+    command_buffer_info.deviceMask = 1u;
+    memset(signal_infos, 0, sizeof(signal_infos));
+    signal_infos[0].sType = RIN_VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    signal_infos[0].semaphore = semaphore;
+    signal_infos[0].stageMask = RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    signal_infos[1].sType = RIN_VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    signal_infos[1].semaphore = timeline_semaphore;
+    signal_infos[1].value = 1u;
+    signal_infos[1].stageMask = RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     memset(&submit, 0, sizeof(submit));
-    submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit.commandBufferCount = 1u;
-    submit.pCommandBuffers = command_buffer;
-    submit.signalSemaphoreCount = 1u;
-    submit.pSignalSemaphores = semaphore_handle;
-    result = vkQueueSubmit(producer_queue, 1u, &submit, 0u);
+    submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    submit.commandBufferInfoCount = 1u;
+    submit.pCommandBufferInfos = &command_buffer_info;
+    submit.signalSemaphoreInfoCount = 2u;
+    submit.pSignalSemaphoreInfos = signal_infos;
+    result = vkQueueSubmit2(producer_queue, 1u, &submit, 0u);
     if (result != RIN_VK_SUCCESS ||
         adapters->canonical_submit_calls != submits_before + 1u ||
         g_opaque_process_prepare_calls != opaque_prepares_before ||
@@ -1622,15 +1643,22 @@ static RinVkResult test_process_submit_wait_completion(
         goto done;
     }
 
-    command_buffer = &consumer.command_buffer;
     memset(&submit, 0, sizeof(submit));
-    submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit.waitSemaphoreCount = 1u;
-    submit.pWaitSemaphores = semaphore_handle;
-    submit.pWaitDstStageMask = &wait_stage;
-    submit.commandBufferCount = 1u;
-    submit.pCommandBuffers = command_buffer;
-    result = vkQueueSubmit(consumer_queue, 1u, &submit, 0u);
+    submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    memset(wait_infos, 0, sizeof(wait_infos));
+    wait_infos[0].sType = RIN_VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    wait_infos[0].semaphore = semaphore;
+    wait_infos[0].stageMask = RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    wait_infos[1].sType = RIN_VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    wait_infos[1].semaphore = timeline_semaphore;
+    wait_infos[1].value = 1u;
+    wait_infos[1].stageMask = RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    command_buffer_info.commandBuffer = consumer.command_buffer;
+    submit.waitSemaphoreInfoCount = 2u;
+    submit.pWaitSemaphoreInfos = wait_infos;
+    submit.commandBufferInfoCount = 1u;
+    submit.pCommandBufferInfos = &command_buffer_info;
+    result = vkQueueSubmit2(consumer_queue, 1u, &submit, 0u);
     if (result != RIN_VK_SUCCESS ||
         adapters->canonical_submit_calls != submits_before + 1u ||
         g_opaque_process_prepare_calls != opaque_prepares_before ||
@@ -1667,6 +1695,8 @@ static RinVkResult test_process_submit_wait_completion(
 done:
     if (producer.pool != 0u) vkDestroyCommandPool(device, producer.pool, NULL);
     if (consumer.pool != 0u) vkDestroyCommandPool(device, consumer.pool, NULL);
+    if (timeline_semaphore != 0u)
+        vkDestroySemaphore(device, timeline_semaphore, NULL);
     if (semaphore != 0u) vkDestroySemaphore(device, semaphore, NULL);
     return result;
 }
@@ -2645,6 +2675,7 @@ int main(void) {
         RIN_VK_RINOS_NATIVE_WINDOW_SURFACE_EXTENSION
     };
     const char* device_extensions[] = {
+        RIN_VK_KHR_TIMELINE_SEMAPHORE_EXTENSION,
         RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION,
         RIN_VK_KHR_SWAPCHAIN_EXTENSION
     };
@@ -2661,6 +2692,7 @@ int main(void) {
     RinVkSurfaceCapabilitiesKHR capabilities;
     RinVkSurfaceFormatKHR surface_format;
     RinVkDeviceQueueCreateInfo queue_info;
+    RinVkPhysicalDeviceVulkan12Features vulkan12;
     RinVkPhysicalDeviceSynchronization2Features synchronization2;
     RinVkDeviceCreateInfo device_info;
     RinVkDevice device = NULL;
@@ -2855,12 +2887,17 @@ int main(void) {
     synchronization2.sType =
         RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
     synchronization2.synchronization2 = 1u;
+    memset(&vulkan12, 0, sizeof(vulkan12));
+    vulkan12.sType =
+        RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    vulkan12.pNext = &synchronization2;
+    vulkan12.timelineSemaphore = 1u;
     memset(&device_info, 0, sizeof(device_info));
     device_info.sType = RIN_VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    device_info.pNext = &synchronization2;
+    device_info.pNext = &vulkan12;
     device_info.queueCreateInfoCount = 1u;
     device_info.pQueueCreateInfos = &queue_info;
-    device_info.enabledExtensionCount = 2u;
+    device_info.enabledExtensionCount = 3u;
     device_info.ppEnabledExtensionNames = device_extensions;
     CHECK(vkCreateDevice(physical, &device_info, NULL, &device) ==
           RIN_VK_SUCCESS);
