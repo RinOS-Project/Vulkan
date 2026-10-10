@@ -68,6 +68,8 @@ typedef struct TestProductAdapters {
     uint32_t canonical_submit_calls;
     uint32_t canonical_command_count;
     uint32_t canonical_resolve_command_count;
+    uint32_t canonical_graphics_barrier_count;
+    RinGpuBackendGraphicsBarrierV2 canonical_last_graphics_barrier;
     uint64_t next_mapping_lease;
     TestMemoryMapping mappings[RIN_GPU_VULKAN_SOFTWARE_MAX_ALLOCATIONS];
     TestResourceBinding resources[RIN_GPU_VULKAN_SOFTWARE_MAX_ALLOCATIONS];
@@ -1303,6 +1305,9 @@ static int test_submit_process_commands_v6(
         if (command->type == RIN_GPU_BACKEND_COMMAND_GRAPHICS_BARRIER_V2) {
             const TestResourceBinding* binding;
             RinGpuVulkanSoftwareAllocationV1* allocation;
+            ++adapters->canonical_graphics_barrier_count;
+            adapters->canonical_last_graphics_barrier =
+                command->value.graphics_barrier_v2;
             if (pending_image == 0u) {
                 if (command->value.graphics_barrier_v2.flags != 0u ||
                     command->value.graphics_barrier_v2.reserved != 0u)
@@ -2124,6 +2129,7 @@ static RinVkResult record_image_resolve_roundtrip(
     RinVkCommandBuffer command_buffer = 0u;
     RinVkCommandBufferBeginInfo begin_info;
     RinVkImageMemoryBarrier2 barrier;
+    RinVkBufferMemoryBarrier2 buffer_barrier;
     RinVkDependencyInfo dependency;
     RinVkImageResolve resolve;
     RinVkBufferImageCopy readback_region;
@@ -2135,6 +2141,7 @@ static RinVkResult record_image_resolve_roundtrip(
     void* mapped = NULL;
     uint32_t submits_before;
     uint32_t resolves_before;
+    uint32_t barriers_before;
     uint64_t pixel;
     RinVkResult result = RIN_VK_ERROR_INITIALIZATION_FAILED;
 
@@ -2319,11 +2326,34 @@ static RinVkResult record_image_resolve_roundtrip(
     vkCmdCopyImageToBuffer(command_buffer, destination,
                            RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            readback_buffer, 1u, &readback_region);
+    memset(&buffer_barrier, 0, sizeof(buffer_barrier));
+    buffer_barrier.sType = RIN_VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
+    buffer_barrier.srcStageMask = RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    buffer_barrier.srcAccessMask = RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    buffer_barrier.dstStageMask = RIN_VK_PIPELINE_STAGE_2_HOST_BIT;
+    buffer_barrier.dstAccessMask = RIN_VK_ACCESS_2_HOST_READ_BIT;
+    buffer_barrier.srcQueueFamilyIndex = RIN_VK_QUEUE_FAMILY_IGNORED;
+    buffer_barrier.dstQueueFamilyIndex = RIN_VK_QUEUE_FAMILY_IGNORED;
+    buffer_barrier.buffer = readback_buffer;
+    buffer_barrier.offset = 0u;
+    buffer_barrier.size = destination_bytes;
+    dependency.memoryBarrierCount = 0u;
+    dependency.pMemoryBarriers = NULL;
+    dependency.bufferMemoryBarrierCount = 1u;
+    dependency.pBufferMemoryBarriers = &buffer_barrier;
+    dependency.imageMemoryBarrierCount = 0u;
+    dependency.pImageMemoryBarriers = NULL;
+    vkCmdPipelineBarrier2(command_buffer, &dependency);
     result = vkEndCommandBuffer(command_buffer);
-    if (result != RIN_VK_SUCCESS) goto done;
+    if (result != RIN_VK_SUCCESS) {
+        fprintf(stderr, "image-resolve command recording failed: %d\n",
+                result);
+        goto done;
+    }
 
     submits_before = product_adapters->canonical_submit_calls;
     resolves_before = product_adapters->canonical_resolve_command_count;
+    barriers_before = product_adapters->canonical_graphics_barrier_count;
     memset(&submit, 0, sizeof(submit));
     submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit.commandBufferCount = 1u;
@@ -2333,12 +2363,42 @@ static RinVkResult record_image_resolve_roundtrip(
     result = vkCreateFence(device, &fence_info, NULL, &fence);
     if (result != RIN_VK_SUCCESS) goto done;
     result = vkQueueSubmit(queue, 1u, &submit, fence);
-    if (result != RIN_VK_SUCCESS) goto done;
+    if (result != RIN_VK_SUCCESS) {
+        fprintf(stderr, "image-resolve queue submit failed: %d\n", result);
+        goto done;
+    }
     result = vkWaitForFences(device, 1u, &fence, 1u, UINT64_MAX);
-    if (result != RIN_VK_SUCCESS) goto done;
+    if (result != RIN_VK_SUCCESS) {
+        fprintf(stderr, "image-resolve completion wait failed: %d\n", result);
+        goto done;
+    }
     if (product_adapters->canonical_submit_calls != submits_before + 1u ||
         product_adapters->canonical_resolve_command_count !=
-            resolves_before + 1u) {
+            resolves_before + 1u ||
+        product_adapters->canonical_command_count != 11u ||
+        product_adapters->canonical_graphics_barrier_count !=
+            barriers_before + 5u ||
+        product_adapters->canonical_last_graphics_barrier.source_stage !=
+            RIN_GPU_PIPELINE_STAGE_COPY ||
+        product_adapters->canonical_last_graphics_barrier.source_access !=
+            RIN_GPU_RESOURCE_WRITE ||
+        product_adapters->canonical_last_graphics_barrier.destination_stage !=
+            RIN_GPU_PIPELINE_STAGE_HOST ||
+        product_adapters->canonical_last_graphics_barrier.destination_access !=
+            RIN_GPU_RESOURCE_READ ||
+        product_adapters->canonical_last_graphics_barrier.flags != 0u ||
+        product_adapters->canonical_last_graphics_barrier.reserved != 0u) {
+        fprintf(stderr,
+                "image-resolve canonical batch mismatch: commands=%u, resolves=%u, barriers=%u, last=%u/%u->%u/%u\n",
+                product_adapters->canonical_command_count,
+                product_adapters->canonical_resolve_command_count -
+                    resolves_before,
+                product_adapters->canonical_graphics_barrier_count -
+                    barriers_before,
+                product_adapters->canonical_last_graphics_barrier.source_stage,
+                product_adapters->canonical_last_graphics_barrier.source_access,
+                product_adapters->canonical_last_graphics_barrier.destination_stage,
+                product_adapters->canonical_last_graphics_barrier.destination_access);
         result = RIN_VK_ERROR_INITIALIZATION_FAILED;
         goto done;
     }

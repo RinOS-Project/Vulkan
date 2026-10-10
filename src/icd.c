@@ -4057,6 +4057,66 @@ static int translate_routed_process_commands(
                 destination_use->offset;
             command->value.buffer_copy.size_bytes = operation->size_bytes;
         } else if (operation->type ==
+                   RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_BARRIER) {
+            RinVkBufferSlot* buffer = NULL;
+            RinGpuBackendGraphicsBarrierV2 barrier;
+            const uint32_t source_queue_family = operation->source_width;
+            const uint32_t destination_queue_family = operation->source_height;
+            uint64_t buffer_base;
+            uint64_t buffer_offset;
+            uint64_t buffer_address;
+            if (operation->source_allocation == 0u ||
+                operation->destination_allocation == 0u ||
+                operation->source_gpu_address != 0u ||
+                operation->size_bytes == 0u ||
+                operation->destination_width != 0u ||
+                operation->destination_height != 0u ||
+                operation->filter != 0u || operation->sample_count != 0u ||
+                !(buffer = buffer_slot((RinVkDevice)slot->owner,
+                    (RinVkBuffer)operation->source_allocation)) ||
+                buffer->owner != slot->owner || !buffer->memory ||
+                buffer->memory->owner != slot->owner ||
+                buffer->memory_generation != buffer->memory->generation ||
+                buffer->memory->product_allocation !=
+                    operation->destination_allocation)
+                goto unsupported;
+            if (!checked_buffer_address(buffer, 0u, 0u, &buffer_base) ||
+                operation->destination_gpu_address < buffer_base)
+                goto unsupported;
+            buffer_offset = operation->destination_gpu_address - buffer_base;
+            if (!checked_buffer_address(buffer, buffer_offset,
+                                        operation->size_bytes,
+                                        &buffer_address) ||
+                buffer_address != operation->destination_gpu_address ||
+                slot->routed_packet.queue_family_index >=
+                    slot->owner->physical_profile.queue_family_count ||
+                ((source_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED) !=
+                 (destination_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED)))
+                goto unsupported;
+            if (source_queue_family != RIN_VK_QUEUE_FAMILY_IGNORED &&
+                (source_queue_family >=
+                     slot->owner->physical_profile.queue_family_count ||
+                 destination_queue_family >=
+                     slot->owner->physical_profile.queue_family_count ||
+                 (slot->routed_packet.queue_family_index !=
+                      source_queue_family &&
+                  slot->routed_packet.queue_family_index !=
+                      destination_queue_family)))
+                goto unsupported;
+            if (!process_vulkan_barrier_to_backend(
+                    operation->barrier.src_stage_mask,
+                    operation->barrier.src_access_mask,
+                    operation->barrier.dst_stage_mask,
+                    operation->barrier.dst_access_mask, &barrier))
+                goto unsupported;
+            /* RinGPU's canonical barrier has global scope. Keeping the exact
+             * stage/access masks while broadening the resource range is a
+             * conservative memory dependency; queue-family ownership and its
+             * semaphore handoff are validated separately by the ICD. */
+            command = &commands[command_count++];
+            command->type = RIN_GPU_BACKEND_COMMAND_GRAPHICS_BARRIER_V2;
+            command->value.graphics_barrier_v2 = barrier;
+        } else if (operation->type ==
                    RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_COPY) {
             const RinVkCommandResourceUse* source_use =
                 process_image_use_for_operation(
