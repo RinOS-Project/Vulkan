@@ -991,6 +991,7 @@ static int test_submit_process_commands_v6(
                                            destination_binding->allocation_handle)
                     : NULL;
             uint64_t destination_bytes;
+            uint32_t sample_count;
             if (pending_image != 0u || !source_binding ||
                 !destination_binding || !source_allocation ||
                 !destination_allocation ||
@@ -1017,13 +1018,13 @@ static int test_submit_process_commands_v6(
                 source_binding->size_bytes > source_allocation->size_bytes ||
                 destination_binding->size_bytes >
                     destination_allocation->size_bytes ||
-                source_binding->size_bytes > UINT64_MAX / 4u ||
                 operation_count >= RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS)
                 return RIN_VULKAN_PRODUCT_PROTOCOL;
             destination_bytes = (uint64_t)region->width * region->height * 4u;
             if (destination_bytes != destination_binding->size_bytes ||
                 destination_bytes > UINT64_MAX / 4u ||
-                source_binding->size_bytes != destination_bytes * 4u ||
+                (source_binding->size_bytes != destination_bytes * 2u &&
+                 source_binding->size_bytes != destination_bytes * 4u) ||
                 source_binding->size_bytes != source_allocation->size_bytes ||
                 destination_binding->size_bytes !=
                     destination_allocation->size_bytes ||
@@ -1032,6 +1033,8 @@ static int test_submit_process_commands_v6(
                 destination_binding->allocation_offset > UINT64_MAX -
                     destination_allocation->gpu_virtual_address)
                 return RIN_VULKAN_PRODUCT_PROTOCOL;
+            sample_count =
+                (uint32_t)(source_binding->size_bytes / destination_bytes);
             operation = &packet.operations[operation_count++];
             operation->type = RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_RESOLVE;
             operation->source_allocation = source_binding->allocation_handle;
@@ -1046,7 +1049,7 @@ static int test_submit_process_commands_v6(
             operation->source_height = region->height;
             operation->destination_width = region->width;
             operation->destination_height = region->height;
-            operation->sample_count = 4u;
+            operation->sample_count = sample_count;
             ++adapters->canonical_resolve_command_count;
             continue;
         }
@@ -2097,13 +2100,12 @@ done:
 
 static RinVkResult record_image_resolve_roundtrip(
         RinVkDevice device, RinVkQueue queue,
-        TestProductAdapters* product_adapters) {
-    static const uint8_t expected_pixel[4] = {25u, 50u, 75u, 100u};
+        TestProductAdapters* product_adapters, uint32_t sample_count) {
+    uint8_t expected_pixel[4];
     const uint32_t width = 4u;
     const uint32_t height = 3u;
-    const uint32_t sample_count = 4u;
     const uint64_t destination_bytes = (uint64_t)width * height * 4u;
-    const uint64_t source_bytes = destination_bytes * sample_count;
+    uint64_t source_bytes;
     RinVkImageCreateInfo image_info;
     RinVkImage source = 0u;
     RinVkImage destination = 0u;
@@ -2138,6 +2140,13 @@ static RinVkResult record_image_resolve_roundtrip(
 
     if (!device || !queue || !product_adapters)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    if (sample_count != 2u && sample_count != 4u)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    source_bytes = destination_bytes * sample_count;
+    expected_pixel[0] = (uint8_t)(5u * (sample_count + 1u));
+    expected_pixel[1] = (uint8_t)(10u * (sample_count + 1u));
+    expected_pixel[2] = (uint8_t)(15u * (sample_count + 1u));
+    expected_pixel[3] = (uint8_t)(20u * (sample_count + 1u));
     memset(&image_info, 0, sizeof(image_info));
     image_info.sType = RIN_VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     image_info.imageType = RIN_VK_IMAGE_TYPE_2D;
@@ -2147,7 +2156,8 @@ static RinVkResult record_image_resolve_roundtrip(
     image_info.extent.depth = 1u;
     image_info.mipLevels = 1u;
     image_info.arrayLayers = 1u;
-    image_info.samples = RIN_VK_SAMPLE_COUNT_4_BIT;
+    image_info.samples = sample_count == 2u
+        ? RIN_VK_SAMPLE_COUNT_2_BIT : RIN_VK_SAMPLE_COUNT_4_BIT;
     image_info.tiling = RIN_VK_IMAGE_TILING_OPTIMAL;
     image_info.usage = RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     image_info.sharingMode = RIN_VK_SHARING_MODE_EXCLUSIVE;
@@ -2689,8 +2699,10 @@ int main(void) {
                                         &product_adapters) == RIN_VK_SUCCESS);
     CHECK(record_buffer_image_roundtrip(device, queue,
                                         &product_adapters) == RIN_VK_SUCCESS);
-    CHECK(record_image_resolve_roundtrip(device, queue,
-                                         &product_adapters) == RIN_VK_SUCCESS);
+    CHECK(record_image_resolve_roundtrip(device, queue, &product_adapters,
+                                         2u) == RIN_VK_SUCCESS);
+    CHECK(record_image_resolve_roundtrip(device, queue, &product_adapters,
+                                         4u) == RIN_VK_SUCCESS);
     {
         RinVkResult record_result = record_present_layout_and_clear(
             device, queue, images[image_index], acquire_semaphore,
@@ -2700,7 +2712,7 @@ int main(void) {
                     record_result);
         CHECK(record_result == RIN_VK_SUCCESS);
     }
-    CHECK(product_adapters.canonical_submit_calls == 4u &&
+    CHECK(product_adapters.canonical_submit_calls == 5u &&
           product_adapters.canonical_command_count == 10u);
     memset(&present, 0, sizeof(present));
     present.sType = RIN_VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
