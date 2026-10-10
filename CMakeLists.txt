@@ -11,6 +11,13 @@ set(RINRUNTIME_INCLUDE_DIR "${RINRUNTIME_DIR}/include")
 if(NOT EXISTS "${RINRUNTIME_INCLUDE_DIR}/rinruntime/window.h")
     message(FATAL_ERROR "RinRuntime window ABI is required by RinOS WSI")
 endif()
+set(RINOS_SDK_INCLUDE_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../RinOS-SDK/include" CACHE PATH
+    "RinOS SDK public include directory")
+if(NOT EXISTS "${RINOS_SDK_INCLUDE_DIR}/rin/gpu.h")
+    message(FATAL_ERROR
+        "RinOS SDK GPU process API is required; set RINOS_SDK_INCLUDE_DIR")
+endif()
 
 if(NOT TARGET RinGPU::RinGPU)
     set(RINGPU_BUILD_TESTS OFF CACHE BOOL "Disable RinGPU tests in RinVulkan" FORCE)
@@ -43,6 +50,25 @@ if(MSVC)
     target_compile_options(RinVulkan PRIVATE /W4)
 else()
     target_compile_options(RinVulkan PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# Keep the RinOS syscall-backed process adapter separate from the generic ICD
+# and host shared-library targets. Applications opt in when they have an
+# authenticated RinOS SDK process context.
+add_library(RinVulkanRinOSProcessBackend STATIC
+    src/rinos_process_submit_backend_v1.c)
+add_library(RinVulkan::RinOSProcessBackend ALIAS
+    RinVulkanRinOSProcessBackend)
+target_compile_features(RinVulkanRinOSProcessBackend PUBLIC c_std_11)
+target_include_directories(RinVulkanRinOSProcessBackend
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${RINOS_SDK_INCLUDE_DIR})
+target_link_libraries(RinVulkanRinOSProcessBackend
+    PUBLIC RinVulkan::RinVulkan)
+if(MSVC)
+    target_compile_options(RinVulkanRinOSProcessBackend PRIVATE /W4)
+else()
+    target_compile_options(RinVulkanRinOSProcessBackend
+        PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 
 option(RINVULKAN_BUILD_RINOS_NATIVE_WINDOW_EXAMPLE
@@ -178,6 +204,21 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME rinvulkan-sdk-target-backend
         COMMAND rinvulkan-sdk-target-backend-test)
+    add_executable(rinvulkan-rinos-process-submit-backend-test
+        tests/rinvulkan_rinos_process_submit_backend_test.c)
+    target_compile_features(rinvulkan-rinos-process-submit-backend-test
+        PRIVATE c_std_11)
+    target_link_libraries(rinvulkan-rinos-process-submit-backend-test
+        PRIVATE RinVulkan::RinOSProcessBackend)
+    if(MSVC)
+        target_compile_options(rinvulkan-rinos-process-submit-backend-test
+            PRIVATE /W4)
+    else()
+        target_compile_options(rinvulkan-rinos-process-submit-backend-test
+            PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+    add_test(NAME rinvulkan-rinos-process-submit-backend
+        COMMAND rinvulkan-rinos-process-submit-backend-test)
     add_executable(rinvulkan-buffer-ownership-test
         tests/rinvulkan_buffer_ownership_test.c
         src/buffer_ownership.c)

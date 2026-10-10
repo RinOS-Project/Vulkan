@@ -32,15 +32,23 @@ This creates a normal `.RIN` executable; it does not add a system-service
 catalog entry or run at boot. The optional POSIX CMake target remains useful
 for host-side compilation and links RinRuntime's Compositor transport.
 
-The user-app target currently has no process-local production Vulkan runtime
-bootstrap. RinOS-SDK provides generic device enumeration and process-owned GPU
-allocation/queue calls, but no process API that creates or attaches the
-RinVulkan runtime and its device/WSI callbacks; the existing ICD bind entry
-points consume OS-Core-owned pointers. Therefore
-the sample reports the real `vkCreateInstance`/device errors and exits; it does
-not manufacture a device, install a compatibility renderer, or fall back to
-the software backend. Building this artifact verifies the application source
-and app-link graph, not that the `.RIN` artifact builds or a hardware-backed
-frame is displayed. Keep app runtime/bootstrap and Compositor-present
-validation unchecked until the process binding and production WSI provider are
-connected.
+`rinvulkan_rinos_process_submit_backend_v1.h` adds an opt-in RinOS SDK adapter
+for the V6 canonical process-submit callback. It binds authenticated process
+queue tokens, translates resource records, verifies the returned generation-
+bound receipt, and retains queue leases when release must be retried. It is a
+submit/lifetime slice only: it does not create the per-process Vulkan runtime,
+provide the V5 memory/resource parent, establish a trusted device profile, or
+register native-window WSI. Applications must quiesce and unbind V6 before
+detaching this adapter.
+
+The user-app target therefore still has no process-local production Vulkan
+runtime bootstrap. RinOS-SDK provides process-owned GPU allocation/queue calls,
+but no process API that creates or attaches the RinVulkan runtime and its
+device/WSI callbacks; the remaining platform objects are not yet composed by
+the application path. The sample reports real `vkCreateInstance`/device errors
+and exits; it does not manufacture a device, install a compatibility renderer,
+or fall back to the software backend. Building this artifact verifies the
+application source and app-link graph, not that the `.RIN` artifact builds or a
+hardware-backed frame is displayed. Keep app runtime/bootstrap and
+Compositor-present validation unchecked until the process binding and
+production WSI path are connected.

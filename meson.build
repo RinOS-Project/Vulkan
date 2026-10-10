@@ -3,6 +3,7 @@ project('RinVulkan', 'c', version: '1.0.0', meson_version: '>=1.3.0',
 
 ringpu_dep = dependency('ringpu', required: true)
 rinvulkan_inc = include_directories('include')
+rin_sdk_inc = include_directories('../../RinOS-SDK/include')
 rinvulkan_sources = files(
   'src/buffer_ownership.c',
   'src/command_runtime.c',
@@ -27,6 +28,29 @@ rinvulkan_dep = declare_dependency(
   include_directories: rinvulkan_inc,
   dependencies: ringpu_dep,
 )
+
+# RinOS's syscall-backed process-submit adapter is opt-in and stays separate
+# from the generic Vulkan ICD/shared library.
+rinvulkan_rinos_process_backend = static_library(
+  'rinvulkan-rinos-process-backend',
+  'src/rinos_process_submit_backend_v1.c',
+  include_directories: [rinvulkan_inc, rin_sdk_inc],
+  dependencies: ringpu_dep,
+  install: true,
+)
+rinvulkan_rinos_process_backend_dep = declare_dependency(
+  link_with: rinvulkan_rinos_process_backend,
+  include_directories: [rinvulkan_inc, rin_sdk_inc],
+  dependencies: rinvulkan_dep,
+)
+
+rinvulkan_rinos_process_backend_test = executable(
+  'rinvulkan-rinos-process-submit-backend-test',
+  'tests/rinvulkan_rinos_process_submit_backend_test.c',
+  dependencies: rinvulkan_rinos_process_backend_dep,
+)
+test('rinvulkan-rinos-process-submit-backend',
+     rinvulkan_rinos_process_backend_test)
 
 if host_machine.system() == 'linux'
   rinvulkan_icd = shared_library(
