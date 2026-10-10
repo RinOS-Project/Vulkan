@@ -123,6 +123,8 @@ static void sync_unlock(void);
 static void yield_thread(void);
 static int wsi_zero_words(const uint64_t* values, uint32_t count);
 static int finite_graphics_float(float value);
+static int image_layout_transfer_source_valid(uint32_t layout);
+static int image_layout_transfer_destination_valid(uint32_t layout);
 static int get_physical_profile(
     RinVkPhysicalDevice physical_device,
     RinGpuVulkanPhysicalDeviceV2* profile);
@@ -4130,6 +4132,93 @@ static int translate_routed_process_commands(
             copy->region.width = source->width;
             copy->region.height = source->height;
             copy->region.depth = 1u;
+        } else if (operation->type ==
+                   RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BLIT) {
+            const RinVkCommandResourceUse* source_use =
+                process_image_use_for_operation(
+                    uses, use_count, operation_index,
+                    RIN_VK_COMMAND_RESOURCE_ACCESS_READ);
+            const RinVkCommandResourceUse* destination_use =
+                process_image_use_for_operation(
+                    uses, use_count, operation_index,
+                    RIN_VK_COMMAND_RESOURCE_ACCESS_WRITE);
+            RinVkImageSlot* source;
+            RinVkImageSlot* destination;
+            RinGpuBackendImageBlitV1* blit;
+            uint64_t source_address;
+            uint64_t destination_address;
+            uint32_t backend_filter;
+            if (operation->filter == RIN_VK_FILTER_NEAREST)
+                backend_filter = RIN_GPU_IMAGE_BLIT_NEAREST;
+            else if (operation->filter == RIN_VK_FILTER_LINEAR)
+                backend_filter = RIN_GPU_IMAGE_BLIT_LINEAR;
+            else
+                goto unsupported;
+            if (!source_use || !destination_use ||
+                source_use == destination_use ||
+                source_use->resource_handle == destination_use->resource_handle ||
+                !image_layout_transfer_source_valid(source_use->image_layout) ||
+                !image_layout_transfer_destination_valid(
+                    destination_use->image_layout) ||
+                operation->source_allocation == 0u ||
+                operation->destination_allocation == 0u ||
+                !(source = image_slot((RinVkDevice)slot->owner,
+                    (RinVkImage)source_use->resource_handle)) ||
+                !(destination = image_slot((RinVkDevice)slot->owner,
+                    (RinVkImage)destination_use->resource_handle)) ||
+                source->memory == NULL || destination->memory == NULL ||
+                source->memory->owner != slot->owner ||
+                destination->memory->owner != slot->owner ||
+                source->memory->product_allocation !=
+                    operation->source_allocation ||
+                destination->memory->product_allocation !=
+                    operation->destination_allocation ||
+                source->memory_size != source_use->size ||
+                destination->memory_size != destination_use->size ||
+                source->format != destination->format ||
+                image_format_bytes(source->format) != 4u ||
+                source->width == 0u || source->height == 0u ||
+                destination->width == 0u || destination->height == 0u ||
+                source->width != operation->source_width ||
+                source->height != operation->source_height ||
+                destination->width != operation->destination_width ||
+                destination->height != operation->destination_height ||
+                source->samples != RIN_VK_SAMPLE_COUNT_1_BIT ||
+                destination->samples != RIN_VK_SAMPLE_COUNT_1_BIT ||
+                (source->usage & RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0u ||
+                (destination->usage &
+                 RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u ||
+                operation->size_bytes != destination->memory_size ||
+                operation->sample_count != 0u ||
+                operation->clear_value[0] != 0u ||
+                operation->clear_value[1] != 0u ||
+                operation->clear_value[2] != 0u ||
+                operation->clear_value[3] != 0u ||
+                operation->barrier.src_stage_mask != 0u ||
+                operation->barrier.src_access_mask != 0u ||
+                operation->barrier.dst_stage_mask != 0u ||
+                operation->barrier.dst_access_mask != 0u ||
+                !checked_image_address(source, 0u, source->memory_size,
+                                       &source_address) ||
+                !checked_image_address(destination, 0u,
+                                       destination->memory_size,
+                                       &destination_address) ||
+                source_address != operation->source_gpu_address ||
+                destination_address != operation->destination_gpu_address)
+                goto unsupported;
+            command = &commands[command_count++];
+            command->type = RIN_GPU_BACKEND_COMMAND_BLIT_IMAGE;
+            blit = &command->value.image_blit;
+            memset(blit, 0, sizeof(*blit));
+            blit->source_cookie = source_use->resource_handle;
+            blit->destination_cookie = destination_use->resource_handle;
+            blit->blit.abi_version = RIN_GPU_ABI_VERSION;
+            blit->blit.struct_size = sizeof(blit->blit);
+            blit->blit.source_width = source->width;
+            blit->blit.source_height = source->height;
+            blit->blit.destination_width = destination->width;
+            blit->blit.destination_height = destination->height;
+            blit->blit.filter = backend_filter;
         } else if (operation->type ==
                    RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_TO_BUFFER_REGION) {
             const RinVkCommandResourceUse* image_use =

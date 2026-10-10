@@ -881,6 +881,94 @@ static int test_submit_process_commands_v6(
             operation->destination_height = region->height;
             continue;
         }
+        if (command->type == RIN_GPU_BACKEND_COMMAND_BLIT_IMAGE) {
+            const RinGpuBackendImageBlitV1* blit =
+                &command->value.image_blit;
+            const RinGpuBackendImageBlitDescV1* region = &blit->blit;
+            const TestResourceBinding* source_binding =
+                test_find_resource_binding(adapters, blit->source_cookie);
+            const TestResourceBinding* destination_binding =
+                test_find_resource_binding(adapters,
+                                           blit->destination_cookie);
+            RinGpuVulkanSoftwareAllocationV1* source_allocation =
+                source_binding
+                    ? test_find_allocation(adapters->software,
+                                           source_binding->allocation_handle)
+                    : NULL;
+            RinGpuVulkanSoftwareAllocationV1* destination_allocation =
+                destination_binding
+                    ? test_find_allocation(adapters->software,
+                                           destination_binding->allocation_handle)
+                    : NULL;
+            uint64_t source_bytes;
+            uint64_t destination_bytes;
+            if (pending_image != 0u || !source_binding ||
+                !destination_binding || !source_allocation ||
+                !destination_allocation ||
+                source_binding->allocation_handle ==
+                    destination_binding->allocation_handle ||
+                region->abi_version != RIN_GPU_ABI_VERSION ||
+                region->struct_size != sizeof(*region) ||
+                region->source_mip_level != 0u ||
+                region->source_array_layer != 0u ||
+                region->source_x != 0u || region->source_y != 0u ||
+                region->destination_mip_level != 0u ||
+                region->destination_array_layer != 0u ||
+                region->destination_x != 0u || region->destination_y != 0u ||
+                region->source_width == 0u || region->source_height == 0u ||
+                region->destination_width == 0u ||
+                region->destination_height == 0u ||
+                region->filter > RIN_GPU_IMAGE_BLIT_LINEAR ||
+                region->flags != 0u || region->reserved != 0u ||
+                (uint64_t)region->source_width >
+                    UINT64_MAX / region->source_height / 4u ||
+                (uint64_t)region->destination_width >
+                    UINT64_MAX / region->destination_height / 4u ||
+                (source_binding->required_gpu_access &
+                 RIN_VULKAN_PRODUCT_MEMORY_GPU_READ) == 0u ||
+                (destination_binding->required_gpu_access &
+                 RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE) == 0u ||
+                source_binding->allocation_offset >
+                    source_allocation->size_bytes ||
+                source_binding->size_bytes > source_allocation->size_bytes -
+                    source_binding->allocation_offset ||
+                destination_binding->allocation_offset >
+                    destination_allocation->size_bytes ||
+                destination_binding->size_bytes >
+                    destination_allocation->size_bytes -
+                        destination_binding->allocation_offset ||
+                source_binding->allocation_offset > UINT64_MAX -
+                    source_allocation->gpu_virtual_address ||
+                destination_binding->allocation_offset > UINT64_MAX -
+                    destination_allocation->gpu_virtual_address ||
+                operation_count >= RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS)
+                return RIN_VULKAN_PRODUCT_PROTOCOL;
+            source_bytes = (uint64_t)region->source_width *
+                           region->source_height * 4u;
+            destination_bytes = (uint64_t)region->destination_width *
+                                region->destination_height * 4u;
+            if (source_bytes != source_binding->size_bytes ||
+                destination_bytes != destination_binding->size_bytes)
+                return RIN_VULKAN_PRODUCT_PROTOCOL;
+            operation = &packet.operations[operation_count++];
+            operation->type = RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BLIT;
+            operation->source_allocation = source_binding->allocation_handle;
+            operation->destination_allocation =
+                destination_binding->allocation_handle;
+            operation->source_gpu_address =
+                source_allocation->gpu_virtual_address +
+                source_binding->allocation_offset;
+            operation->destination_gpu_address =
+                destination_allocation->gpu_virtual_address +
+                destination_binding->allocation_offset;
+            operation->size_bytes = destination_bytes;
+            operation->source_width = region->source_width;
+            operation->source_height = region->source_height;
+            operation->destination_width = region->destination_width;
+            operation->destination_height = region->destination_height;
+            operation->filter = region->filter;
+            continue;
+        }
         if (command->type ==
             RIN_GPU_BACKEND_COMMAND_COPY_BUFFER_TO_IMAGE) {
             const RinGpuBackendBufferToImageCopyV1* copy =
@@ -1658,6 +1746,7 @@ static RinVkResult record_buffer_image_roundtrip(
     RinVkDependencyInfo dependency;
     RinVkBufferImageCopy region;
     RinVkImageCopy image_copy;
+    RinVkImageBlit image_blit;
     RinVkSubmitInfo submit;
     RinVkFenceCreateInfo fence_info;
     RinVkFence fence = 0u;
@@ -1835,6 +1924,22 @@ static RinVkResult record_buffer_image_roundtrip(
                    copy_destination,
                    RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    1u, &image_copy);
+    memset(&image_blit, 0, sizeof(image_blit));
+    image_blit.srcSubresource.aspectMask = RIN_VK_IMAGE_ASPECT_COLOR_BIT;
+    image_blit.srcSubresource.layerCount = 1u;
+    image_blit.dstSubresource.aspectMask = RIN_VK_IMAGE_ASPECT_COLOR_BIT;
+    image_blit.dstSubresource.layerCount = 1u;
+    image_blit.srcOffsets[1].x = 4;
+    image_blit.srcOffsets[1].y = 3;
+    image_blit.srcOffsets[1].z = 1;
+    image_blit.dstOffsets[1].x = 4;
+    image_blit.dstOffsets[1].y = 3;
+    image_blit.dstOffsets[1].z = 1;
+    vkCmdBlitImage(command_buffer, image,
+                   RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   copy_destination,
+                   RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   1u, &image_blit, RIN_VK_FILTER_NEAREST);
     barrier.image = copy_destination;
     barrier.oldLayout = RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     barrier.newLayout = RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
@@ -1869,7 +1974,7 @@ static RinVkResult record_buffer_image_roundtrip(
         goto done;
     }
     if (product_adapters->canonical_submit_calls != submits_before + 1u ||
-        product_adapters->canonical_command_count != 11u) {
+        product_adapters->canonical_command_count != 12u) {
         fprintf(stderr,
                 "image-copy canonical batch mismatch: submits %u->%u, commands=%u\n",
                 submits_before, product_adapters->canonical_submit_calls,
