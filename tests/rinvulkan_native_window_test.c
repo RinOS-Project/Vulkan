@@ -970,6 +970,39 @@ int main(void) {
     vkGetDeviceQueue(device, 0u, 0u, &queue);
     CHECK(queue != NULL);
 
+    {
+        RinVkSemaphore empty_scope_semaphore = 0u;
+        RinVkSemaphoreSubmitInfo semaphore_submit_info;
+        RinVkSubmitInfo2 empty_submit;
+
+        memset(&semaphore_info, 0, sizeof(semaphore_info));
+        semaphore_info.sType = RIN_VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        CHECK(vkCreateSemaphore(device, &semaphore_info, NULL,
+                                &empty_scope_semaphore) == RIN_VK_SUCCESS);
+        memset(&semaphore_submit_info, 0, sizeof(semaphore_submit_info));
+        semaphore_submit_info.sType =
+            RIN_VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        semaphore_submit_info.semaphore = empty_scope_semaphore;
+        semaphore_submit_info.stageMask =
+            RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        memset(&empty_submit, 0, sizeof(empty_submit));
+        empty_submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+        empty_submit.signalSemaphoreInfoCount = 1u;
+        empty_submit.pSignalSemaphoreInfos = &semaphore_submit_info;
+        CHECK(vkQueueSubmit2(queue, 1u, &empty_submit, 0u) ==
+              RIN_VK_SUCCESS);
+
+        semaphore_submit_info.stageMask = 0u;
+        empty_submit.signalSemaphoreInfoCount = 0u;
+        empty_submit.pSignalSemaphoreInfos = NULL;
+        empty_submit.waitSemaphoreInfoCount = 1u;
+        empty_submit.pWaitSemaphoreInfos = &semaphore_submit_info;
+        CHECK(vkQueueSubmit2(queue, 1u, &empty_submit, 0u) ==
+              RIN_VK_SUCCESS);
+        CHECK(vkQueueWaitIdle(queue) == RIN_VK_SUCCESS);
+        vkDestroySemaphore(device, empty_scope_semaphore, NULL);
+    }
+
     memset(&swapchain_info, 0, sizeof(swapchain_info));
     swapchain_info.sType = RIN_VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
     swapchain_info.surface = surface;

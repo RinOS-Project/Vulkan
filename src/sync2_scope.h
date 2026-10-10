@@ -15,15 +15,21 @@
  * packet fields the current contract does not provide. */
 int rin_vk_sync2_dependency_flags_valid(uint32_t public_flags);
 int rin_vk_sync2_stage_mask(uint64_t public_mask, uint64_t* runtime_mask_out);
+/* Semaphore submit scopes have direction-dependent legacy stage semantics:
+ * waits use the second scope; signals use the first. */
+int rin_vk_sync2_semaphore_wait_stage_mask(uint64_t public_mask,
+                                           uint32_t* legacy_mask_out);
 int rin_vk_sync2_legacy_stage_mask(uint32_t public_mask,
                                    uint64_t* sync2_mask_out);
 int rin_vk_sync2_legacy_wait_stage_mask(uint64_t public_mask,
                                        uint32_t* legacy_mask_out);
 int rin_vk_sync2_recorded_stage_mask_valid(uint64_t public_mask);
 int rin_vk_sync2_access_mask(uint64_t public_mask, uint64_t stage_mask,
+                             uint32_t second_scope,
                              uint64_t* runtime_mask_out);
 int rin_vk_sync2_access_stage_valid(uint64_t stage_mask,
-                                    uint64_t access_mask);
+                                    uint64_t access_mask,
+                                    uint32_t second_scope);
 int rin_vk_sync2_barrier_scopes(uint64_t src_stage_public,
                                 uint64_t src_access_public,
                                 uint64_t dst_stage_public,

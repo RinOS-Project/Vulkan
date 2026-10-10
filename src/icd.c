@@ -14346,6 +14346,7 @@ static RinVkResult build_command_stream_packet(
 }
 
 static int wait_execution_scope_from_legacy(uint32_t public_mask,
+                                            int allow_empty_scope,
                                             uint64_t* scope_out) {
     const uint32_t graphics =
         RIN_VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT |
@@ -14367,8 +14368,13 @@ static int wait_execution_scope_from_legacy(uint32_t public_mask,
                            RIN_VK_PIPELINE_STAGE_HOST_BIT |
                            RIN_VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     uint64_t scope = 0u;
-    if (!scope_out || public_mask == 0u || (public_mask & ~known) != 0u)
+    if (!scope_out || (public_mask == 0u && !allow_empty_scope) ||
+        (public_mask & ~known) != 0u)
         return 0;
+    if (public_mask == 0u) {
+        *scope_out = 0u;
+        return 1;
+    }
     if ((public_mask & (RIN_VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT |
                         RIN_VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT |
                         RIN_VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)) != 0u) {
@@ -14506,6 +14512,7 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     for (index = 0u; index < request.waitSemaphoreCount; ++index) {
         if (!wait_execution_scope_from_legacy(
                 request.pWaitDstStageMask[index],
+                device->synchronization2_enabled != 0u,
                 &wait_execution_scopes[index])) {
             result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
             goto done;
@@ -15017,7 +15024,7 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit2(
         if (wait_infos[index].sType != RIN_VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO ||
             wait_infos[index].pNext || wait_infos[index].semaphore == 0u ||
             wait_infos[index].deviceIndex != 0u || wait_infos[index].reserved != 0u ||
-            !rin_vk_sync2_legacy_wait_stage_mask(
+            !rin_vk_sync2_semaphore_wait_stage_mask(
                 wait_infos[index].stageMask, &wait_stage_masks[index]))
             return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
         wait_semaphores[index] = wait_infos[index].semaphore;
