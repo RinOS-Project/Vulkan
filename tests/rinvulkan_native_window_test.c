@@ -3,6 +3,7 @@
 #define _GNU_SOURCE 1
 #endif
 #include <rinvulkan/icd.h>
+#include <rinvulkan/rinos_process_submit_backend_v1.h>
 #include <rinvulkan/software_platform.h>
 #include <rin/contract_abi.h>
 #include <rinruntime/window.h>
@@ -58,6 +59,12 @@ typedef struct TestResourceBinding {
     uint32_t active;
 } TestResourceBinding;
 
+typedef struct TestSdkProcessQueue {
+    uint32_t queue_id;
+    uint32_t active;
+    RinGpuProcessQueueV1 token;
+} TestSdkProcessQueue;
+
 typedef struct TestProductAdapters {
     RinGpuVulkanSoftwarePlatformV1* software;
     RinVulkanProductPlatformV2 v2;
@@ -65,6 +72,13 @@ typedef struct TestProductAdapters {
     RinVulkanProductPlatformV4 v4;
     RinVulkanProductPlatformV5 v5;
     RinVulkanProductPlatformV6 v6;
+    RinVulkanProductPlatformV6 software_v6;
+    RinVulkanRinOSProcessSubmitBackendV1 process_submit_backend;
+    TestSdkProcessQueue sdk_queues[RIN_GPU_PROCESS_MAX_QUEUES_V1];
+    uint32_t sdk_queue_bind_calls;
+    uint32_t sdk_queue_release_calls;
+    uint32_t sdk_process_submit_calls;
+    uint32_t sdk_active_queue_count;
     uint32_t canonical_submit_calls;
     uint32_t canonical_command_count;
     uint32_t canonical_resolve_command_count;
@@ -85,6 +99,10 @@ typedef struct TestProductAdapters {
 
 static uint32_t g_opaque_process_prepare_calls;
 static uint32_t g_opaque_process_submit_calls;
+static TestProductAdapters* g_process_submit_adapters;
+
+#define TEST_PROCESS_SUBMIT_DEVICE_ID UINT64_C(0xD15A0001)
+#define TEST_PROCESS_SUBMIT_DEVICE_GENERATION UINT64_C(7)
 
 #if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
 typedef struct RuntimeExportPeer {
@@ -1478,11 +1496,180 @@ static int test_submit_process_commands_v6(
     return RIN_VULKAN_PRODUCT_OK;
 }
 
-static void initialize_product_adapters(
+RinResult rin_gpu_process_queue_bind_v1(
+        uint64_t device_id, uint64_t device_generation, uint32_t queue_id,
+        RinGpuProcessQueueV1* queue_out) {
+    TestProductAdapters* adapters = g_process_submit_adapters;
+    uint32_t index;
+    if (!adapters || !adapters->software || !queue_out ||
+        device_id != TEST_PROCESS_SUBMIT_DEVICE_ID ||
+        device_generation != TEST_PROCESS_SUBMIT_DEVICE_GENERATION ||
+        queue_id >= adapters->software->queue_count ||
+        queue_id >= RIN_GPU_PROCESS_MAX_QUEUES_V1)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    *queue_out = 0u;
+    for (index = 0u; index < RIN_GPU_PROCESS_MAX_QUEUES_V1; ++index) {
+        TestSdkProcessQueue* queue = &adapters->sdk_queues[index];
+        if (queue->active != 0u && queue->queue_id == queue_id)
+            return RIN_ERROR_BUSY;
+        if (queue->active == 0u) break;
+    }
+    if (index == RIN_GPU_PROCESS_MAX_QUEUES_V1)
+        return RIN_ERROR_TABLE_FULL;
+    adapters->sdk_queues[index].queue_id = queue_id;
+    adapters->sdk_queues[index].token =
+        UINT64_C(0xA500000000000000) | ((uint64_t)queue_id + 1u);
+    adapters->sdk_queues[index].active = 1u;
+    *queue_out = adapters->sdk_queues[index].token;
+    ++adapters->sdk_queue_bind_calls;
+    ++adapters->sdk_active_queue_count;
+    return RIN_SUCCESS;
+}
+
+RinResult rin_gpu_process_queue_release_v1(RinGpuProcessQueueV1 token) {
+    TestProductAdapters* adapters = g_process_submit_adapters;
+    uint32_t index;
+    if (!adapters || token == 0u) return RIN_ERROR_INVALID_ARGUMENT;
+    for (index = 0u; index < RIN_GPU_PROCESS_MAX_QUEUES_V1; ++index) {
+        TestSdkProcessQueue* queue = &adapters->sdk_queues[index];
+        if (queue->active == 1u && queue->token == token) {
+            queue->active = 0u;
+            queue->token = 0u;
+            ++adapters->sdk_queue_release_calls;
+            --adapters->sdk_active_queue_count;
+            return RIN_SUCCESS;
+        }
+    }
+    return RIN_ERROR_STALE_HANDLE;
+}
+
+static RinResult test_product_result_to_sdk(int result) {
+    switch (result) {
+        case RIN_VULKAN_PRODUCT_OK:
+            return RIN_SUCCESS;
+        case RIN_VULKAN_PRODUCT_INVALID_ARGUMENT:
+            return RIN_ERROR_INVALID_ARGUMENT;
+        case RIN_VULKAN_PRODUCT_BUSY:
+            return RIN_ERROR_BUSY;
+        case RIN_VULKAN_PRODUCT_LIMIT:
+            return RIN_ERROR_LIMIT_EXCEEDED;
+        case RIN_VULKAN_PRODUCT_NO_SPACE:
+            return RIN_ERROR_TABLE_FULL;
+        case RIN_VULKAN_PRODUCT_UNSUPPORTED:
+            return RIN_ERROR_NOT_SUPPORTED;
+        case RIN_VULKAN_PRODUCT_LOST:
+            return RIN_ERROR_STALE_HANDLE;
+        case RIN_VULKAN_PRODUCT_PROTOCOL:
+            return RIN_ERROR_ABI_MISMATCH;
+        default:
+            return RIN_ERROR_IO;
+    }
+}
+
+RinResult rin_gpu_process_submit_v1(
+        RinGpuProcessQueueV1 token,
+        const RinGpuProcessSubmitDescV1* descriptor,
+        RinGpuProcessSubmitReceiptV1* receipt_out) {
+    TestProductAdapters* adapters = g_process_submit_adapters;
+    RinVulkanProductResourceV1 product_resources[
+        RIN_GPU_PROCESS_MAX_RESOURCES_V1];
+    RinVulkanProductProcessSubmitReceiptV1 product_receipt;
+    const RinGpuBackendCommandV1* commands;
+    const RinGpuProcessResourceV1* sdk_resources = NULL;
+    uint64_t expected_command_bytes;
+    uint32_t queue_id = UINT32_MAX;
+    uint32_t index;
+    int result;
+    if (!adapters || !descriptor || !receipt_out)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    ++adapters->sdk_process_submit_calls;
+    if (descriptor->struct_size != sizeof(*descriptor) ||
+        descriptor->version != RIN_GPU_PROCESS_SUBMIT_DESC_VERSION_V1 ||
+        descriptor->reserved != 0u || descriptor->command_count == 0u ||
+        descriptor->command_count > RIN_GPU_PROCESS_MAX_COMMANDS_V1 ||
+        descriptor->command_record_size !=
+            RIN_GPU_PROCESS_COMMAND_RECORD_SIZE_V1 ||
+        descriptor->command_record_size != sizeof(RinGpuBackendCommandV1) ||
+        descriptor->commands.address == 0u ||
+        descriptor->resource_count > RIN_GPU_PROCESS_MAX_RESOURCES_V1)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    expected_command_bytes = (uint64_t)descriptor->command_count *
+                             RIN_GPU_PROCESS_COMMAND_RECORD_SIZE_V1;
+    if (descriptor->commands.size != expected_command_bytes)
+        return RIN_ERROR_ABI_MISMATCH;
+    if (descriptor->resource_count == 0u) {
+        if (descriptor->resources.address != 0u ||
+            descriptor->resources.size != 0u)
+            return RIN_ERROR_ABI_MISMATCH;
+    } else {
+        if (descriptor->resources.address == 0u ||
+            descriptor->resources.size !=
+                (uint64_t)descriptor->resource_count *
+                    sizeof(RinGpuProcessResourceV1))
+            return RIN_ERROR_ABI_MISMATCH;
+        sdk_resources = (const RinGpuProcessResourceV1*)
+            (uintptr_t)descriptor->resources.address;
+    }
+    for (index = 0u; index < RIN_GPU_PROCESS_MAX_QUEUES_V1; ++index) {
+        const TestSdkProcessQueue* queue = &adapters->sdk_queues[index];
+        if (queue->active == 1u && queue->token == token) {
+            queue_id = queue->queue_id;
+            break;
+        }
+    }
+    if (queue_id == UINT32_MAX) return RIN_ERROR_STALE_HANDLE;
+    memset(product_resources, 0, sizeof(product_resources));
+    for (index = 0u; index < descriptor->resource_count; ++index) {
+        const RinGpuProcessResourceV1* source = &sdk_resources[index];
+        if (source->allocation == 0u || source->reserved != 0u ||
+            source->required_gpu_access == 0u ||
+            (source->required_gpu_access &
+             ~(RIN_GPU_ALLOCATION_GPU_READ |
+               RIN_GPU_ALLOCATION_GPU_WRITE)) != 0u)
+            return RIN_ERROR_INVALID_ARGUMENT;
+        product_resources[index].allocation_handle = source->allocation;
+        product_resources[index].required_gpu_access =
+            source->required_gpu_access;
+    }
+    commands = (const RinGpuBackendCommandV1*)
+        (uintptr_t)descriptor->commands.address;
+    memset(&product_receipt, 0, sizeof(product_receipt));
+    result = adapters->software_v6.submit_process_commands(
+        adapters->software_v6.context, queue_id, commands,
+        descriptor->command_count, product_resources,
+        descriptor->resource_count, &product_receipt);
+    if (result != RIN_VULKAN_PRODUCT_OK)
+        return test_product_result_to_sdk(result);
+    if (product_receipt.struct_size != sizeof(product_receipt) ||
+        product_receipt.version !=
+            RIN_VULKAN_PRODUCT_PROCESS_SUBMIT_RECEIPT_V1_VERSION ||
+        product_receipt.queue_id != queue_id ||
+        product_receipt.sequence == 0u ||
+        product_receipt.completion_value == 0u ||
+        product_receipt.device_epoch == 0u ||
+        product_receipt.iommu_map_generation == 0u)
+        return RIN_ERROR_ABI_MISMATCH;
+    memset(receipt_out, 0, sizeof(*receipt_out));
+    receipt_out->struct_size = sizeof(*receipt_out);
+    receipt_out->version = RIN_GPU_PROCESS_SUBMIT_RECEIPT_VERSION_V1;
+    receipt_out->queue_id = product_receipt.queue_id;
+    receipt_out->sequence = product_receipt.sequence;
+    receipt_out->completion_value = product_receipt.completion_value;
+    receipt_out->device_epoch = product_receipt.device_epoch;
+    receipt_out->iommu_map_generation =
+        product_receipt.iommu_map_generation;
+    return RIN_SUCCESS;
+}
+
+static int initialize_product_adapters(
         TestProductAdapters* adapters,
         RinGpuVulkanSoftwarePlatformV1* software) {
+    uint32_t queue_ids[RIN_GPU_PROCESS_MAX_QUEUES_V1];
+    uint32_t index;
+    int result;
     memset(adapters, 0, sizeof(*adapters));
     adapters->software = software;
+    g_process_submit_adapters = adapters;
     adapters->next_mapping_lease = 1u;
     adapters->v2.struct_size = sizeof(adapters->v2);
     adapters->v2.version = RIN_VULKAN_PRODUCT_PLATFORM_V2_VERSION;
@@ -1507,12 +1694,31 @@ static void initialize_product_adapters(
     adapters->v5.context = adapters;
     adapters->v5.bind_resource = test_bind_resource_v5;
     adapters->v5.unbind_resource = test_unbind_resource_v5;
-    adapters->v6.struct_size = sizeof(adapters->v6);
-    adapters->v6.version = RIN_VULKAN_PRODUCT_PLATFORM_V6_VERSION;
-    adapters->v6.base = &adapters->v5;
-    adapters->v6.context = adapters;
-    adapters->v6.submit_process_commands =
+    adapters->software_v6.struct_size = sizeof(adapters->software_v6);
+    adapters->software_v6.version = RIN_VULKAN_PRODUCT_PLATFORM_V6_VERSION;
+    adapters->software_v6.base = &adapters->v5;
+    adapters->software_v6.context = adapters;
+    adapters->software_v6.submit_process_commands =
         test_submit_process_commands_v6;
+    if (software->queue_count == 0u ||
+        software->queue_count > RIN_GPU_PROCESS_MAX_QUEUES_V1)
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    for (index = 0u; index < software->queue_count; ++index)
+        queue_ids[index] = index;
+    result = rin_vulkan_rinos_process_submit_backend_v1_init(
+        &adapters->process_submit_backend, &adapters->v5,
+        TEST_PROCESS_SUBMIT_DEVICE_ID,
+        TEST_PROCESS_SUBMIT_DEVICE_GENERATION, queue_ids,
+        software->queue_count);
+    if (result != RIN_VULKAN_PRODUCT_OK) return result;
+    {
+        RinVulkanProductPlatformV6* platform =
+            rin_vulkan_rinos_process_submit_backend_v1_platform(
+                &adapters->process_submit_backend);
+        if (!platform) return RIN_VULKAN_PRODUCT_STATE;
+        adapters->v6 = *platform;
+    }
+    return RIN_VULKAN_PRODUCT_OK;
 }
 
 typedef struct TestRecordedBarrier {
@@ -2719,6 +2925,7 @@ int main(void) {
     uint32_t product_v4_bound = 0u;
     uint32_t product_v5_bound = 0u;
     uint32_t product_v6_bound = 0u;
+    uint32_t process_backend_initialized = 0u;
     uint32_t surface_created = 0u;
     uint32_t device_created = 0u;
     uint32_t swapchain_created = 0u;
@@ -2751,7 +2958,11 @@ int main(void) {
     CHECK(rin_gpu_vulkan_icd_bind_product_platform(&software.platform) ==
           RIN_GPU_VULKAN_OK);
     product_bound = 1u;
-    initialize_product_adapters(&product_adapters, &software);
+    runtime_init_result = initialize_product_adapters(
+        &product_adapters, &software);
+    process_backend_initialized =
+        product_adapters.process_submit_backend.state != 0u;
+    CHECK(runtime_init_result == RIN_VULKAN_PRODUCT_OK);
     CHECK(rin_gpu_vulkan_icd_bind_product_platform_v2(
               &product_adapters.v2) == RIN_GPU_VULKAN_OK);
     product_v2_bound = 1u;
@@ -3186,9 +3397,21 @@ int main(void) {
                   unbind_calls_before_destroy + 2u &&
               product_adapters.fail_unbind_attempts == 0u);
         swapchain_created = 0u;
+        CHECK(product_adapters.sdk_queue_bind_calls == software.queue_count &&
+              product_adapters.sdk_process_submit_calls ==
+                  product_adapters.canonical_submit_calls &&
+              product_adapters.sdk_queue_release_calls == 0u &&
+              product_adapters.sdk_active_queue_count ==
+                  software.queue_count);
         CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v6(
                   &product_adapters.v6) == RIN_GPU_VULKAN_OK);
         product_v6_bound = 0u;
+        CHECK(rin_vulkan_rinos_process_submit_backend_v1_detach(
+                  &product_adapters.process_submit_backend) ==
+              RIN_VULKAN_PRODUCT_OK);
+        process_backend_initialized = 0u;
+        CHECK(product_adapters.sdk_queue_release_calls == software.queue_count &&
+              product_adapters.sdk_active_queue_count == 0u);
         CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v5(
                   &product_adapters.v5) == RIN_GPU_VULKAN_OK);
         product_v5_bound = 0u;
@@ -3216,12 +3439,40 @@ cleanup:
     if (device_created) vkDestroyDevice(device, NULL);
     if (surface_created) vkDestroySurfaceKHR(instance, surface, NULL);
     if (instance) vkDestroyInstance(instance, NULL);
-    if (product_v6_bound)
-        (void)rin_gpu_vulkan_icd_unbind_product_platform_v6(
-            &product_adapters.v6);
+    if (product_v6_bound) {
+        const int unbind_result =
+            rin_gpu_vulkan_icd_unbind_product_platform_v6(
+                &product_adapters.v6);
+        if (unbind_result == RIN_GPU_VULKAN_OK) {
+            product_v6_bound = 0u;
+        } else {
+            fprintf(stderr, "V6 process-submit unbind returned %d\n",
+                    unbind_result);
+            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
     if (product_v5_bound)
         (void)rin_gpu_vulkan_icd_unbind_product_platform_v5(
             &product_adapters.v5);
+    if (process_backend_initialized) {
+        if (product_v6_bound) {
+            fprintf(stderr,
+                    "process-submit queue tokens retained while V6 remains bound\n");
+            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        } else {
+            const int detach_result =
+                rin_vulkan_rinos_process_submit_backend_v1_detach(
+                    &product_adapters.process_submit_backend);
+            if (detach_result != RIN_VULKAN_PRODUCT_OK) {
+                fprintf(stderr,
+                        "process-submit queue token cleanup returned %d\n",
+                        detach_result);
+                result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+            } else {
+                process_backend_initialized = 0u;
+            }
+        }
+    }
     if (product_v4_bound)
         (void)rin_gpu_vulkan_icd_unbind_product_platform_v4(
             &product_adapters.v4);
@@ -3239,6 +3490,6 @@ cleanup:
     if (instance_initialized) (void)rin_gpu_vulkan_runtime_shutdown(&runtime);
 #undef CHECK
     if (result != RIN_VK_SUCCESS) return 1;
-    puts("RinVulkan native-window Compositor integration: PASS");
+    puts("RinVulkan native-window SDK process-submit integration: PASS");
     return 0;
 }

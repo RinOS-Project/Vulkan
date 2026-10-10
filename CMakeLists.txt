@@ -186,7 +186,7 @@ if(BUILD_TESTING)
     target_include_directories(rinvulkan-native-window-test PRIVATE
         ${RINRUNTIME_INCLUDE_DIR})
     target_link_libraries(rinvulkan-native-window-test PRIVATE
-        RinVulkan::RinVulkan)
+        RinVulkan::RinVulkan RinVulkan::RinOSProcessBackend)
     add_test(NAME rinvulkan-native-window
         COMMAND rinvulkan-native-window-test)
     add_executable(rinvulkan-sdk-target-backend-test

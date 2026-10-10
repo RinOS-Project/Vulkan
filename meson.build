@@ -52,6 +52,15 @@ rinvulkan_rinos_process_backend_test = executable(
 test('rinvulkan-rinos-process-submit-backend',
      rinvulkan_rinos_process_backend_test)
 
+rinvulkan_native_window_process_submit_test = executable(
+  'rinvulkan-native-window-process-submit-test',
+  'tests/rinvulkan_native_window_test.c',
+  include_directories: include_directories('../rinruntime/include'),
+  dependencies: rinvulkan_rinos_process_backend_dep,
+)
+test('rinvulkan-native-window-process-submit',
+     rinvulkan_native_window_process_submit_test)
+
 if host_machine.system() == 'linux'
   rinvulkan_icd = shared_library(
     'rin-vulkan-icd', rinvulkan_sources,
