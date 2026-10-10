@@ -639,7 +639,7 @@ cleanup:
     return exit_status;
 }
 
-int main(void) {
+static int rinos_native_window_surface_main(void) {
     static const char* const instance_extensions[] = {
         RIN_VK_KHR_SURFACE_EXTENSION,
         RIN_VK_RINOS_NATIVE_WINDOW_SURFACE_EXTENSION
@@ -822,4 +822,12 @@ cleanup:
         wnd_close(window);
     }
     return exit_status;
+}
+
+int main(void) {
+    return rinos_native_window_surface_main();
+}
+
+int rinvk_native_window_surface_run(void) {
+    return rinos_native_window_surface_main();
 }

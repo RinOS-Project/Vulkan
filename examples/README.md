@@ -23,7 +23,20 @@ admitted, bound Vulkan runtime. The example does not initialize the host
 software platform or silently fall back when the physical runtime is
 unavailable.
 
-On a POSIX RinOS/host development environment, enable the optional CMake target
-with `-DRINVULKAN_BUILD_RINOS_NATIVE_WINDOW_EXAMPLE=ON`, then build
-`rinvulkan-native-window-surface-example`. The target includes the real
-RinRuntime Compositor transport dependency.
+For the RinOS x86_64 debug user-app artifact, build the focused Meson target
+from the repository root:
+`python scripts/build.py --profile x86_64-debug --target app:rinvk_native_window_surface64`.
+This creates a normal `.RIN` executable; it does not add a system-service
+catalog entry or run at boot. The optional POSIX CMake target remains useful
+for host-side compilation and links RinRuntime's Compositor transport.
+
+The user-app target currently has no process-local production Vulkan runtime
+bootstrap: the process SDK does not yet expose a device/runtime binding, while
+the existing ICD bind entry points consume OS-Core-owned pointers. Therefore
+the sample reports the real `vkCreateInstance`/device errors and exits; it does
+not manufacture a device, install a compatibility renderer, or fall back to
+the software backend. Building this artifact verifies the application and
+surface API are packaged through the normal user-app linker, not that a
+hardware-backed frame is displayed. Keep app/bootstrap registration and
+runtime validation unchecked until that binding and production WSI provider
+are connected.
