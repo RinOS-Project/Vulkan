@@ -18,10 +18,12 @@ proof that the Compositor renderer displayed the frame. A successful
 damage/commit response confirms service acceptance of that transaction only.
 The ICD's ordinary path copies application swapchain images into the Compositor
 callback; those images are not required to be direct-scanout allocations.
-Final-output scanout remains separate. The system must already have an
-admitted, bound Vulkan runtime. The example does not initialize the host
-software platform or silently fall back when the physical runtime is
-unavailable.
+Final-output scanout remains separate. On RinOS, the example binds the SDK
+target backend to the real `RIN_SYS_SDK_CALL` syscall before making Runtime
+calls. This provides the process's SDK syscall transport; it does not attach
+or initialize the RinVk runtime. The system must still have an admitted, bound
+Vulkan runtime. The example does not initialize the host software platform or
+silently fall back when the physical runtime is unavailable.
 
 For the RinOS x86_64 debug user-app artifact, build the focused Meson target
 from the repository root:
