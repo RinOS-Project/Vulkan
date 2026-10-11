@@ -265,8 +265,11 @@ int main(void) {
     RinVulkanRinOSProcessSubmitBackendV1 backend = {0};
     RinVulkanRinOSProcessSubmitBackendV2 backend_v2 = {0};
     RinVulkanRinOSProcessSubmitBackendV3 backend_v3 = {0};
+    RinVulkanRinOSProcessSubmitBackendV4 backend_v4 = {0};
     RinVulkanProductPlatformV5 parent = {0};
     uint32_t queue_ids[2] = {0u, 2u};
+    RinVulkanRinOSProcessQueueMapV4 queue_mappings[3] = {
+        {0u, 2u}, {1u, 0u}, {2u, 2u}};
     RinGpuBackendCommandV1 commands[2] = {{0}};
     RinVulkanProductResourceV1 resources[2] = {
         {UINT64_C(0xA001), RIN_GPU_ALLOCATION_GPU_READ, 0u},
@@ -276,6 +279,8 @@ int main(void) {
     RinVulkanProductPlatformV7* platform_v7;
     RinVulkanProductPlatformV7* platform_v7_v3;
     RinVulkanProductPlatformV8* platform_v8;
+    RinVulkanProductPlatformV7* platform_v7_v4;
+    RinVulkanProductPlatformV8* platform_v8_v4;
     RinVulkanProductProcessComputeBindingV8 process_bindings[2] = {{0}};
     uint8_t shader_ir[sizeof(RinShaderHeaderV1)] = {0};
     uint64_t process_pipeline_token = 0u;
@@ -554,6 +559,67 @@ int main(void) {
           RIN_VULKAN_PRODUCT_OK);
     CHECK(rin_vulkan_rinos_process_submit_backend_v3_detach(&backend_v3) ==
           RIN_VULKAN_PRODUCT_OK);
+
+    reset_mocks();
+    queue_mappings[1].logical_queue_id = 0u;
+    CHECK(rin_vulkan_rinos_process_submit_backend_v4_init(
+              &backend_v4, &parent, 0x1111u, 0x2222u, queue_mappings, 3u) ==
+          RIN_VULKAN_PRODUCT_INVALID_ARGUMENT);
+    CHECK(bind_calls == 0u && backend_v4.struct_size == 0u);
+    queue_mappings[1].logical_queue_id = 1u;
+    CHECK(rin_vulkan_rinos_process_submit_backend_v4_init(
+              &backend_v4, &parent, 0x1111u, 0x2222u, queue_mappings, 3u) ==
+          RIN_VULKAN_PRODUCT_OK);
+    CHECK(bind_calls == 2u && backend_v4.mapping_count == 3u &&
+          rin_vulkan_rinos_process_submit_backend_v4_valid(&backend_v4));
+    platform_v7_v4 =
+        rin_vulkan_rinos_process_submit_backend_v4_platform_v7(&backend_v4);
+    platform_v8_v4 =
+        rin_vulkan_rinos_process_submit_backend_v4_platform_v8(&backend_v4);
+    CHECK(platform_v7_v4 && platform_v8_v4 &&
+          platform_v8_v4->base == platform_v7_v4 &&
+          platform_v7_v4->base == &backend_v4.platform_v6 &&
+          backend_v4.platform_v6.base == &parent &&
+          backend_v4.platform_v6.context == &backend_v4 &&
+          platform_v8_v4->create_process_compute_bind_group != NULL);
+    CHECK(backend_v4.platform_v6.submit_process_commands(
+              backend_v4.platform_v6.context, 0u, commands, 1u, NULL, 0u,
+              &receipt) == RIN_VULKAN_PRODUCT_OK);
+    CHECK(submit_calls == 1u && observed_queue_token == UINT64_C(0x9002) &&
+          observed_queue_id == 2u && receipt.queue_id == 0u &&
+          receipt.sequence == 17u);
+    supplied_receipt.queue_id = 0u;
+    CHECK(backend_v4.platform_v6.submit_process_commands(
+              backend_v4.platform_v6.context, 1u, commands, 1u, NULL, 0u,
+              &receipt) == RIN_VULKAN_PRODUCT_OK);
+    CHECK(submit_calls == 2u && observed_queue_token == UINT64_C(0x9000) &&
+          observed_queue_id == 0u && receipt.queue_id == 1u);
+    supplied_receipt.queue_id = 2u;
+    CHECK(backend_v4.platform_v6.submit_process_commands(
+              backend_v4.platform_v6.context, 2u, commands, 1u, NULL, 0u,
+              &receipt) == RIN_VULKAN_PRODUCT_OK);
+    CHECK(submit_calls == 3u && observed_queue_token == UINT64_C(0x9002) &&
+          observed_queue_id == 2u && receipt.queue_id == 2u);
+    CHECK(backend_v4.platform_v6.submit_process_commands(
+              backend_v4.platform_v6.context, 3u, commands, 1u, NULL, 0u,
+              &receipt) == RIN_VULKAN_PRODUCT_INVALID_ARGUMENT);
+    CHECK(submit_calls == 3u);
+    release_result = RIN_ERROR_BUSY;
+    fail_release_token = UINT64_C(0x9002);
+    CHECK(rin_vulkan_rinos_process_submit_backend_v4_detach(&backend_v4) ==
+          RIN_VULKAN_PRODUCT_BUSY);
+    CHECK(backend_v4.state == 2u &&
+          backend_v4.compute_backend.compute_backend.submit_backend.queues[0]
+                  .active == 1u);
+    CHECK(backend_v4.platform_v6.submit_process_commands(
+              backend_v4.platform_v6.context, 0u, commands, 1u, NULL, 0u,
+              &receipt) == RIN_VULKAN_PRODUCT_STATE);
+    CHECK(submit_calls == 3u);
+    release_result = RIN_SUCCESS;
+    fail_release_token = 0u;
+    CHECK(rin_vulkan_rinos_process_submit_backend_v4_detach(&backend_v4) ==
+          RIN_VULKAN_PRODUCT_OK);
+    CHECK(backend_v4.state == 0u && release_calls >= 3u);
 
     puts("RinVulkan RinOS process-submit/compute adapter: PASS");
     return 0;

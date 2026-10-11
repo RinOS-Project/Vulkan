@@ -22,6 +22,9 @@ extern "C" {
     UINT32_C(64)
 #define RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V3_MAX_COMPUTE_BINDINGS \
     RIN_GPU_PROCESS_MAX_COMPUTE_BINDINGS_V1
+#define RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V4_VERSION UINT32_C(4)
+#define RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V4_MAX_QUEUE_MAPPINGS \
+    RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V1_MAX_QUEUES
 #define RIN_VULKAN_RINOS_PROCESS_RESOURCE_COOKIE_TAG UINT64_C(0x5261)
 /* Reserved process-token tag for the private shader-module child associated
  * with a RinVk pipeline token. */
@@ -101,6 +104,30 @@ typedef struct RinVulkanRinOSProcessSubmitBackendV3 {
     uint64_t reserved[2];
 } RinVulkanRinOSProcessSubmitBackendV3;
 
+/* V4 keeps Vulkan's flat logical queue index distinct from the RinOS
+ * process queue ID bound through the SDK. Multiple logical queues may map to
+ * one physical process queue; each distinct process queue is bound once. */
+typedef struct RinVulkanRinOSProcessQueueMapV4 {
+    uint32_t logical_queue_id;
+    uint32_t physical_queue_id;
+} RinVulkanRinOSProcessQueueMapV4;
+
+typedef struct RinVulkanRinOSProcessSubmitBackendV4 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint32_t state;
+    volatile uint32_t lock;
+    uint32_t mapping_count;
+    uint32_t reserved0;
+    RinVulkanRinOSProcessSubmitBackendV3 compute_backend;
+    RinVulkanRinOSProcessQueueMapV4 mappings[
+        RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V4_MAX_QUEUE_MAPPINGS];
+    RinVulkanProductPlatformV6 platform_v6;
+    RinVulkanProductPlatformV7 platform_v7;
+    RinVulkanProductPlatformV8 platform_v8;
+    uint64_t reserved[2];
+} RinVulkanRinOSProcessSubmitBackendV4;
+
 /* Initialize caller-zeroed storage for the current RinOS process. Each queue
  * ID is bound through the authenticated RinOS SDK; the returned V6 callback
  * submits canonical RinGPU records through the process-submit syscall. The
@@ -154,6 +181,26 @@ rin_vulkan_rinos_process_submit_backend_v3_platform_v8(
     RinVulkanRinOSProcessSubmitBackendV3* backend);
 int rin_vulkan_rinos_process_submit_backend_v3_detach(
     RinVulkanRinOSProcessSubmitBackendV3* backend);
+
+/* V4 preserves the V3 compute/resource lifecycle while translating the
+ * public flat logical queue index to a bound physical process queue ID. The
+ * mapping is copied and remains owned by this backend until detach. */
+int rin_vulkan_rinos_process_submit_backend_v4_init(
+    RinVulkanRinOSProcessSubmitBackendV4* backend,
+    RinVulkanProductPlatformV5* parent, uint64_t device_id,
+    uint64_t device_generation,
+    const RinVulkanRinOSProcessQueueMapV4* mappings,
+    uint32_t mapping_count);
+int rin_vulkan_rinos_process_submit_backend_v4_valid(
+    const RinVulkanRinOSProcessSubmitBackendV4* backend);
+RinVulkanProductPlatformV7*
+rin_vulkan_rinos_process_submit_backend_v4_platform_v7(
+    RinVulkanRinOSProcessSubmitBackendV4* backend);
+RinVulkanProductPlatformV8*
+rin_vulkan_rinos_process_submit_backend_v4_platform_v8(
+    RinVulkanRinOSProcessSubmitBackendV4* backend);
+int rin_vulkan_rinos_process_submit_backend_v4_detach(
+    RinVulkanRinOSProcessSubmitBackendV4* backend);
 
 #ifdef __cplusplus
 }

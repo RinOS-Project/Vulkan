@@ -1220,3 +1220,318 @@ int rin_vulkan_rinos_process_submit_backend_v3_detach(
     memset(backend, 0, sizeof(*backend));
     return RIN_VULKAN_PRODUCT_OK;
 }
+
+static int rinos_v4_mapping_valid(
+        const RinVulkanRinOSProcessSubmitBackendV4* backend) {
+    uint32_t index;
+    uint32_t other;
+    uint32_t physical_queue_count = 0u;
+    if (!backend || backend->mapping_count == 0u ||
+        backend->mapping_count >
+            RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V4_MAX_QUEUE_MAPPINGS)
+        return 0;
+    for (index = 0u; index < backend->mapping_count; ++index) {
+        uint32_t physical_seen = 0u;
+        for (other = 0u; other < index; ++other) {
+            if (backend->mappings[other].logical_queue_id ==
+                backend->mappings[index].logical_queue_id)
+                return 0;
+            if (backend->mappings[other].physical_queue_id ==
+                backend->mappings[index].physical_queue_id)
+                physical_seen = 1u;
+        }
+        if (!physical_seen) ++physical_queue_count;
+    }
+    if (backend->compute_backend.compute_backend.submit_backend.queue_count !=
+        physical_queue_count)
+        return 0;
+    for (index = 0u; index < backend->mapping_count; ++index) {
+        uint32_t queue_index;
+        int found = 0;
+        const RinVulkanRinOSProcessSubmitBackendV1* submit_backend =
+            &backend->compute_backend.compute_backend.submit_backend;
+        for (queue_index = 0u; queue_index < submit_backend->queue_count;
+             ++queue_index) {
+            if (submit_backend->queues[queue_index].queue_id ==
+                    backend->mappings[index].physical_queue_id &&
+                submit_backend->queues[queue_index].active == 1u &&
+                submit_backend->queues[queue_index].token != 0u) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) return 0;
+    }
+    return 1;
+}
+
+static int rinos_submit_process_commands_v4(
+        void* context, uint32_t logical_queue_id,
+        const RinGpuBackendCommandV1* commands, uint32_t command_count,
+        const RinVulkanProductResourceV1* resources, uint32_t resource_count,
+        RinVulkanProductProcessSubmitReceiptV1* receipt_out) {
+    RinVulkanRinOSProcessSubmitBackendV4* backend =
+        (RinVulkanRinOSProcessSubmitBackendV4*)context;
+    RinVulkanProductProcessSubmitReceiptV1 physical_receipt;
+    RinVulkanProductSubmitProcessCommandsV6Fn submit;
+    uint32_t index;
+    uint32_t physical_queue_id = 0u;
+    int found = 0;
+    int result;
+
+    if (!backend || backend != context || !receipt_out ||
+        !rinos_range_valid(receipt_out, sizeof(*receipt_out)) ||
+        command_count == 0u ||
+        command_count > RIN_GPU_PROCESS_MAX_COMMANDS_V1 ||
+        resource_count > RIN_GPU_PROCESS_MAX_RESOURCES_V1 ||
+        !rinos_range_valid(commands, sizeof(*commands) * command_count) ||
+        (resource_count != 0u &&
+         (!resources || !rinos_range_valid(
+                            resources, sizeof(*resources) * resource_count))) ||
+        rinos_ranges_overlap(backend, sizeof(*backend), receipt_out,
+                             sizeof(*receipt_out)) ||
+        rinos_ranges_overlap(receipt_out, sizeof(*receipt_out), commands,
+                             sizeof(*commands) * command_count) ||
+        (resource_count != 0u &&
+         rinos_ranges_overlap(receipt_out, sizeof(*receipt_out), resources,
+                              sizeof(*resources) * resource_count)) ||
+        rinos_ranges_overlap(backend, sizeof(*backend), commands,
+                             sizeof(*commands) * command_count) ||
+        (resource_count != 0u &&
+         rinos_ranges_overlap(backend, sizeof(*backend), resources,
+                              sizeof(*resources) * resource_count)))
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+
+    memset(receipt_out, 0, sizeof(*receipt_out));
+    receipt_out->struct_size = sizeof(*receipt_out);
+    receipt_out->version =
+        RIN_VULKAN_PRODUCT_PROCESS_SUBMIT_RECEIPT_V1_VERSION;
+    if (!rinos_try_lock(&backend->lock)) return RIN_VULKAN_PRODUCT_BUSY;
+    if (backend->struct_size != sizeof(*backend) ||
+        backend->version !=
+            RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V4_VERSION ||
+        backend->state != RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_ACTIVE ||
+        !rinos_v4_mapping_valid(backend)) {
+        result = backend->state == RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_LOST
+                     ? RIN_VULKAN_PRODUCT_LOST
+                     : RIN_VULKAN_PRODUCT_STATE;
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return result;
+    }
+    for (index = 0u; index < backend->mapping_count; ++index) {
+        if (backend->mappings[index].logical_queue_id == logical_queue_id) {
+            physical_queue_id = backend->mappings[index].physical_queue_id;
+            found = 1;
+            break;
+        }
+    }
+    if (!found) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    }
+
+    submit = backend->compute_backend.compute_backend.submit_backend
+                 .platform.submit_process_commands;
+    memset(&physical_receipt, 0, sizeof(physical_receipt));
+    result = submit(
+        backend->compute_backend.compute_backend.submit_backend.platform
+            .context,
+        physical_queue_id, commands, command_count, resources, resource_count,
+        &physical_receipt);
+    if (result == RIN_VULKAN_PRODUCT_OK) {
+        if (physical_receipt.struct_size != sizeof(physical_receipt) ||
+            physical_receipt.version !=
+                RIN_VULKAN_PRODUCT_PROCESS_SUBMIT_RECEIPT_V1_VERSION ||
+            physical_receipt.queue_id != physical_queue_id ||
+            physical_receipt.sequence == 0u ||
+            physical_receipt.completion_value == 0u ||
+            physical_receipt.device_epoch == 0u ||
+            physical_receipt.iommu_map_generation == 0u ||
+            physical_receipt.reserved0 != 0u ||
+            physical_receipt.reserved[0] != 0u ||
+            physical_receipt.reserved[1] != 0u) {
+            backend->state = RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_LOST;
+            result = RIN_VULKAN_PRODUCT_PROTOCOL;
+        } else {
+            *receipt_out = physical_receipt;
+            receipt_out->queue_id = logical_queue_id;
+        }
+    }
+    __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+    return result;
+}
+
+static int rinos_v4_platform_valid(
+        const RinVulkanRinOSProcessSubmitBackendV4* backend) {
+    const RinVulkanProductPlatformV6* physical_v6;
+    const RinVulkanProductPlatformV7* physical_v7;
+    const RinVulkanProductPlatformV8* physical_v8;
+    if (!backend || !rinos_v4_mapping_valid(backend) ||
+        !rin_vulkan_rinos_process_submit_backend_v3_valid(
+            &backend->compute_backend))
+        return 0;
+    physical_v6 =
+        &backend->compute_backend.compute_backend.submit_backend.platform;
+    physical_v7 = &backend->compute_backend.platform_v7;
+    physical_v8 = &backend->compute_backend.platform_v8;
+    return backend->platform_v6.struct_size == sizeof(backend->platform_v6) &&
+           backend->platform_v6.version ==
+               RIN_VULKAN_PRODUCT_PLATFORM_V6_VERSION &&
+           backend->platform_v6.base == physical_v6->base &&
+           backend->platform_v6.context == backend &&
+           backend->platform_v6.submit_process_commands ==
+               rinos_submit_process_commands_v4 &&
+           backend->platform_v6.reserved[0] == 0u &&
+           backend->platform_v6.reserved[1] == 0u &&
+           backend->platform_v7.struct_size == sizeof(backend->platform_v7) &&
+           backend->platform_v7.version ==
+               RIN_VULKAN_PRODUCT_PLATFORM_V7_VERSION &&
+           backend->platform_v7.base == &backend->platform_v6 &&
+           backend->platform_v7.context == physical_v7->context &&
+           backend->platform_v7.create_process_compute_pipeline ==
+               physical_v7->create_process_compute_pipeline &&
+           backend->platform_v7.destroy_process_compute_pipeline ==
+               physical_v7->destroy_process_compute_pipeline &&
+           backend->platform_v7.reserved[0] == 0u &&
+           backend->platform_v7.reserved[1] == 0u &&
+           backend->platform_v8.struct_size == sizeof(backend->platform_v8) &&
+           backend->platform_v8.version ==
+               RIN_VULKAN_PRODUCT_PLATFORM_V8_VERSION &&
+           backend->platform_v8.base == &backend->platform_v7 &&
+           backend->platform_v8.context == physical_v8->context &&
+           backend->platform_v8.create_process_compute_bind_group ==
+               physical_v8->create_process_compute_bind_group &&
+           backend->platform_v8.destroy_process_compute_bind_group ==
+               physical_v8->destroy_process_compute_bind_group &&
+           backend->platform_v8.reserved[0] == 0u &&
+           backend->platform_v8.reserved[1] == 0u &&
+           backend->reserved0 == 0u && backend->reserved[0] == 0u &&
+           backend->reserved[1] == 0u;
+}
+
+int rin_vulkan_rinos_process_submit_backend_v4_init(
+        RinVulkanRinOSProcessSubmitBackendV4* backend,
+        RinVulkanProductPlatformV5* parent, uint64_t device_id,
+        uint64_t device_generation,
+        const RinVulkanRinOSProcessQueueMapV4* mappings,
+        uint32_t mapping_count) {
+    uint32_t physical_queue_ids[
+        RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V4_MAX_QUEUE_MAPPINGS];
+    uint32_t physical_queue_count = 0u;
+    uint32_t index;
+    int result;
+
+    if (!backend || !parent || !mappings || mapping_count == 0u ||
+        mapping_count >
+            RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V4_MAX_QUEUE_MAPPINGS ||
+        !rinos_range_valid(backend, sizeof(*backend)) ||
+        !rinos_range_valid(parent, sizeof(*parent)) ||
+        !rinos_range_valid(mappings, sizeof(*mappings) * mapping_count) ||
+        rinos_ranges_overlap(backend, sizeof(*backend), parent,
+                             sizeof(*parent)) ||
+        rinos_ranges_overlap(backend, sizeof(*backend), mappings,
+                             sizeof(*mappings) * mapping_count) ||
+        backend->struct_size != 0u || backend->version != 0u ||
+        backend->state != RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_NONE ||
+        backend->lock != 0u || backend->reserved0 != 0u ||
+        backend->reserved[0] != 0u || backend->reserved[1] != 0u)
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+
+    for (index = 0u; index < mapping_count; ++index) {
+        uint32_t previous;
+        uint32_t found = 0u;
+        for (previous = 0u; previous < index; ++previous) {
+            if (mappings[previous].logical_queue_id ==
+                mappings[index].logical_queue_id)
+                return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+            if (mappings[previous].physical_queue_id ==
+                mappings[index].physical_queue_id)
+                found = 1u;
+        }
+        if (!found)
+            physical_queue_ids[physical_queue_count++] =
+                mappings[index].physical_queue_id;
+    }
+
+    memset(backend, 0, sizeof(*backend));
+    __atomic_store_n(&backend->lock, 1u, __ATOMIC_RELAXED);
+    backend->struct_size = sizeof(*backend);
+    backend->version = RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V4_VERSION;
+    backend->state = RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_CLEANUP_PENDING;
+    backend->mapping_count = mapping_count;
+    memcpy(backend->mappings, mappings, sizeof(*mappings) * mapping_count);
+    result = rin_vulkan_rinos_process_submit_backend_v3_init(
+        &backend->compute_backend, parent, device_id, device_generation,
+        physical_queue_ids, physical_queue_count);
+    if (result != RIN_VULKAN_PRODUCT_OK) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return result;
+    }
+
+    backend->platform_v6 =
+        backend->compute_backend.compute_backend.submit_backend.platform;
+    backend->platform_v6.context = backend;
+    backend->platform_v6.submit_process_commands =
+        rinos_submit_process_commands_v4;
+    backend->platform_v7 = backend->compute_backend.platform_v7;
+    backend->platform_v7.base = &backend->platform_v6;
+    backend->platform_v8 = backend->compute_backend.platform_v8;
+    backend->platform_v8.base = &backend->platform_v7;
+    backend->state = RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_ACTIVE;
+    __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+    return RIN_VULKAN_PRODUCT_OK;
+}
+
+int rin_vulkan_rinos_process_submit_backend_v4_valid(
+        const RinVulkanRinOSProcessSubmitBackendV4* backend) {
+    return backend && __atomic_load_n(&backend->lock, __ATOMIC_ACQUIRE) == 0u &&
+           backend->struct_size == sizeof(*backend) &&
+           backend->version ==
+               RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V4_VERSION &&
+           backend->state == RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_ACTIVE &&
+           backend->reserved0 == 0u && backend->reserved[0] == 0u &&
+           backend->reserved[1] == 0u && rinos_v4_platform_valid(backend);
+}
+
+RinVulkanProductPlatformV7*
+rin_vulkan_rinos_process_submit_backend_v4_platform_v7(
+        RinVulkanRinOSProcessSubmitBackendV4* backend) {
+    return rin_vulkan_rinos_process_submit_backend_v4_valid(backend)
+               ? &backend->platform_v7
+               : NULL;
+}
+
+RinVulkanProductPlatformV8*
+rin_vulkan_rinos_process_submit_backend_v4_platform_v8(
+        RinVulkanRinOSProcessSubmitBackendV4* backend) {
+    return rin_vulkan_rinos_process_submit_backend_v4_valid(backend)
+               ? &backend->platform_v8
+               : NULL;
+}
+
+int rin_vulkan_rinos_process_submit_backend_v4_detach(
+        RinVulkanRinOSProcessSubmitBackendV4* backend) {
+    int result;
+    if (!backend || !rinos_try_lock(&backend->lock))
+        return backend ? RIN_VULKAN_PRODUCT_BUSY
+                       : RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    if (backend->struct_size != sizeof(*backend) ||
+        backend->version != RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V4_VERSION ||
+        (backend->state != RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_ACTIVE &&
+         backend->state != RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_CLEANUP_PENDING &&
+         backend->state != RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_LOST)) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_STATE;
+    }
+    backend->state = RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_CLEANUP_PENDING;
+    __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+    if (backend->compute_backend.struct_size == 0u) {
+        memset(backend, 0, sizeof(*backend));
+        return RIN_VULKAN_PRODUCT_OK;
+    }
+    result = rin_vulkan_rinos_process_submit_backend_v3_detach(
+        &backend->compute_backend);
+    if (result != RIN_VULKAN_PRODUCT_OK) return result;
+    memset(backend, 0, sizeof(*backend));
+    return RIN_VULKAN_PRODUCT_OK;
+}
