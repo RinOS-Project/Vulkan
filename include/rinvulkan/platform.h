@@ -13,6 +13,7 @@
 #define RIN_VULKAN_PRODUCT_PLATFORM_V4_VERSION 4u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V5_VERSION 5u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V6_VERSION 6u
+#define RIN_VULKAN_PRODUCT_PLATFORM_V7_VERSION 7u
 #define RIN_VULKAN_PRODUCT_PROCESS_SUBMIT_RECEIPT_V1_VERSION 1u
 #define RIN_VULKAN_PRODUCT_MEMORY_VERSION 1u
 #define RIN_VULKAN_PRODUCT_MAX_QUEUES 8u
@@ -349,6 +350,29 @@ typedef struct RinVulkanProductPlatformV6 {
     RinVulkanProductSubmitProcessCommandsV6Fn submit_process_commands;
     uint64_t reserved[2];
 } RinVulkanProductPlatformV6;
+
+/* V7 adds process-owned compute-pipeline lifecycle to the canonical V6
+ * process-submit route. The pipeline cookie is an opaque API object identity;
+ * implementations must create a real process-owned shader/pipeline pair and
+ * return the token that DISPATCH will carry. Destroy is not complete until
+ * the corresponding process objects have actually been released. */
+typedef int (*RinVulkanProductCreateProcessComputePipelineV7Fn)(
+    void* context, uint64_t pipeline_cookie, const void* rin_shader_ir,
+    uint64_t shader_ir_size, uint64_t* pipeline_token_out);
+typedef int (*RinVulkanProductDestroyProcessComputePipelineV7Fn)(
+    void* context, uint64_t pipeline_token);
+
+typedef struct RinVulkanProductPlatformV7 {
+    uint32_t struct_size;
+    uint32_t version;
+    RinVulkanProductPlatformV6* base;
+    void* context;
+    RinVulkanProductCreateProcessComputePipelineV7Fn
+        create_process_compute_pipeline;
+    RinVulkanProductDestroyProcessComputePipelineV7Fn
+        destroy_process_compute_pipeline;
+    uint64_t reserved[2];
+} RinVulkanProductPlatformV7;
 
 #ifdef __cplusplus
 static_assert(sizeof(RinVulkanProductResourceV1) == 16u,

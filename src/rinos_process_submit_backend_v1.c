@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include <rinvulkan/rinos_process_submit_backend_v1.h>
+#include <ringpu/rin_shader.h>
 
 #include <stddef.h>
 #include <string.h>
@@ -76,6 +77,12 @@ static int rinos_queue_ids_valid(const uint32_t* queue_ids,
     }
     return 1;
 }
+
+static int rinos_create_process_compute_pipeline_v2(
+    void* context, uint64_t pipeline_cookie, const void* rin_shader_ir,
+    uint64_t shader_ir_size, uint64_t* pipeline_token_out);
+static int rinos_destroy_process_compute_pipeline_v2(
+    void* context, uint64_t pipeline_token);
 
 static int rinos_detach_locked(
     RinVulkanRinOSProcessSubmitBackendV1* backend) {
@@ -367,4 +374,311 @@ int rin_vulkan_rinos_process_submit_backend_v1_detach(
     }
     result = rinos_detach_locked(backend);
     return result;
+}
+
+static int rinos_compute_backend_v2_header_valid(
+        const RinVulkanRinOSProcessSubmitBackendV2* backend) {
+    const RinVulkanProductPlatformV7* platform;
+    if (!backend || backend->struct_size != sizeof(*backend) ||
+        backend->version !=
+            RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V2_VERSION ||
+        backend->state != RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_ACTIVE ||
+        backend->reserved[0] != 0u || backend->reserved[1] != 0u ||
+        !rin_vulkan_rinos_process_submit_backend_v1_valid(
+            &backend->submit_backend))
+        return 0;
+    platform = &backend->platform;
+    return platform->struct_size == sizeof(*platform) &&
+           platform->version == RIN_VULKAN_PRODUCT_PLATFORM_V7_VERSION &&
+           platform->base == &backend->submit_backend.platform &&
+           platform->context == backend &&
+           platform->create_process_compute_pipeline ==
+               rinos_create_process_compute_pipeline_v2 &&
+           platform->destroy_process_compute_pipeline ==
+               rinos_destroy_process_compute_pipeline_v2 &&
+           platform->reserved[0] == 0u && platform->reserved[1] == 0u;
+}
+
+static RinVulkanRinOSProcessComputePipelineV2*
+rinos_compute_pipeline_v2_find(
+        RinVulkanRinOSProcessSubmitBackendV2* backend,
+        uint64_t pipeline_token) {
+    uint32_t index;
+    for (index = 0u;
+         index <
+             RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V2_MAX_COMPUTE_PIPELINES;
+         ++index) {
+        RinVulkanRinOSProcessComputePipelineV2* pipeline =
+            &backend->compute_pipelines[index];
+        if (pipeline->pipeline_token == pipeline_token &&
+            pipeline->pipeline_active == 1u)
+            return pipeline;
+    }
+    return NULL;
+}
+
+static int rinos_destroy_compute_pipeline_v2_locked(
+        RinVulkanRinOSProcessSubmitBackendV2* backend,
+        RinVulkanRinOSProcessComputePipelineV2* pipeline) {
+    int result;
+    if (!backend || !pipeline ||
+        (pipeline->pipeline_active != 0u &&
+         pipeline->pipeline_active != 1u) ||
+        (pipeline->shader_module_active != 0u &&
+         pipeline->shader_module_active != 1u))
+        return RIN_VULKAN_PRODUCT_PROTOCOL;
+    if (pipeline->pipeline_active != 0u) {
+        result = rinos_map_sdk_result(rin_gpu_process_object_destroy_v1(
+            backend->submit_backend.device_id,
+            backend->submit_backend.device_generation,
+            pipeline->pipeline_token));
+        if (result != RIN_VULKAN_PRODUCT_OK) return result;
+        pipeline->pipeline_active = 0u;
+    }
+    if (pipeline->shader_module_active != 0u) {
+        result = rinos_map_sdk_result(rin_gpu_process_object_destroy_v1(
+            backend->submit_backend.device_id,
+            backend->submit_backend.device_generation,
+            pipeline->shader_module_token));
+        if (result != RIN_VULKAN_PRODUCT_OK) return result;
+        pipeline->shader_module_active = 0u;
+    }
+    memset(pipeline, 0, sizeof(*pipeline));
+    return RIN_VULKAN_PRODUCT_OK;
+}
+
+static int rinos_create_process_compute_pipeline_v2(
+        void* context, uint64_t pipeline_cookie, const void* rin_shader_ir,
+        uint64_t shader_ir_size, uint64_t* pipeline_token_out) {
+    RinVulkanRinOSProcessSubmitBackendV2* backend =
+        (RinVulkanRinOSProcessSubmitBackendV2*)context;
+    RinVulkanRinOSProcessComputePipelineV2* slot = NULL;
+    uint64_t shader_token;
+    uint32_t index;
+    int result;
+    RinResult sdk_result;
+
+    if (pipeline_token_out) *pipeline_token_out = 0u;
+    if (!backend || !pipeline_token_out || pipeline_cookie == 0u ||
+        !rin_shader_ir || shader_ir_size < sizeof(RinShaderHeaderV1) ||
+        shader_ir_size > RIN_GPU_PROCESS_SHADER_MAX_BYTES_V1 ||
+        shader_ir_size > SIZE_MAX ||
+        !rinos_range_valid(rin_shader_ir, (size_t)shader_ir_size) ||
+        rinos_ranges_overlap(backend, sizeof(*backend), rin_shader_ir,
+                             (size_t)shader_ir_size) ||
+        rinos_ranges_overlap(backend, sizeof(*backend), pipeline_token_out,
+                             sizeof(*pipeline_token_out)))
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    if (!rinos_try_lock(&backend->lock)) return RIN_VULKAN_PRODUCT_BUSY;
+    if (!rinos_compute_backend_v2_header_valid(backend)) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_STATE;
+    }
+    shader_token =
+        ((uint64_t)RIN_VULKAN_RINOS_PROCESS_SHADER_MODULE_TOKEN_TAG << 48u) |
+        (pipeline_cookie & UINT64_C(0x0000FFFFFFFFFFFF));
+    if (shader_token == 0u || shader_token == pipeline_cookie) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    }
+    for (index = 0u;
+         index <
+             RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V2_MAX_COMPUTE_PIPELINES;
+         ++index) {
+        RinVulkanRinOSProcessComputePipelineV2* candidate =
+            &backend->compute_pipelines[index];
+        if (candidate->pipeline_active == 0u &&
+            candidate->shader_module_active == 0u && slot == NULL)
+            slot = candidate;
+        if (candidate->pipeline_token == pipeline_cookie ||
+            candidate->shader_module_token == pipeline_cookie ||
+            candidate->pipeline_token == shader_token ||
+            candidate->shader_module_token == shader_token) {
+            __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+            return RIN_VULKAN_PRODUCT_BUSY;
+        }
+    }
+    if (!slot) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_LIMIT;
+    }
+    slot->pipeline_token = pipeline_cookie;
+    slot->shader_module_token = shader_token;
+    sdk_result = rin_gpu_process_shader_module_create_v1(
+        backend->submit_backend.device_id,
+        backend->submit_backend.device_generation, shader_token,
+        rin_shader_ir, shader_ir_size);
+    result = rinos_map_sdk_result(sdk_result);
+    if (result != RIN_VULKAN_PRODUCT_OK) {
+        memset(slot, 0, sizeof(*slot));
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return result;
+    }
+    slot->shader_module_active = 1u;
+    sdk_result = rin_gpu_process_compute_pipeline_create_v1(
+        backend->submit_backend.device_id,
+        backend->submit_backend.device_generation, pipeline_cookie,
+        shader_token);
+    result = rinos_map_sdk_result(sdk_result);
+    if (result != RIN_VULKAN_PRODUCT_OK) {
+        const int cleanup_result =
+            rinos_destroy_compute_pipeline_v2_locked(backend, slot);
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return cleanup_result == RIN_VULKAN_PRODUCT_OK ? result
+                                                       : cleanup_result;
+    }
+    slot->pipeline_active = 1u;
+    *pipeline_token_out = pipeline_cookie;
+    __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+    return RIN_VULKAN_PRODUCT_OK;
+}
+
+static int rinos_destroy_process_compute_pipeline_v2(
+        void* context, uint64_t pipeline_token) {
+    RinVulkanRinOSProcessSubmitBackendV2* backend =
+        (RinVulkanRinOSProcessSubmitBackendV2*)context;
+    RinVulkanRinOSProcessComputePipelineV2* pipeline;
+    int result;
+    if (!backend || pipeline_token == 0u)
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    if (!rinos_try_lock(&backend->lock)) return RIN_VULKAN_PRODUCT_BUSY;
+    if (!rinos_compute_backend_v2_header_valid(backend)) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_STATE;
+    }
+    pipeline = rinos_compute_pipeline_v2_find(backend, pipeline_token);
+    if (!pipeline) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    }
+    result = rinos_destroy_compute_pipeline_v2_locked(backend, pipeline);
+    __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+    return result;
+}
+
+int rin_vulkan_rinos_process_submit_backend_v2_init(
+    RinVulkanRinOSProcessSubmitBackendV2* backend,
+    RinVulkanProductPlatformV5* parent, uint64_t device_id,
+    uint64_t device_generation, const uint32_t* queue_ids,
+    uint32_t queue_count) {
+    int result;
+    if (!backend || !parent ||
+        !rinos_range_valid(backend, sizeof(*backend)) ||
+        rinos_ranges_overlap(backend, sizeof(*backend), parent,
+                             sizeof(*parent)) ||
+        backend->struct_size != 0u || backend->version != 0u ||
+        backend->state != RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_NONE ||
+        backend->reserved[0] != 0u || backend->reserved[1] != 0u)
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    if (!rinos_try_lock(&backend->lock)) return RIN_VULKAN_PRODUCT_BUSY;
+    memset(backend, 0, sizeof(*backend));
+    __atomic_store_n(&backend->lock, 1u, __ATOMIC_RELAXED);
+    backend->struct_size = sizeof(*backend);
+    backend->version = RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V2_VERSION;
+    backend->state = RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_CLEANUP_PENDING;
+    __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+
+    result = rin_vulkan_rinos_process_submit_backend_v1_init(
+        &backend->submit_backend, parent, device_id, device_generation,
+        queue_ids, queue_count);
+    if (result != RIN_VULKAN_PRODUCT_OK) {
+        if (backend->submit_backend.state ==
+                RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_NONE) {
+            memset(backend, 0, sizeof(*backend));
+            return result;
+        }
+        return result;
+    }
+    if (!rinos_try_lock(&backend->lock)) return RIN_VULKAN_PRODUCT_BUSY;
+    backend->platform.struct_size = sizeof(backend->platform);
+    backend->platform.version = RIN_VULKAN_PRODUCT_PLATFORM_V7_VERSION;
+    backend->platform.base = &backend->submit_backend.platform;
+    backend->platform.context = backend;
+    backend->platform.create_process_compute_pipeline =
+        rinos_create_process_compute_pipeline_v2;
+    backend->platform.destroy_process_compute_pipeline =
+        rinos_destroy_process_compute_pipeline_v2;
+    backend->state = RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_ACTIVE;
+    __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+    return RIN_VULKAN_PRODUCT_OK;
+}
+
+int rin_vulkan_rinos_process_submit_backend_v2_valid(
+        const RinVulkanRinOSProcessSubmitBackendV2* backend) {
+    uint32_t index;
+    if (__atomic_load_n(&backend->lock, __ATOMIC_ACQUIRE) != 0u ||
+        !rinos_compute_backend_v2_header_valid(backend))
+        return 0;
+    for (index = 0u;
+         index <
+             RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V2_MAX_COMPUTE_PIPELINES;
+         ++index) {
+        const RinVulkanRinOSProcessComputePipelineV2* pipeline =
+            &backend->compute_pipelines[index];
+        if ((pipeline->pipeline_active == 0u &&
+             pipeline->shader_module_active == 0u) !=
+                (pipeline->pipeline_token == 0u &&
+                 pipeline->shader_module_token == 0u) ||
+            (pipeline->pipeline_active != 0u &&
+             pipeline->pipeline_active != 1u) ||
+            (pipeline->shader_module_active != 0u &&
+             pipeline->shader_module_active != 1u) ||
+            (pipeline->pipeline_active != 0u &&
+             pipeline->pipeline_token == 0u) ||
+            (pipeline->shader_module_active != 0u &&
+             pipeline->shader_module_token == 0u))
+            return 0;
+    }
+    return 1;
+}
+
+RinVulkanProductPlatformV7*
+rin_vulkan_rinos_process_submit_backend_v2_platform(
+        RinVulkanRinOSProcessSubmitBackendV2* backend) {
+    return rin_vulkan_rinos_process_submit_backend_v2_valid(backend)
+               ? &backend->platform
+               : NULL;
+}
+
+int rin_vulkan_rinos_process_submit_backend_v2_detach(
+        RinVulkanRinOSProcessSubmitBackendV2* backend) {
+    uint32_t index;
+    int first_error = RIN_VULKAN_PRODUCT_OK;
+    int submit_result;
+    if (!backend || !rinos_try_lock(&backend->lock))
+        return backend ? RIN_VULKAN_PRODUCT_BUSY
+                       : RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    if (backend->struct_size != sizeof(*backend) ||
+        backend->version !=
+            RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V2_VERSION ||
+        (backend->state != RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_ACTIVE &&
+         backend->state !=
+             RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_CLEANUP_PENDING)) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_STATE;
+    }
+    backend->state = RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_CLEANUP_PENDING;
+    for (index = 0u;
+         index <
+             RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V2_MAX_COMPUTE_PIPELINES;
+         ++index) {
+        RinVulkanRinOSProcessComputePipelineV2* pipeline =
+            &backend->compute_pipelines[index];
+        int result;
+        if (pipeline->pipeline_active == 0u &&
+            pipeline->shader_module_active == 0u)
+            continue;
+        result = rinos_destroy_compute_pipeline_v2_locked(backend, pipeline);
+        if (result != RIN_VULKAN_PRODUCT_OK &&
+            first_error == RIN_VULKAN_PRODUCT_OK)
+            first_error = result;
+    }
+    __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+    if (first_error != RIN_VULKAN_PRODUCT_OK) return first_error;
+
+    submit_result = rin_vulkan_rinos_process_submit_backend_v1_detach(
+        &backend->submit_backend);
+    if (submit_result != RIN_VULKAN_PRODUCT_OK) return submit_result;
+    memset(backend, 0, sizeof(*backend));
+    return RIN_VULKAN_PRODUCT_OK;
 }

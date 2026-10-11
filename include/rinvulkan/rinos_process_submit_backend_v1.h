@@ -14,6 +14,12 @@ extern "C" {
 #define RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V1_VERSION UINT32_C(1)
 #define RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V1_MAX_QUEUES \
     RIN_VULKAN_PRODUCT_MAX_QUEUES
+#define RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V2_VERSION UINT32_C(2)
+#define RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V2_MAX_COMPUTE_PIPELINES \
+    UINT32_C(64)
+/* Reserved process-token tag for the private shader-module child associated
+ * with a RinVk pipeline token. */
+#define RIN_VULKAN_RINOS_PROCESS_SHADER_MODULE_TOKEN_TAG UINT64_C(0x5260)
 
 typedef struct RinVulkanRinOSProcessQueueV1 {
     uint32_t queue_id;
@@ -36,6 +42,27 @@ typedef struct RinVulkanRinOSProcessSubmitBackendV1 {
     uint64_t reserved[2];
 } RinVulkanRinOSProcessSubmitBackendV1;
 
+typedef struct RinVulkanRinOSProcessComputePipelineV2 {
+    uint64_t pipeline_token;
+    uint64_t shader_module_token;
+    uint32_t pipeline_active;
+    uint32_t shader_module_active;
+} RinVulkanRinOSProcessComputePipelineV2;
+
+/* V2 composes the stable V1 queue-submit adapter with process-owned compute
+ * pipeline lifecycle. Keep V1 unchanged for existing transfer clients. */
+typedef struct RinVulkanRinOSProcessSubmitBackendV2 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint32_t state;
+    volatile uint32_t lock;
+    RinVulkanRinOSProcessSubmitBackendV1 submit_backend;
+    RinVulkanProductPlatformV7 platform;
+    RinVulkanRinOSProcessComputePipelineV2 compute_pipelines[
+        RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V2_MAX_COMPUTE_PIPELINES];
+    uint64_t reserved[2];
+} RinVulkanRinOSProcessSubmitBackendV2;
+
 /* Initialize caller-zeroed storage for the current RinOS process. Each queue
  * ID is bound through the authenticated RinOS SDK; the returned V6 callback
  * submits canonical RinGPU records through the process-submit syscall. The
@@ -57,6 +84,22 @@ rin_vulkan_rinos_process_submit_backend_v1_platform(
  * release is retained for a later retry and never reported as successful. */
 int rin_vulkan_rinos_process_submit_backend_v1_detach(
     RinVulkanRinOSProcessSubmitBackendV1* backend);
+
+/* V2 owns the V1 queue adapter and its process compute objects as one
+ * lifecycle. Detach retries real object/queue releases and remains pending
+ * if any SDK release fails. */
+int rin_vulkan_rinos_process_submit_backend_v2_init(
+    RinVulkanRinOSProcessSubmitBackendV2* backend,
+    RinVulkanProductPlatformV5* parent, uint64_t device_id,
+    uint64_t device_generation, const uint32_t* queue_ids,
+    uint32_t queue_count);
+int rin_vulkan_rinos_process_submit_backend_v2_valid(
+    const RinVulkanRinOSProcessSubmitBackendV2* backend);
+RinVulkanProductPlatformV7*
+rin_vulkan_rinos_process_submit_backend_v2_platform(
+    RinVulkanRinOSProcessSubmitBackendV2* backend);
+int rin_vulkan_rinos_process_submit_backend_v2_detach(
+    RinVulkanRinOSProcessSubmitBackendV2* backend);
 
 #ifdef __cplusplus
 }
