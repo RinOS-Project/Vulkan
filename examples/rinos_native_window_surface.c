@@ -430,7 +430,10 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
     swapchain_info.imageColorSpace = selected_format.colorSpace;
     swapchain_info.imageExtent = extent;
     swapchain_info.imageArrayLayers = 1u;
-    swapchain_info.imageUsage = RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    /* Native-window present copies the completed image to host-readable
+     * staging memory before importing pixels into the Compositor's SHM slot. */
+    swapchain_info.imageUsage = RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     swapchain_info.imageSharingMode = RIN_VK_SHARING_MODE_EXCLUSIVE;
     swapchain_info.preTransform = capabilities.currentTransform;
     swapchain_info.compositeAlpha = composite_alpha;
