@@ -5,6 +5,7 @@
 #include <rinvulkan/icd.h>
 #include <rinvulkan/rinos_process_submit_backend_v1.h>
 #include <rinvulkan/software_platform.h>
+#include <ringpu/rin_shader.h>
 #include <rin/contract_abi.h>
 #include <rinruntime/window.h>
 
@@ -77,16 +78,26 @@ typedef struct TestProductAdapters {
     RinVulkanProductPlatformV3 v3;
     RinVulkanProductPlatformV4 v4;
     RinVulkanProductPlatformV5 v5;
-    RinVulkanProductPlatformV6 v6;
+    RinVulkanProductPlatformV6* v6;
+    RinVulkanProductPlatformV7* v7;
     RinVulkanProductPlatformV6 software_v6;
-    RinVulkanRinOSProcessSubmitBackendV1 process_submit_backend;
+    RinVulkanRinOSProcessSubmitBackendV2 process_submit_backend;
     TestSdkProcessQueue sdk_queues[RIN_GPU_PROCESS_MAX_QUEUES_V1];
     uint32_t sdk_queue_bind_calls;
     uint32_t sdk_queue_release_calls;
     uint32_t sdk_process_submit_calls;
     uint32_t sdk_active_queue_count;
+    uint32_t sdk_shader_module_create_calls;
+    uint32_t sdk_compute_pipeline_create_calls;
+    uint32_t sdk_object_destroy_calls;
+    uint64_t sdk_last_shader_module_token;
+    uint64_t sdk_last_pipeline_token;
+    uint64_t sdk_last_pipeline_shader_token;
+    uint64_t sdk_destroy_tokens[2];
     uint32_t canonical_submit_calls;
     uint32_t canonical_command_count;
+    uint32_t canonical_dispatch_calls;
+    RinGpuBackendCommandV1 canonical_last_command;
     uint32_t canonical_resolve_command_count;
     uint32_t canonical_graphics_barrier_count;
     RinGpuBackendGraphicsBarrierV2 canonical_last_graphics_barrier;
@@ -825,6 +836,55 @@ static int test_submit_process_commands_v6(
         (resource_count != 0u && !resources) ||
         queue_id >= adapters->software->queue_count)
         return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    if (command_count == 1u &&
+        commands[0].type == RIN_GPU_BACKEND_COMMAND_DISPATCH) {
+        const RinGpuBackendDispatchV1* dispatch =
+            &commands[0].value.dispatch;
+        if (commands[0].reserved != 0u || resource_count != 0u ||
+            dispatch->pipeline_cookie == 0u ||
+            dispatch->pipeline_cookie != adapters->sdk_last_pipeline_token ||
+            dispatch->group_count_x != 2u ||
+            dispatch->group_count_y != 3u ||
+            dispatch->group_count_z != 4u)
+            return RIN_VULKAN_PRODUCT_PROTOCOL;
+        adapters->canonical_last_command = commands[0];
+        ++adapters->canonical_dispatch_calls;
+        /* This host provider validates the process-submit handoff and gives
+         * the ICD a real software-queue completion token. It does not claim
+         * to execute a GPU shader. */
+        memset(&packet, 0, sizeof(packet));
+        packet.struct_size = sizeof(packet);
+        packet.version = RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_3;
+        packet.product_queue_id = queue_id;
+        packet.op_count = 1u;
+        packet.operations[0].type =
+            RIN_GPU_VULKAN_TRANSFER_OP_MEMORY_BARRIER;
+        packet.operations[0].barrier.src_stage_mask =
+            RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS;
+        packet.operations[0].barrier.dst_stage_mask =
+            RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS;
+        memset(&submission, 0, sizeof(submission));
+        result = adapters->software->platform.prepare_submission(
+            adapters->software->platform.context, queue_id,
+            (uint64_t)(uintptr_t)&packet, &submission);
+        if (result != RIN_VULKAN_PRODUCT_OK) return result;
+        result = adapters->software->platform.submit(
+            adapters->software->platform.context, &submission, NULL, 0u);
+        if (result != RIN_VULKAN_PRODUCT_OK) return result;
+        memset(receipt_out, 0, sizeof(*receipt_out));
+        receipt_out->struct_size = sizeof(*receipt_out);
+        receipt_out->version =
+            RIN_VULKAN_PRODUCT_PROCESS_SUBMIT_RECEIPT_V1_VERSION;
+        receipt_out->queue_id = submission.queue_id;
+        receipt_out->sequence = submission.sequence;
+        receipt_out->completion_value = submission.completion_value;
+        receipt_out->device_epoch = submission.device_epoch;
+        receipt_out->iommu_map_generation =
+            submission.iommu_map_generation;
+        ++adapters->canonical_submit_calls;
+        adapters->canonical_command_count = command_count;
+        return RIN_VULKAN_PRODUCT_OK;
+    }
     memset(&packet, 0, sizeof(packet));
     packet.struct_size = sizeof(packet);
     packet.version = RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_3;
@@ -1599,6 +1659,60 @@ RinResult rin_gpu_process_queue_release_v1(RinGpuProcessQueueV1 token) {
     return RIN_ERROR_STALE_HANDLE;
 }
 
+RinResult rin_gpu_process_shader_module_create_v1(
+        uint64_t device_id, uint64_t device_generation,
+        uint64_t shader_module_token, const void* rin_shader_ir,
+        uint64_t shader_ir_size) {
+    TestProductAdapters* adapters = g_process_submit_adapters;
+    const RinShaderHeaderV1* header =
+        (const RinShaderHeaderV1*)rin_shader_ir;
+    if (!adapters || device_id != TEST_PROCESS_SUBMIT_DEVICE_ID ||
+        device_generation != TEST_PROCESS_SUBMIT_DEVICE_GENERATION ||
+        shader_module_token == 0u || !rin_shader_ir ||
+        shader_ir_size < sizeof(RinShaderHeaderV1) ||
+        shader_ir_size > RIN_GPU_PROCESS_SHADER_MAX_BYTES_V1 ||
+        header->magic != RIN_SHADER_MAGIC ||
+        header->version != RIN_SHADER_IR_VERSION ||
+        header->header_size != sizeof(RinShaderHeaderV1) ||
+        header->total_size != shader_ir_size ||
+        header->stage != RIN_SHADER_STAGE_COMPUTE ||
+        header->resource_count != 0u)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    adapters->sdk_last_shader_module_token = shader_module_token;
+    ++adapters->sdk_shader_module_create_calls;
+    return RIN_SUCCESS;
+}
+
+RinResult rin_gpu_process_compute_pipeline_create_v1(
+        uint64_t device_id, uint64_t device_generation,
+        uint64_t pipeline_token, uint64_t shader_module_token) {
+    TestProductAdapters* adapters = g_process_submit_adapters;
+    if (!adapters || device_id != TEST_PROCESS_SUBMIT_DEVICE_ID ||
+        device_generation != TEST_PROCESS_SUBMIT_DEVICE_GENERATION ||
+        pipeline_token == 0u || shader_module_token == 0u ||
+        shader_module_token != adapters->sdk_last_shader_module_token ||
+        pipeline_token == shader_module_token)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    adapters->sdk_last_pipeline_token = pipeline_token;
+    adapters->sdk_last_pipeline_shader_token = shader_module_token;
+    ++adapters->sdk_compute_pipeline_create_calls;
+    return RIN_SUCCESS;
+}
+
+RinResult rin_gpu_process_object_destroy_v1(
+        uint64_t device_id, uint64_t device_generation,
+        uint64_t object_token) {
+    TestProductAdapters* adapters = g_process_submit_adapters;
+    if (!adapters || device_id != TEST_PROCESS_SUBMIT_DEVICE_ID ||
+        device_generation != TEST_PROCESS_SUBMIT_DEVICE_GENERATION ||
+        object_token == 0u)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    adapters->sdk_destroy_tokens[0] = adapters->sdk_destroy_tokens[1];
+    adapters->sdk_destroy_tokens[1] = object_token;
+    ++adapters->sdk_object_destroy_calls;
+    return RIN_SUCCESS;
+}
+
 static RinResult test_product_result_to_sdk(int result) {
     switch (result) {
         case RIN_VULKAN_PRODUCT_OK:
@@ -1761,20 +1875,218 @@ static int initialize_product_adapters(
         return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
     for (index = 0u; index < software->queue_count; ++index)
         queue_ids[index] = index;
-    result = rin_vulkan_rinos_process_submit_backend_v1_init(
+    result = rin_vulkan_rinos_process_submit_backend_v2_init(
         &adapters->process_submit_backend, &adapters->v5,
         TEST_PROCESS_SUBMIT_DEVICE_ID,
         TEST_PROCESS_SUBMIT_DEVICE_GENERATION, queue_ids,
         software->queue_count);
     if (result != RIN_VULKAN_PRODUCT_OK) return result;
     {
-        RinVulkanProductPlatformV6* platform =
-            rin_vulkan_rinos_process_submit_backend_v1_platform(
+        adapters->v7 =
+            rin_vulkan_rinos_process_submit_backend_v2_platform(
                 &adapters->process_submit_backend);
-        if (!platform) return RIN_VULKAN_PRODUCT_STATE;
-        adapters->v6 = *platform;
+        if (!adapters->v7 || !adapters->v7->base)
+            return RIN_VULKAN_PRODUCT_STATE;
+        adapters->v6 = adapters->v7->base;
     }
     return RIN_VULKAN_PRODUCT_OK;
+}
+
+static void emit_test_spirv_instruction(uint32_t* words, size_t* count,
+                                        uint16_t opcode,
+                                        uint16_t word_count,
+                                        const uint32_t* operands) {
+    uint16_t index;
+    words[(*count)++] = ((uint32_t)word_count << 16u) | opcode;
+    for (index = 1u; index < word_count; ++index)
+        words[(*count)++] = operands[index - 1u];
+}
+
+static size_t make_descriptor_free_compute_module(uint32_t* words) {
+    size_t count = 5u;
+    uint32_t operands[5];
+    words[0] = UINT32_C(0x07230203);
+    words[1] = 0x00010300u;
+    words[2] = 0u;
+    words[3] = 12u;
+    words[4] = 0u;
+    operands[0] = 1u;
+    emit_test_spirv_instruction(words, &count, 17u, 2u, operands);
+    operands[0] = 0u;
+    operands[1] = 3u;
+    emit_test_spirv_instruction(words, &count, 14u, 3u, operands);
+    operands[0] = 5u;
+    operands[1] = 10u;
+    operands[2] = UINT32_C(0x6e69616d);
+    operands[3] = 0u;
+    emit_test_spirv_instruction(words, &count, 15u, 5u, operands);
+    operands[0] = 10u;
+    operands[1] = 17u;
+    operands[2] = 1u;
+    operands[3] = 1u;
+    operands[4] = 1u;
+    emit_test_spirv_instruction(words, &count, 16u, 6u, operands);
+    operands[0] = 1u;
+    emit_test_spirv_instruction(words, &count, 19u, 2u, operands);
+    operands[0] = 2u;
+    operands[1] = 1u;
+    emit_test_spirv_instruction(words, &count, 33u, 3u, operands);
+    operands[0] = 1u;
+    operands[1] = 10u;
+    operands[2] = 0u;
+    operands[3] = 2u;
+    emit_test_spirv_instruction(words, &count, 54u, 5u, operands);
+    operands[0] = 11u;
+    emit_test_spirv_instruction(words, &count, 248u, 2u, operands);
+    emit_test_spirv_instruction(words, &count, 253u, 1u, operands);
+    emit_test_spirv_instruction(words, &count, 56u, 1u, operands);
+    return count;
+}
+
+static int test_process_compute_pipeline_dispatch(
+        RinVkDevice device, RinVkQueue queue,
+        TestProductAdapters* adapters) {
+    uint32_t spirv[48];
+    const size_t spirv_word_count =
+        make_descriptor_free_compute_module(spirv);
+    RinVkShaderModuleCreateInfo shader_info;
+    RinVkPipelineLayoutCreateInfo layout_info;
+    RinVkComputePipelineCreateInfo pipeline_info;
+    RinVkCommandPoolCreateInfo pool_info;
+    RinVkCommandBufferAllocateInfo allocate_info;
+    RinVkCommandBufferBeginInfo begin_info;
+    RinVkSubmitInfo submit_info;
+    RinVkShaderModule shader = 0u;
+    RinVkPipelineLayout layout = 0u;
+    RinVkPipeline pipeline = 0u;
+    RinVkCommandPool pool = 0u;
+    RinVkCommandBuffer command_buffer = NULL;
+    uint32_t sdk_submit_before;
+    uint32_t canonical_submit_before;
+    uint32_t canonical_dispatch_before;
+    uint32_t sdk_destroy_before;
+    uint64_t expected_shader_token = 0u;
+    int ok = 0;
+
+#define PROCESS_COMPUTE_CHECK(condition) do { \
+    if (!(condition)) { \
+        fprintf(stderr, "process compute check failed at %s:%d: %s\n", \
+                __FILE__, __LINE__, #condition); \
+        ok = -1; \
+        goto cleanup; \
+    } \
+} while (0)
+
+    if (!device || !queue || !adapters || !adapters->v7) {
+        fprintf(stderr,
+                "process compute fixture unavailable: device=%p queue=%p adapters=%p v7=%p\n",
+                (void*)device, (void*)queue, (void*)adapters,
+                adapters ? (void*)adapters->v7 : NULL);
+        return -1;
+    }
+    sdk_submit_before = adapters->sdk_process_submit_calls;
+    canonical_submit_before = adapters->canonical_submit_calls;
+    canonical_dispatch_before = adapters->canonical_dispatch_calls;
+    sdk_destroy_before = adapters->sdk_object_destroy_calls;
+    memset(&shader_info, 0, sizeof(shader_info));
+    shader_info.sType = RIN_VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    shader_info.codeSize = spirv_word_count * sizeof(spirv[0]);
+    shader_info.pCode = spirv;
+    PROCESS_COMPUTE_CHECK(vkCreateShaderModule(
+        device, &shader_info, NULL, &shader) == RIN_VK_SUCCESS);
+
+    memset(&layout_info, 0, sizeof(layout_info));
+    layout_info.sType = RIN_VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    PROCESS_COMPUTE_CHECK(vkCreatePipelineLayout(
+        device, &layout_info, NULL, &layout) == RIN_VK_SUCCESS);
+
+    memset(&pipeline_info, 0, sizeof(pipeline_info));
+    pipeline_info.sType = RIN_VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipeline_info.stage.sType =
+        RIN_VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    pipeline_info.stage.stage = RIN_VK_SHADER_STAGE_COMPUTE_BIT;
+    pipeline_info.stage.module = shader;
+    pipeline_info.stage.pName = "main";
+    pipeline_info.layout = layout;
+    pipeline_info.basePipelineIndex = -1;
+    PROCESS_COMPUTE_CHECK(vkCreateComputePipelines(
+        device, 0u, 1u, &pipeline_info, NULL, &pipeline) == RIN_VK_SUCCESS);
+    expected_shader_token =
+        ((uint64_t)RIN_VULKAN_RINOS_PROCESS_SHADER_MODULE_TOKEN_TAG << 48u) |
+        (pipeline & UINT64_C(0x0000FFFFFFFFFFFF));
+    PROCESS_COMPUTE_CHECK(adapters->sdk_shader_module_create_calls == 1u &&
+        adapters->sdk_compute_pipeline_create_calls == 1u &&
+        adapters->sdk_last_pipeline_token == pipeline &&
+        adapters->sdk_last_shader_module_token == expected_shader_token &&
+        adapters->sdk_last_pipeline_shader_token == expected_shader_token);
+
+    memset(&pool_info, 0, sizeof(pool_info));
+    pool_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pool_info.queueFamilyIndex = 0u;
+    PROCESS_COMPUTE_CHECK(vkCreateCommandPool(
+        device, &pool_info, NULL, &pool) == RIN_VK_SUCCESS);
+    memset(&allocate_info, 0, sizeof(allocate_info));
+    allocate_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocate_info.commandPool = pool;
+    allocate_info.level = RIN_VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocate_info.commandBufferCount = 1u;
+    PROCESS_COMPUTE_CHECK(vkAllocateCommandBuffers(
+        device, &allocate_info, &command_buffer) == RIN_VK_SUCCESS);
+    memset(&begin_info, 0, sizeof(begin_info));
+    begin_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = RIN_VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    PROCESS_COMPUTE_CHECK(vkBeginCommandBuffer(
+        command_buffer, &begin_info) == RIN_VK_SUCCESS);
+    vkCmdBindPipeline(command_buffer, RIN_VK_PIPELINE_BIND_POINT_COMPUTE,
+                      pipeline);
+    vkCmdDispatch(command_buffer, 2u, 3u, 4u);
+    PROCESS_COMPUTE_CHECK(vkEndCommandBuffer(command_buffer) ==
+                          RIN_VK_SUCCESS);
+    memset(&submit_info, 0, sizeof(submit_info));
+    submit_info.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1u;
+    submit_info.pCommandBuffers = &command_buffer;
+    {
+        const RinVkResult submit_result =
+            vkQueueSubmit(queue, 1u, &submit_info, 0u);
+        PROCESS_COMPUTE_CHECK(submit_result == RIN_VK_SUCCESS);
+    }
+    PROCESS_COMPUTE_CHECK(vkQueueWaitIdle(queue) == RIN_VK_SUCCESS);
+    PROCESS_COMPUTE_CHECK(adapters->sdk_process_submit_calls ==
+                              sdk_submit_before + 1u &&
+        adapters->canonical_submit_calls == canonical_submit_before + 1u &&
+        adapters->canonical_dispatch_calls == canonical_dispatch_before + 1u &&
+        adapters->canonical_command_count == 1u &&
+        adapters->canonical_last_command.type ==
+            RIN_GPU_BACKEND_COMMAND_DISPATCH &&
+        adapters->canonical_last_command.reserved == 0u &&
+        adapters->canonical_last_command.value.dispatch.pipeline_cookie ==
+            pipeline &&
+        adapters->canonical_last_command.value.dispatch.group_count_x == 2u &&
+        adapters->canonical_last_command.value.dispatch.group_count_y == 3u &&
+        adapters->canonical_last_command.value.dispatch.group_count_z == 4u);
+
+cleanup:
+    if (pool != 0u) vkDestroyCommandPool(device, pool, NULL);
+    if (pipeline != 0u) {
+        vkDestroyPipeline(device, pipeline, NULL);
+        if (adapters->sdk_object_destroy_calls != sdk_destroy_before + 2u ||
+            adapters->sdk_destroy_tokens[0] != pipeline ||
+            adapters->sdk_destroy_tokens[1] != expected_shader_token) {
+            fprintf(stderr,
+                    "process compute destroy mismatch: before=%u after=%u expected_tokens=%llu,%llu actual_tokens=%llu,%llu\n",
+                    sdk_destroy_before, adapters->sdk_object_destroy_calls,
+                    (unsigned long long)pipeline,
+                    (unsigned long long)expected_shader_token,
+                    (unsigned long long)adapters->sdk_destroy_tokens[0],
+                    (unsigned long long)adapters->sdk_destroy_tokens[1]);
+            ok = -1;
+        }
+    }
+    if (layout != 0u) vkDestroyPipelineLayout(device, layout, NULL);
+    if (shader != 0u) vkDestroyShaderModule(device, shader, NULL);
+#undef PROCESS_COMPUTE_CHECK
+    return ok;
 }
 
 typedef struct TestRecordedBarrier {
@@ -2980,6 +3292,7 @@ int main(void) {
     uint32_t product_v4_bound = 0u;
     uint32_t product_v5_bound = 0u;
     uint32_t product_v6_bound = 0u;
+    uint32_t product_v7_bound = 0u;
     uint32_t process_backend_initialized = 0u;
     uint32_t surface_created = 0u;
     uint32_t device_created = 0u;
@@ -3081,8 +3394,11 @@ int main(void) {
               &product_adapters.v5) == RIN_GPU_VULKAN_OK);
     product_v5_bound = 1u;
     CHECK(rin_gpu_vulkan_icd_bind_product_platform_v6(
-              &product_adapters.v6) == RIN_GPU_VULKAN_OK);
+              product_adapters.v6) == RIN_GPU_VULKAN_OK);
     product_v6_bound = 1u;
+    CHECK(rin_gpu_vulkan_icd_bind_product_platform_v7(
+              product_adapters.v7) == RIN_GPU_VULKAN_OK);
+    product_v7_bound = 1u;
 
 #if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
     memset(g_surfaces, 0, sizeof(g_surfaces));
@@ -3462,16 +3778,21 @@ int main(void) {
                   unbind_calls_before_destroy + 2u &&
               product_adapters.fail_unbind_attempts == 0u);
         swapchain_created = 0u;
+        CHECK(test_process_compute_pipeline_dispatch(
+                  device, queue, &product_adapters) == 0);
         CHECK(product_adapters.sdk_queue_bind_calls == software.queue_count &&
               product_adapters.sdk_process_submit_calls ==
                   product_adapters.canonical_submit_calls &&
               product_adapters.sdk_queue_release_calls == 0u &&
               product_adapters.sdk_active_queue_count ==
                   software.queue_count);
+        CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v7(
+                  product_adapters.v7) == RIN_GPU_VULKAN_OK);
+        product_v7_bound = 0u;
         CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v6(
-                  &product_adapters.v6) == RIN_GPU_VULKAN_OK);
+                  product_adapters.v6) == RIN_GPU_VULKAN_OK);
         product_v6_bound = 0u;
-        CHECK(rin_vulkan_rinos_process_submit_backend_v1_detach(
+        CHECK(rin_vulkan_rinos_process_submit_backend_v2_detach(
                   &product_adapters.process_submit_backend) ==
               RIN_VULKAN_PRODUCT_OK);
         process_backend_initialized = 0u;
@@ -3504,10 +3825,22 @@ cleanup:
     if (device_created) vkDestroyDevice(device, NULL);
     if (surface_created) vkDestroySurfaceKHR(instance, surface, NULL);
     if (instance) vkDestroyInstance(instance, NULL);
+    if (product_v7_bound) {
+        const int unbind_result =
+            rin_gpu_vulkan_icd_unbind_product_platform_v7(
+                product_adapters.v7);
+        if (unbind_result == RIN_GPU_VULKAN_OK) {
+            product_v7_bound = 0u;
+        } else {
+            fprintf(stderr, "V7 process-submit unbind returned %d\n",
+                    unbind_result);
+            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
     if (product_v6_bound) {
         const int unbind_result =
             rin_gpu_vulkan_icd_unbind_product_platform_v6(
-                &product_adapters.v6);
+                product_adapters.v6);
         if (unbind_result == RIN_GPU_VULKAN_OK) {
             product_v6_bound = 0u;
         } else {
@@ -3526,7 +3859,7 @@ cleanup:
             result = RIN_VK_ERROR_INITIALIZATION_FAILED;
         } else {
             const int detach_result =
-                rin_vulkan_rinos_process_submit_backend_v1_detach(
+                rin_vulkan_rinos_process_submit_backend_v2_detach(
                     &product_adapters.process_submit_backend);
             if (detach_result != RIN_VULKAN_PRODUCT_OK) {
                 fprintf(stderr,

@@ -14770,12 +14770,6 @@ static RinVkResult snapshot_compute_submission(
         command_buffer->compute_pipeline_bound == 0u ||
         command_buffer->dispatch_compute_pipeline !=
             command_buffer->bound_compute_pipeline ||
-        command_buffer->descriptor_bind_recorded == 0u ||
-        command_buffer->descriptor_bind_point !=
-            RIN_VK_PIPELINE_BIND_POINT_COMPUTE ||
-        command_buffer->descriptor_bind_first_set != 0u ||
-        command_buffer->descriptor_bind_set_count != 1u ||
-        command_buffer->descriptor_dynamic_offset_count != 0u ||
         command_buffer->compute_group_count_x > 65535u ||
         command_buffer->compute_group_count_y > 65535u ||
         command_buffer->compute_group_count_z > 65535u)
@@ -14786,18 +14780,43 @@ static RinVkResult snapshot_compute_submission(
         (pipeline->descriptor_count == 0u &&
          pipeline->process_compute_pipeline_token == 0u) ||
         pipeline->descriptor_count > RIN_GPU_VULKAN_COMPUTE_MAX_BINDINGS ||
-        pipeline->set_layout_count == 0u ||
         pipeline->set_layout_count >
-            RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS ||
-        command_buffer->descriptor_set_layouts[0] !=
-            pipeline->set_layouts[0])
+            RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    if (rin_gpu_vulkan_descriptor_set_matches_layout(
-            &device->descriptor_runtime,
-            (RinGpuVulkanDescriptorHandleV1)
-                command_buffer->descriptor_sets[0],
-            (RinGpuVulkanDescriptorHandleV1)pipeline->set_layouts[0]) != 1)
+    if (pipeline->descriptor_count != 0u) {
+        if (pipeline->set_layout_count == 0u ||
+            command_buffer->descriptor_bind_recorded == 0u ||
+            command_buffer->descriptor_bind_point !=
+                RIN_VK_PIPELINE_BIND_POINT_COMPUTE ||
+            command_buffer->descriptor_bind_first_set != 0u ||
+            command_buffer->descriptor_bind_set_count != 1u ||
+            command_buffer->descriptor_dynamic_offset_count != 0u ||
+            command_buffer->descriptor_set_layouts[0] !=
+                pipeline->set_layouts[0] ||
+            rin_gpu_vulkan_descriptor_set_matches_layout(
+                &device->descriptor_runtime,
+                (RinGpuVulkanDescriptorHandleV1)
+                    command_buffer->descriptor_sets[0],
+                (RinGpuVulkanDescriptorHandleV1)pipeline->set_layouts[0]) !=
+                1)
+            return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    } else if (command_buffer->descriptor_bind_recorded != 0u &&
+               (command_buffer->descriptor_bind_point !=
+                    RIN_VK_PIPELINE_BIND_POINT_COMPUTE ||
+                command_buffer->descriptor_bind_first_set != 0u ||
+                command_buffer->descriptor_bind_set_count != 1u ||
+                command_buffer->descriptor_dynamic_offset_count != 0u ||
+                pipeline->set_layout_count == 0u ||
+                command_buffer->descriptor_set_layouts[0] !=
+                    pipeline->set_layouts[0] ||
+                rin_gpu_vulkan_descriptor_set_matches_layout(
+                    &device->descriptor_runtime,
+                    (RinGpuVulkanDescriptorHandleV1)
+                        command_buffer->descriptor_sets[0],
+                    (RinGpuVulkanDescriptorHandleV1)
+                        pipeline->set_layouts[0]) != 1)) {
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    }
     if (pipeline->shader_size == 0u ||
         pipeline->shader_size > UINT32_MAX - packet_prefix)
         return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
@@ -18490,7 +18509,6 @@ static RinVkResult create_compute_pipeline_one(
     module = owner ? shader_module_slot(device, info->stage.module) : NULL;
     layout = owner ? pipeline_layout_slot(device, info->layout) : NULL;
     if (!owner || !module || !layout ||
-        layout->set_layout_count == 0u ||
         layout->set_layout_count >
             RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS) {
         sync_unlock();
@@ -18580,7 +18598,6 @@ static RinVkResult create_compute_pipeline_one(
     layout = owner ? pipeline_layout_slot(device, info->layout) : NULL;
     if (!owner || !layout ||
         layout->set_layout_count != set_layout_count ||
-        layout->set_layout_count == 0u ||
         layout->set_layout_count > RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS ||
         memcmp(set_layouts, layout->set_layouts,
                sizeof(set_layouts[0]) * layout->set_layout_count) != 0) {
