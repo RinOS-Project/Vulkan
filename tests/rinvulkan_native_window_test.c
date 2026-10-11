@@ -42,6 +42,12 @@ typedef struct TestCompositorSurface {
     uint32_t import_attempts;
     uint32_t accepted_imports;
     uint32_t expected_word;
+#if defined(RIN_VULKAN_NATIVE_WINDOW_COMPOSITOR_TEST) && \
+    !defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
+    uint8_t compositor_pixels[2][256];
+    RinCompositorDamage compositor_damage;
+    RinCompositorCommitV2 compositor_commit;
+#endif
 } TestCompositorSurface;
 
 typedef struct TestMemoryMapping {
@@ -409,8 +415,58 @@ static int test_surface_import(
                    expected_pixel, sizeof(expected_pixel)) != 0)
             return RIN_ERROR_INVALID_ARGUMENT;
     }
+#if defined(RIN_VULKAN_NATIVE_WINDOW_COMPOSITOR_TEST) && \
+    !defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
+    if (frame->bytes > sizeof(surface->compositor_pixels[0]))
+        return RIN_ERROR_INVALID_ARGUMENT;
+    for (pixel_index = 0u; pixel_index < pixel_count; ++pixel_index) {
+        const uint8_t* source = pixels + pixel_index * 4u;
+        uint8_t* destination = surface->compositor_pixels[0] +
+                               pixel_index * 4u;
+        destination[0] = source[2];
+        destination[1] = source[1];
+        destination[2] = source[0];
+        destination[3] = source[3];
+    }
+    memset(&surface->compositor_damage, 0,
+           sizeof(surface->compositor_damage));
+    surface->compositor_damage.surface_id = 7u;
+    surface->compositor_damage.w = frame->width;
+    surface->compositor_damage.h = frame->height;
+    memset(&surface->compositor_commit, 0,
+           sizeof(surface->compositor_commit));
+    surface->compositor_commit.surface_id = 7u;
+    surface->compositor_commit.buffer_slot = 0u;
+    surface->compositor_commit.frame_sequence = 13u;
+#endif
     ++surface->accepted_imports;
     return RIN_RESULT_OK;
+}
+#endif
+
+#if defined(RIN_VULKAN_NATIVE_WINDOW_COMPOSITOR_TEST) && \
+    !defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
+static int test_dispatch_fixture_frame_to_compositor(
+        TestCompositorSurface* surface) {
+    uint32_t row_pitch;
+    uint64_t frame_bytes;
+    if (!surface || surface->width == 0u || surface->height == 0u ||
+        surface->width > UINT32_MAX / 4u)
+        return -1;
+    row_pitch = surface->width * 4u;
+    if (surface->height >
+        sizeof(surface->compositor_pixels[0]) / row_pitch)
+        return -1;
+    frame_bytes = (uint64_t)row_pitch * surface->height;
+    if (compositor_native_window_vulkan_reset(
+            7u, 77u, surface->width, surface->height,
+            surface->compositor_pixels[0], frame_bytes,
+            surface->compositor_pixels[1], frame_bytes, row_pitch) != 0)
+        return -1;
+    return compositor_native_window_vulkan_dispatch_frame(
+        &surface->compositor_damage, sizeof(surface->compositor_damage),
+        &surface->compositor_commit, sizeof(surface->compositor_commit),
+        77u, surface->compositor_pixels[0], frame_bytes);
 }
 #endif
 
@@ -2893,8 +2949,7 @@ int main(void) {
     uint32_t device_extension_count = 0u;
     RinVkRinOSNativeWindowSurfaceCreateInfoV1 surface_info;
     RinVkSurfaceKHR surface = 0u;
-    TestCompositorSurface compositor = {4u, 4u, 1u, 1u, 0u, 0u,
-                                         UINT32_C(0x6a3c17e5)};
+    TestCompositorSurface compositor;
     RinVkSurfaceCapabilitiesKHR capabilities;
     RinVkSurfaceFormatKHR surface_format;
     RinVkDeviceQueueCreateInfo queue_info;
@@ -2939,6 +2994,13 @@ int main(void) {
         goto cleanup; \
     } \
 } while (0)
+
+    memset(&compositor, 0, sizeof(compositor));
+    compositor.width = 4u;
+    compositor.height = 4u;
+    compositor.generation = 1u;
+    compositor.busy_imports = 1u;
+    compositor.expected_word = UINT32_C(0x6a3c17e5);
 
     make_profile(&profile);
     runtime_init_result = rin_gpu_vulkan_runtime_init(
@@ -3318,6 +3380,9 @@ int main(void) {
     CHECK(present_result == RIN_VK_SUCCESS &&
           compositor.import_attempts == 2u &&
           compositor.accepted_imports == 1u);
+#if defined(RIN_VULKAN_NATIVE_WINDOW_COMPOSITOR_TEST)
+    CHECK(test_dispatch_fixture_frame_to_compositor(&compositor) == 0);
+#endif
 #endif
 
 #if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
