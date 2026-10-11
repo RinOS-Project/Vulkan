@@ -23,6 +23,12 @@
 #include <windows.h>
 #endif
 
+/* A window can retain a pending Compositor readback after this one-frame
+ * routine returns. Keep the callback target alive if unregister reports
+ * BUSY; the caller must not close the window or reuse this state then. */
+static RinVulkanExampleFrameCompletion g_native_window_completion;
+static uint32_t g_native_window_completion_registered;
+
 static int example_monotonic_milliseconds(uint64_t* milliseconds_out) {
 #if defined(_WIN32)
     if (!milliseconds_out) return 0;
@@ -650,7 +656,6 @@ static int rinos_native_window_surface_main(void) {
     };
     RinRuntimeGuiHandle window = RIN_WINDOW_HANDLE_INVALID;
     RinRuntimeCompositorGpuSurfaceOpsV1 surface_ops;
-    RinVulkanExampleFrameCompletion completion;
     RinVkApplicationInfo application;
     RinVkInstanceCreateInfo instance_info;
     RinVkRinOSNativeWindowSurfaceCreateInfoV1 surface_info;
@@ -664,7 +669,13 @@ static int rinos_native_window_surface_main(void) {
     int runtime_result;
     int exit_status = 1;
 
-    memset(&completion, 0, sizeof(completion));
+    if (g_native_window_completion_registered != 0u) {
+        fprintf(stderr,
+                "previous Compositor completion is still registered\n");
+        return 1;
+    }
+    memset(&g_native_window_completion, 0,
+           sizeof(g_native_window_completion));
 
 #if defined(__rinos__)
     {
@@ -805,10 +816,10 @@ static int rinos_native_window_surface_main(void) {
                 (queue_families[family].queueFlags &
                  (RIN_VK_QUEUE_GRAPHICS_BIT | RIN_VK_QUEUE_TRANSFER_BIT)) !=
                     0u) {
-                completion.window = window;
+                g_native_window_completion.window = window;
                 runtime_result = wnd_set_compositor_completion_callback(
                     window, rin_vulkan_example_compositor_completion,
-                    &completion);
+                    &g_native_window_completion);
                 if (runtime_result != RIN_RESULT_OK) {
                     free(queue_families);
                     fprintf(stderr,
@@ -816,12 +827,13 @@ static int rinos_native_window_surface_main(void) {
                             runtime_result);
                     goto cleanup;
                 }
+                g_native_window_completion_registered = 1u;
                 printf("RinOS native-window surface is supported by "
                        "device %u, queue family %u.\n", device_index, family);
                 free(queue_families);
                 exit_status = present_one_clear_frame(
                     physical_devices[device_index], family, surface, window,
-                    &completion);
+                    &g_native_window_completion);
                 goto cleanup;
             }
         }
@@ -835,7 +847,19 @@ cleanup:
     if (surface != 0u) vkDestroySurfaceKHR(instance, surface, NULL);
     if (instance) vkDestroyInstance(instance, NULL);
     if (window != RIN_WINDOW_HANDLE_INVALID) {
-        (void)wnd_set_compositor_completion_callback(window, NULL, NULL);
+        if (g_native_window_completion_registered != 0u) {
+            runtime_result = wnd_set_compositor_completion_callback(
+                window, NULL, NULL);
+            if (runtime_result != RIN_RESULT_OK) {
+                fprintf(stderr,
+                        "could not unregister pending Compositor completion: %d\n",
+                        runtime_result);
+                /* Keep the callback target and window alive. Process teardown
+                 * owns final reclamation if the pending operation never drains. */
+                return 1;
+            }
+            g_native_window_completion_registered = 0u;
+        }
         wnd_close(window);
     }
     return exit_status;
