@@ -14,6 +14,7 @@
 #define RIN_VULKAN_PRODUCT_PLATFORM_V5_VERSION 5u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V6_VERSION 6u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V7_VERSION 7u
+#define RIN_VULKAN_PRODUCT_PLATFORM_V8_VERSION 8u
 #define RIN_VULKAN_PRODUCT_PROCESS_SUBMIT_RECEIPT_V1_VERSION 1u
 #define RIN_VULKAN_PRODUCT_MEMORY_VERSION 1u
 #define RIN_VULKAN_PRODUCT_MAX_QUEUES 8u
@@ -374,9 +375,50 @@ typedef struct RinVulkanProductPlatformV7 {
     uint64_t reserved[2];
 } RinVulkanProductPlatformV7;
 
+/* V8 adds process-owned storage-buffer bind groups to the V6 process-submit
+ * route. The cookies are opaque API resource identities; allocation ranges
+ * are allocation-relative and never contain GPU virtual or physical
+ * addresses. The SDK adapter must bind each resource before creating the
+ * process object and keep both leases until the bind group is destroyed. */
+#define RIN_VULKAN_PRODUCT_PROCESS_COMPUTE_BINDING_V8_VERSION 1u
+typedef struct RinVulkanProductProcessComputeBindingV8 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint32_t resource_index;
+    uint32_t access;
+    uint64_t resource_cookie;
+    uint64_t allocation_handle;
+    uint64_t allocation_offset;
+    uint64_t resource_size_bytes;
+    uint64_t offset;
+    uint64_t size_bytes;
+    uint32_t reserved[2];
+} RinVulkanProductProcessComputeBindingV8;
+
+typedef int (*RinVulkanProductCreateProcessComputeBindGroupV8Fn)(
+    void* context, uint64_t bind_group_token, uint64_t pipeline_token,
+    const RinVulkanProductProcessComputeBindingV8* bindings,
+    uint32_t binding_count);
+typedef int (*RinVulkanProductDestroyProcessComputeBindGroupV8Fn)(
+    void* context, uint64_t bind_group_token);
+
+typedef struct RinVulkanProductPlatformV8 {
+    uint32_t struct_size;
+    uint32_t version;
+    RinVulkanProductPlatformV7* base;
+    void* context;
+    RinVulkanProductCreateProcessComputeBindGroupV8Fn
+        create_process_compute_bind_group;
+    RinVulkanProductDestroyProcessComputeBindGroupV8Fn
+        destroy_process_compute_bind_group;
+    uint64_t reserved[2];
+} RinVulkanProductPlatformV8;
+
 #ifdef __cplusplus
 static_assert(sizeof(RinVulkanProductResourceV1) == 16u,
               "Vulkan product resource ABI drift");
+static_assert(sizeof(RinVulkanProductProcessComputeBindingV8) == 72u,
+              "Vulkan process compute binding V8 ABI drift");
 static_assert(sizeof(RinVulkanProductReportV1) == 128u,
               "Vulkan product report ABI drift");
 static_assert(sizeof(RinVulkanProductStatusV1) == 128u,
@@ -392,6 +434,8 @@ static_assert(sizeof(RinVulkanProductSubmissionV3) == 352u,
 #else
 _Static_assert(sizeof(RinVulkanProductResourceV1) == 16u,
                "Vulkan product resource ABI drift");
+_Static_assert(sizeof(RinVulkanProductProcessComputeBindingV8) == 72u,
+               "Vulkan process compute binding V8 ABI drift");
 _Static_assert(sizeof(RinVulkanProductReportV1) == 128u,
                "Vulkan product report ABI drift");
 _Static_assert(sizeof(RinVulkanProductStatusV1) == 128u,

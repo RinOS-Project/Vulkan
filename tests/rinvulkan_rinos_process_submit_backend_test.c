@@ -11,6 +11,10 @@ static RinResult submit_result;
 static RinResult shader_create_result;
 static RinResult pipeline_create_result;
 static RinResult object_destroy_result;
+static RinResult resource_bind_result;
+static RinResult resource_unbind_result;
+static RinResult bind_group_create_result;
+static uint32_t fail_resource_bind_call;
 static RinGpuProcessQueueV1 fail_release_token;
 static RinGpuProcessSubmitReceiptV1 supplied_receipt;
 static uint32_t bind_calls;
@@ -27,6 +31,15 @@ static uint32_t observed_resource_count;
 static uint32_t shader_create_calls;
 static uint32_t pipeline_create_calls;
 static uint32_t object_destroy_calls;
+static uint32_t resource_bind_calls;
+static uint32_t resource_unbind_calls;
+static uint32_t bind_group_create_calls;
+static RinGpuProcessResourceBindingV1 observed_resource_bindings[64];
+static uint64_t active_resource_cookies[64];
+static RinGpuProcessComputeBindingV1 observed_compute_bindings[64];
+static uint32_t observed_compute_binding_count;
+static uint64_t observed_bind_group_token;
+static uint64_t observed_bind_group_pipeline_token;
 static uint64_t observed_shader_token;
 static uint64_t observed_pipeline_token;
 static uint64_t observed_pipeline_shader_token;
@@ -105,6 +118,79 @@ RinResult rin_gpu_process_compute_pipeline_create_v1(
     return pipeline_create_result;
 }
 
+RinResult rin_gpu_process_resource_bind_v1(
+    uint64_t device_id, uint64_t device_generation,
+    const RinGpuProcessResourceBindingV1* binding) {
+    uint32_t index;
+    ++resource_bind_calls;
+    if (device_id != UINT64_C(0x1111) ||
+        device_generation != UINT64_C(0x2222) || !binding ||
+        binding->struct_size != sizeof(*binding) ||
+        binding->version != RIN_GPU_PROCESS_RESOURCE_BINDING_VERSION_V1 ||
+        binding->resource_cookie == 0u || binding->allocation == 0u ||
+        binding->size_bytes == 0u || binding->required_gpu_access == 0u ||
+        binding->reserved != 0u)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    if (resource_bind_calls <
+        sizeof(observed_resource_bindings) /
+            sizeof(observed_resource_bindings[0]))
+        observed_resource_bindings[resource_bind_calls - 1u] = *binding;
+    if (resource_bind_calls == fail_resource_bind_call)
+        return RIN_ERROR_NOT_SUPPORTED;
+    if (resource_bind_result != RIN_SUCCESS) return resource_bind_result;
+    for (index = 0u; index <
+         sizeof(active_resource_cookies) / sizeof(active_resource_cookies[0]);
+         ++index) {
+        if (active_resource_cookies[index] == binding->resource_cookie)
+            return RIN_ERROR_BUSY;
+        if (active_resource_cookies[index] == 0u) {
+            active_resource_cookies[index] = binding->resource_cookie;
+            return RIN_SUCCESS;
+        }
+    }
+    return RIN_ERROR_TABLE_FULL;
+}
+
+RinResult rin_gpu_process_resource_unbind_v1(
+    uint64_t device_id, uint64_t device_generation,
+    uint64_t resource_cookie) {
+    uint32_t index;
+    ++resource_unbind_calls;
+    if (device_id != UINT64_C(0x1111) ||
+        device_generation != UINT64_C(0x2222) || resource_cookie == 0u)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    if (resource_unbind_result != RIN_SUCCESS) return resource_unbind_result;
+    for (index = 0u; index <
+         sizeof(active_resource_cookies) / sizeof(active_resource_cookies[0]);
+         ++index) {
+        if (active_resource_cookies[index] == resource_cookie) {
+            active_resource_cookies[index] = 0u;
+            return RIN_SUCCESS;
+        }
+    }
+    return RIN_ERROR_STALE_HANDLE;
+}
+
+RinResult rin_gpu_process_compute_bind_group_create_v1(
+    uint64_t device_id, uint64_t device_generation,
+    uint64_t bind_group_token, uint64_t pipeline_token,
+    const RinGpuProcessComputeBindingV1* bindings, uint32_t binding_count) {
+    ++bind_group_create_calls;
+    if (device_id != UINT64_C(0x1111) ||
+        device_generation != UINT64_C(0x2222) || bind_group_token == 0u ||
+        pipeline_token == 0u || !bindings || binding_count == 0u ||
+        binding_count >
+            sizeof(observed_compute_bindings) /
+                sizeof(observed_compute_bindings[0]))
+        return RIN_ERROR_INVALID_ARGUMENT;
+    observed_bind_group_token = bind_group_token;
+    observed_bind_group_pipeline_token = pipeline_token;
+    observed_compute_binding_count = binding_count;
+    memcpy(observed_compute_bindings, bindings,
+           binding_count * sizeof(*bindings));
+    return bind_group_create_result;
+}
+
 RinResult rin_gpu_process_object_destroy_v1(
     uint64_t device_id, uint64_t device_generation, uint64_t object_token) {
     if (object_destroy_calls <
@@ -135,6 +221,10 @@ static void reset_mocks(void) {
     shader_create_result = RIN_SUCCESS;
     pipeline_create_result = RIN_SUCCESS;
     object_destroy_result = RIN_SUCCESS;
+    resource_bind_result = RIN_SUCCESS;
+    resource_unbind_result = RIN_SUCCESS;
+    bind_group_create_result = RIN_SUCCESS;
+    fail_resource_bind_call = 0u;
     memset(&supplied_receipt, 0, sizeof(supplied_receipt));
     supplied_receipt.struct_size = sizeof(supplied_receipt);
     supplied_receipt.version = RIN_GPU_PROCESS_SUBMIT_RECEIPT_VERSION_V1;
@@ -155,6 +245,16 @@ static void reset_mocks(void) {
     shader_create_calls = 0u;
     pipeline_create_calls = 0u;
     object_destroy_calls = 0u;
+    resource_bind_calls = 0u;
+    resource_unbind_calls = 0u;
+    bind_group_create_calls = 0u;
+    memset(observed_resource_bindings, 0,
+           sizeof(observed_resource_bindings));
+    memset(active_resource_cookies, 0, sizeof(active_resource_cookies));
+    memset(observed_compute_bindings, 0, sizeof(observed_compute_bindings));
+    observed_compute_binding_count = 0u;
+    observed_bind_group_token = 0u;
+    observed_bind_group_pipeline_token = 0u;
     observed_shader_token = 0u;
     observed_pipeline_token = 0u;
     observed_pipeline_shader_token = 0u;
@@ -164,6 +264,7 @@ static void reset_mocks(void) {
 int main(void) {
     RinVulkanRinOSProcessSubmitBackendV1 backend = {0};
     RinVulkanRinOSProcessSubmitBackendV2 backend_v2 = {0};
+    RinVulkanRinOSProcessSubmitBackendV3 backend_v3 = {0};
     RinVulkanProductPlatformV5 parent = {0};
     uint32_t queue_ids[2] = {0u, 2u};
     RinGpuBackendCommandV1 commands[2] = {{0}};
@@ -173,6 +274,9 @@ int main(void) {
     RinVulkanProductProcessSubmitReceiptV1 receipt;
     RinVulkanProductPlatformV6* platform;
     RinVulkanProductPlatformV7* platform_v7;
+    RinVulkanProductPlatformV7* platform_v7_v3;
+    RinVulkanProductPlatformV8* platform_v8;
+    RinVulkanProductProcessComputeBindingV8 process_bindings[2] = {{0}};
     uint8_t shader_ir[sizeof(RinShaderHeaderV1)] = {0};
     uint64_t process_pipeline_token = 0u;
     const uint64_t pipeline_cookie = UINT64_C(0x5258000100000001);
@@ -325,6 +429,131 @@ int main(void) {
     CHECK(backend_v2.state == 0u && object_destroy_calls == 5u &&
           observed_destroy_tokens[4] == UINT64_C(0x5260000100000002) &&
           release_calls == 2u);
+
+    reset_mocks();
+    CHECK(rin_vulkan_rinos_process_submit_backend_v3_init(
+              &backend_v3, &parent, 0x1111u, 0x2222u, queue_ids, 2u) ==
+          RIN_VULKAN_PRODUCT_OK);
+    CHECK(rin_vulkan_rinos_process_submit_backend_v3_valid(&backend_v3));
+    platform_v7_v3 =
+        rin_vulkan_rinos_process_submit_backend_v3_platform_v7(&backend_v3);
+    platform_v8 =
+        rin_vulkan_rinos_process_submit_backend_v3_platform_v8(&backend_v3);
+    CHECK(platform_v7_v3 && platform_v8 &&
+          platform_v8->base == platform_v7_v3 &&
+          platform_v7_v3->base == &backend_v3.compute_backend
+                                         .submit_backend.platform &&
+          platform_v8->create_process_compute_bind_group != NULL &&
+          platform_v8->destroy_process_compute_bind_group != NULL);
+    CHECK(platform_v7_v3->create_process_compute_pipeline(
+              platform_v7_v3->context, UINT64_C(0x5258000100000101),
+              shader_ir, sizeof(shader_ir), &process_pipeline_token) ==
+          RIN_VULKAN_PRODUCT_OK);
+    CHECK(process_pipeline_token == UINT64_C(0x5258000100000101));
+    process_bindings[0].struct_size = sizeof(process_bindings[0]);
+    process_bindings[0].version =
+        RIN_VULKAN_PRODUCT_PROCESS_COMPUTE_BINDING_V8_VERSION;
+    process_bindings[0].resource_index = 0u;
+    process_bindings[0].access = RIN_GPU_RESOURCE_READ;
+    process_bindings[0].resource_cookie = UINT64_C(0x5242000100000001);
+    process_bindings[0].allocation_handle = UINT64_C(0xA001);
+    process_bindings[0].allocation_offset = 128u;
+    process_bindings[0].resource_size_bytes = 1024u;
+    process_bindings[0].offset = 16u;
+    process_bindings[0].size_bytes = 128u;
+    process_bindings[1].struct_size = sizeof(process_bindings[1]);
+    process_bindings[1].version =
+        RIN_VULKAN_PRODUCT_PROCESS_COMPUTE_BINDING_V8_VERSION;
+    process_bindings[1].resource_index = 1u;
+    process_bindings[1].access = RIN_GPU_RESOURCE_READ | RIN_GPU_RESOURCE_WRITE;
+    process_bindings[1].resource_cookie = UINT64_C(0x5242000100000002);
+    process_bindings[1].allocation_handle = UINT64_C(0xA002);
+    process_bindings[1].allocation_offset = 256u;
+    process_bindings[1].resource_size_bytes = 2048u;
+    process_bindings[1].offset = 32u;
+    process_bindings[1].size_bytes = 256u;
+    CHECK(platform_v8->create_process_compute_bind_group(
+              platform_v8->context, UINT64_C(0x5262000100000101),
+              process_pipeline_token, process_bindings, 2u) ==
+          RIN_VULKAN_PRODUCT_OK);
+    CHECK(resource_bind_calls == 2u && bind_group_create_calls == 1u &&
+          active_resource_cookies[0] != 0u &&
+          active_resource_cookies[1] != 0u &&
+          active_resource_cookies[0] != active_resource_cookies[1] &&
+          (active_resource_cookies[0] >> 48u) ==
+              RIN_VULKAN_RINOS_PROCESS_RESOURCE_COOKIE_TAG &&
+          observed_resource_bindings[0].allocation == UINT64_C(0xA001) &&
+          observed_resource_bindings[0].allocation_offset == 128u &&
+          observed_resource_bindings[0].size_bytes == 1024u &&
+          observed_resource_bindings[0].required_gpu_access ==
+              RIN_GPU_ALLOCATION_GPU_READ &&
+          observed_resource_bindings[1].allocation == UINT64_C(0xA002) &&
+          observed_resource_bindings[1].required_gpu_access ==
+              (RIN_GPU_ALLOCATION_GPU_READ | RIN_GPU_ALLOCATION_GPU_WRITE) &&
+          observed_bind_group_token == UINT64_C(0x5262000100000101) &&
+          observed_bind_group_pipeline_token == process_pipeline_token &&
+          observed_compute_binding_count == 2u &&
+          observed_compute_bindings[0].resource_cookie ==
+              active_resource_cookies[0] &&
+          observed_compute_bindings[0].offset == 16u &&
+          observed_compute_bindings[0].size_bytes == 128u &&
+          observed_compute_bindings[0].access ==
+              RIN_GPU_ALLOCATION_GPU_READ &&
+          observed_compute_bindings[1].resource_cookie ==
+              active_resource_cookies[1] &&
+          observed_compute_bindings[1].offset == 32u &&
+          observed_compute_bindings[1].size_bytes == 256u &&
+          observed_compute_bindings[1].access ==
+              (RIN_GPU_ALLOCATION_GPU_READ | RIN_GPU_ALLOCATION_GPU_WRITE));
+    object_destroy_result = RIN_ERROR_BUSY;
+    CHECK(platform_v8->destroy_process_compute_bind_group(
+              platform_v8->context, UINT64_C(0x5262000100000101)) ==
+          RIN_VULKAN_PRODUCT_BUSY);
+    CHECK(resource_unbind_calls == 0u &&
+          backend_v3.bind_groups[0].bind_group_active == 1u &&
+          rin_vulkan_rinos_process_submit_backend_v3_valid(&backend_v3));
+    object_destroy_result = RIN_SUCCESS;
+    CHECK(platform_v8->destroy_process_compute_bind_group(
+              platform_v8->context, UINT64_C(0x5262000100000101)) ==
+          RIN_VULKAN_PRODUCT_OK);
+    CHECK(resource_unbind_calls == 2u && active_resource_cookies[0] == 0u &&
+          active_resource_cookies[1] == 0u &&
+          backend_v3.bind_groups[0].bind_group_token == 0u);
+    CHECK(platform_v7_v3->destroy_process_compute_pipeline(
+              platform_v7_v3->context, process_pipeline_token) ==
+          RIN_VULKAN_PRODUCT_OK);
+    CHECK(rin_vulkan_rinos_process_submit_backend_v3_detach(&backend_v3) ==
+          RIN_VULKAN_PRODUCT_OK);
+    CHECK(backend_v3.state == 0u && active_resource_cookies[0] == 0u &&
+          active_resource_cookies[1] == 0u && release_calls == 2u);
+
+    reset_mocks();
+    memset(&backend_v3, 0, sizeof(backend_v3));
+    CHECK(rin_vulkan_rinos_process_submit_backend_v3_init(
+              &backend_v3, &parent, 0x1111u, 0x2222u, queue_ids, 2u) ==
+          RIN_VULKAN_PRODUCT_OK);
+    platform_v7_v3 =
+        rin_vulkan_rinos_process_submit_backend_v3_platform_v7(&backend_v3);
+    platform_v8 =
+        rin_vulkan_rinos_process_submit_backend_v3_platform_v8(&backend_v3);
+    CHECK(platform_v7_v3 && platform_v8);
+    CHECK(platform_v7_v3->create_process_compute_pipeline(
+              platform_v7_v3->context, UINT64_C(0x5258000100000102),
+              shader_ir, sizeof(shader_ir), &process_pipeline_token) ==
+          RIN_VULKAN_PRODUCT_OK);
+    fail_resource_bind_call = 2u;
+    CHECK(platform_v8->create_process_compute_bind_group(
+              platform_v8->context, UINT64_C(0x5262000100000102),
+              process_pipeline_token, process_bindings, 2u) ==
+          RIN_VULKAN_PRODUCT_UNSUPPORTED);
+    CHECK(resource_bind_calls == 2u && resource_unbind_calls == 1u &&
+          bind_group_create_calls == 0u && active_resource_cookies[0] == 0u &&
+          backend_v3.bind_groups[0].bind_group_token == 0u);
+    CHECK(platform_v7_v3->destroy_process_compute_pipeline(
+              platform_v7_v3->context, process_pipeline_token) ==
+          RIN_VULKAN_PRODUCT_OK);
+    CHECK(rin_vulkan_rinos_process_submit_backend_v3_detach(&backend_v3) ==
+          RIN_VULKAN_PRODUCT_OK);
 
     puts("RinVulkan RinOS process-submit/compute adapter: PASS");
     return 0;

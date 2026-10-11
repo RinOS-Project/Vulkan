@@ -72,6 +72,11 @@ typedef struct TestSdkProcessQueue {
     RinGpuProcessQueueV1 token;
 } TestSdkProcessQueue;
 
+typedef struct TestSdkProcessResource {
+    uint32_t active;
+    RinGpuProcessResourceBindingV1 binding;
+} TestSdkProcessResource;
+
 typedef struct TestProductAdapters {
     RinGpuVulkanSoftwarePlatformV1* software;
     RinVulkanProductPlatformV2 v2;
@@ -80,9 +85,12 @@ typedef struct TestProductAdapters {
     RinVulkanProductPlatformV5 v5;
     RinVulkanProductPlatformV6* v6;
     RinVulkanProductPlatformV7* v7;
+    RinVulkanProductPlatformV8* v8;
     RinVulkanProductPlatformV6 software_v6;
-    RinVulkanRinOSProcessSubmitBackendV2 process_submit_backend;
+    RinVulkanRinOSProcessSubmitBackendV3 process_submit_backend;
     TestSdkProcessQueue sdk_queues[RIN_GPU_PROCESS_MAX_QUEUES_V1];
+    TestSdkProcessResource sdk_resources[
+        RIN_GPU_PROCESS_MAX_COMPUTE_BINDINGS_V1];
     uint32_t sdk_queue_bind_calls;
     uint32_t sdk_queue_release_calls;
     uint32_t sdk_process_submit_calls;
@@ -90,12 +98,26 @@ typedef struct TestProductAdapters {
     uint32_t sdk_shader_module_create_calls;
     uint32_t sdk_compute_pipeline_create_calls;
     uint32_t sdk_object_destroy_calls;
+    uint32_t sdk_resource_bind_calls;
+    uint32_t sdk_resource_unbind_calls;
+    uint32_t sdk_bind_group_create_calls;
+    uint32_t sdk_bind_group_destroy_busy_attempts;
+    RinGpuProcessResourceBindingV1 sdk_last_resource_binding;
+    uint32_t sdk_last_shader_resource_count;
     uint64_t sdk_last_shader_module_token;
     uint64_t sdk_last_pipeline_token;
     uint64_t sdk_last_pipeline_shader_token;
+    uint64_t sdk_last_bind_group_token;
+    uint64_t sdk_last_bind_group_pipeline_token;
+    uint32_t sdk_last_bind_group_count;
+    RinGpuProcessComputeBindingV1 sdk_last_bind_group_bindings[
+        RIN_GPU_PROCESS_MAX_COMPUTE_BINDINGS_V1];
     uint64_t sdk_destroy_tokens[2];
     uint32_t canonical_submit_calls;
     uint32_t canonical_command_count;
+    uint32_t canonical_resource_count;
+    RinVulkanProductResourceV1 canonical_last_resources[
+        RIN_GPU_PROCESS_MAX_RESOURCES_V1];
     uint32_t canonical_dispatch_calls;
     RinGpuBackendCommandV1 canonical_last_command;
     uint32_t canonical_resolve_command_count;
@@ -840,14 +862,33 @@ static int test_submit_process_commands_v6(
         commands[0].type == RIN_GPU_BACKEND_COMMAND_DISPATCH) {
         const RinGpuBackendDispatchV1* dispatch =
             &commands[0].value.dispatch;
-        if (commands[0].reserved != 0u || resource_count != 0u ||
+        if (commands[0].reserved != 0u ||
             dispatch->pipeline_cookie == 0u ||
             dispatch->pipeline_cookie != adapters->sdk_last_pipeline_token ||
             dispatch->group_count_x != 2u ||
             dispatch->group_count_y != 3u ||
             dispatch->group_count_z != 4u)
             return RIN_VULKAN_PRODUCT_PROTOCOL;
+        if (dispatch->bind_group_cookie == 0u) {
+            if (resource_count != 0u) return RIN_VULKAN_PRODUCT_PROTOCOL;
+        } else {
+            if (dispatch->bind_group_cookie !=
+                    adapters->sdk_last_bind_group_token ||
+                adapters->sdk_last_bind_group_count != 1u ||
+                resource_count != 1u || !resources ||
+                resources[0].allocation_handle == 0u ||
+                (resources[0].required_gpu_access &
+                 ~(RIN_GPU_ALLOCATION_GPU_READ |
+                   RIN_GPU_ALLOCATION_GPU_WRITE)) != 0u)
+                return RIN_VULKAN_PRODUCT_PROTOCOL;
+        }
         adapters->canonical_last_command = commands[0];
+        adapters->canonical_resource_count = resource_count;
+        memset(adapters->canonical_last_resources, 0,
+               sizeof(adapters->canonical_last_resources));
+        if (resource_count != 0u)
+            memcpy(adapters->canonical_last_resources, resources,
+                   resource_count * sizeof(*resources));
         ++adapters->canonical_dispatch_calls;
         /* This host provider validates the process-submit handoff and gives
          * the ICD a real software-queue completion token. It does not claim
@@ -1676,9 +1717,10 @@ RinResult rin_gpu_process_shader_module_create_v1(
         header->header_size != sizeof(RinShaderHeaderV1) ||
         header->total_size != shader_ir_size ||
         header->stage != RIN_SHADER_STAGE_COMPUTE ||
-        header->resource_count != 0u)
+        header->resource_count > RIN_GPU_PROCESS_MAX_COMPUTE_BINDINGS_V1)
         return RIN_ERROR_INVALID_ARGUMENT;
     adapters->sdk_last_shader_module_token = shader_module_token;
+    adapters->sdk_last_shader_resource_count = header->resource_count;
     ++adapters->sdk_shader_module_create_calls;
     return RIN_SUCCESS;
 }
@@ -1699,6 +1741,102 @@ RinResult rin_gpu_process_compute_pipeline_create_v1(
     return RIN_SUCCESS;
 }
 
+RinResult rin_gpu_process_resource_bind_v1(
+    uint64_t device_id, uint64_t device_generation,
+    const RinGpuProcessResourceBindingV1* binding) {
+    TestProductAdapters* adapters = g_process_submit_adapters;
+    uint32_t index;
+    if (!adapters || device_id != TEST_PROCESS_SUBMIT_DEVICE_ID ||
+        device_generation != TEST_PROCESS_SUBMIT_DEVICE_GENERATION ||
+        !binding || binding->struct_size != sizeof(*binding) ||
+        binding->version != RIN_GPU_PROCESS_RESOURCE_BINDING_VERSION_V1 ||
+        binding->resource_cookie == 0u || binding->allocation == 0u ||
+        binding->size_bytes == 0u || binding->required_gpu_access == 0u ||
+        (binding->required_gpu_access &
+         ~(RIN_GPU_ALLOCATION_GPU_READ | RIN_GPU_ALLOCATION_GPU_WRITE)) != 0u ||
+        binding->reserved != 0u ||
+        binding->allocation_offset > UINT64_MAX - binding->size_bytes)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    ++adapters->sdk_resource_bind_calls;
+    for (index = 0u; index <
+         RIN_GPU_PROCESS_MAX_COMPUTE_BINDINGS_V1; ++index) {
+        TestSdkProcessResource* resource = &adapters->sdk_resources[index];
+        if (resource->active != 0u &&
+            resource->binding.resource_cookie == binding->resource_cookie)
+            return RIN_ERROR_BUSY;
+        if (resource->active == 0u) {
+            resource->binding = *binding;
+            resource->active = 1u;
+            adapters->sdk_last_resource_binding = *binding;
+            return RIN_SUCCESS;
+        }
+    }
+    return RIN_ERROR_TABLE_FULL;
+}
+
+RinResult rin_gpu_process_resource_unbind_v1(
+    uint64_t device_id, uint64_t device_generation,
+    uint64_t resource_cookie) {
+    TestProductAdapters* adapters = g_process_submit_adapters;
+    uint32_t index;
+    if (!adapters || device_id != TEST_PROCESS_SUBMIT_DEVICE_ID ||
+        device_generation != TEST_PROCESS_SUBMIT_DEVICE_GENERATION ||
+        resource_cookie == 0u)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    ++adapters->sdk_resource_unbind_calls;
+    for (index = 0u; index <
+         RIN_GPU_PROCESS_MAX_COMPUTE_BINDINGS_V1; ++index) {
+        TestSdkProcessResource* resource = &adapters->sdk_resources[index];
+        if (resource->active != 0u &&
+            resource->binding.resource_cookie == resource_cookie) {
+            memset(resource, 0, sizeof(*resource));
+            return RIN_SUCCESS;
+        }
+    }
+    return RIN_ERROR_STALE_HANDLE;
+}
+
+RinResult rin_gpu_process_compute_bind_group_create_v1(
+    uint64_t device_id, uint64_t device_generation,
+    uint64_t bind_group_token, uint64_t pipeline_token,
+    const RinGpuProcessComputeBindingV1* bindings, uint32_t binding_count) {
+    TestProductAdapters* adapters = g_process_submit_adapters;
+    uint32_t index;
+    if (!adapters || device_id != TEST_PROCESS_SUBMIT_DEVICE_ID ||
+        device_generation != TEST_PROCESS_SUBMIT_DEVICE_GENERATION ||
+        bind_group_token == 0u || pipeline_token == 0u ||
+        pipeline_token != adapters->sdk_last_pipeline_token || !bindings ||
+        binding_count == 0u ||
+        binding_count > RIN_GPU_PROCESS_MAX_COMPUTE_BINDINGS_V1 ||
+        binding_count != adapters->sdk_last_shader_resource_count)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    for (index = 0u; index < binding_count; ++index) {
+        uint32_t resource_index;
+        int found = 0;
+        const RinGpuProcessComputeBindingV1* binding = &bindings[index];
+        if (binding->struct_size != sizeof(*binding) ||
+            binding->version != RIN_GPU_PROCESS_COMPUTE_BINDING_VERSION_V1 ||
+            binding->resource_cookie == 0u || binding->size_bytes == 0u ||
+            binding->offset > UINT64_MAX - binding->size_bytes ||
+            binding->access == 0u || binding->reserved != 0u)
+            return RIN_ERROR_INVALID_ARGUMENT;
+        for (resource_index = 0u; resource_index <
+             RIN_GPU_PROCESS_MAX_COMPUTE_BINDINGS_V1; ++resource_index)
+            if (adapters->sdk_resources[resource_index].active != 0u &&
+                adapters->sdk_resources[resource_index].binding.resource_cookie ==
+                    binding->resource_cookie)
+                found = 1;
+        if (!found) return RIN_ERROR_STALE_HANDLE;
+    }
+    adapters->sdk_last_bind_group_token = bind_group_token;
+    adapters->sdk_last_bind_group_pipeline_token = pipeline_token;
+    adapters->sdk_last_bind_group_count = binding_count;
+    memcpy(adapters->sdk_last_bind_group_bindings, bindings,
+           binding_count * sizeof(*bindings));
+    ++adapters->sdk_bind_group_create_calls;
+    return RIN_SUCCESS;
+}
+
 RinResult rin_gpu_process_object_destroy_v1(
         uint64_t device_id, uint64_t device_generation,
         uint64_t object_token) {
@@ -1710,6 +1848,11 @@ RinResult rin_gpu_process_object_destroy_v1(
     adapters->sdk_destroy_tokens[0] = adapters->sdk_destroy_tokens[1];
     adapters->sdk_destroy_tokens[1] = object_token;
     ++adapters->sdk_object_destroy_calls;
+    if (object_token == adapters->sdk_last_bind_group_token &&
+        adapters->sdk_bind_group_destroy_busy_attempts != 0u) {
+        --adapters->sdk_bind_group_destroy_busy_attempts;
+        return RIN_ERROR_BUSY;
+    }
     return RIN_SUCCESS;
 }
 
@@ -1875,7 +2018,7 @@ static int initialize_product_adapters(
         return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
     for (index = 0u; index < software->queue_count; ++index)
         queue_ids[index] = index;
-    result = rin_vulkan_rinos_process_submit_backend_v2_init(
+    result = rin_vulkan_rinos_process_submit_backend_v3_init(
         &adapters->process_submit_backend, &adapters->v5,
         TEST_PROCESS_SUBMIT_DEVICE_ID,
         TEST_PROCESS_SUBMIT_DEVICE_GENERATION, queue_ids,
@@ -1883,9 +2026,12 @@ static int initialize_product_adapters(
     if (result != RIN_VULKAN_PRODUCT_OK) return result;
     {
         adapters->v7 =
-            rin_vulkan_rinos_process_submit_backend_v2_platform(
+            rin_vulkan_rinos_process_submit_backend_v3_platform_v7(
                 &adapters->process_submit_backend);
-        if (!adapters->v7 || !adapters->v7->base)
+        adapters->v8 =
+            rin_vulkan_rinos_process_submit_backend_v3_platform_v8(
+                &adapters->process_submit_backend);
+        if (!adapters->v7 || !adapters->v8 || !adapters->v7->base)
             return RIN_VULKAN_PRODUCT_STATE;
         adapters->v6 = adapters->v7->base;
     }
@@ -2086,6 +2232,352 @@ cleanup:
     if (layout != 0u) vkDestroyPipelineLayout(device, layout, NULL);
     if (shader != 0u) vkDestroyShaderModule(device, shader, NULL);
 #undef PROCESS_COMPUTE_CHECK
+    return ok;
+}
+
+static size_t make_storage_compute_module(uint32_t* words) {
+    size_t count = 5u;
+    uint32_t operands[6];
+    words[0] = UINT32_C(0x07230203);
+    words[1] = 0x00010300u;
+    words[2] = 0u;
+    words[3] = 17u;
+    words[4] = 0u;
+    operands[0] = 1u;
+    emit_test_spirv_instruction(words, &count, 17u, 2u, operands);
+    operands[0] = 0u; operands[1] = 3u;
+    emit_test_spirv_instruction(words, &count, 14u, 3u, operands);
+    operands[0] = 5u; operands[1] = 10u;
+    operands[2] = UINT32_C(0x6e69616d); operands[3] = 0u;
+    operands[4] = 7u;
+    emit_test_spirv_instruction(words, &count, 15u, 6u, operands);
+    operands[0] = 10u; operands[1] = 17u;
+    operands[2] = 1u; operands[3] = 1u; operands[4] = 1u;
+    emit_test_spirv_instruction(words, &count, 16u, 6u, operands);
+    operands[0] = 3u; operands[1] = 2u;
+    emit_test_spirv_instruction(words, &count, 71u, 3u, operands);
+    operands[0] = 3u; operands[1] = 0u;
+    operands[2] = 35u; operands[3] = 0u;
+    emit_test_spirv_instruction(words, &count, 72u, 5u, operands);
+    operands[0] = 3u; operands[1] = 1u;
+    operands[2] = 35u; operands[3] = 4u;
+    emit_test_spirv_instruction(words, &count, 72u, 5u, operands);
+    operands[0] = 7u; operands[1] = 33u; operands[2] = 0u;
+    emit_test_spirv_instruction(words, &count, 71u, 4u, operands);
+    operands[0] = 7u; operands[1] = 34u; operands[2] = 0u;
+    emit_test_spirv_instruction(words, &count, 71u, 4u, operands);
+    operands[0] = 1u;
+    emit_test_spirv_instruction(words, &count, 19u, 2u, operands);
+    operands[0] = 2u; operands[1] = 32u; operands[2] = 0u;
+    emit_test_spirv_instruction(words, &count, 21u, 4u, operands);
+    operands[0] = 3u; operands[1] = 2u; operands[2] = 2u;
+    emit_test_spirv_instruction(words, &count, 30u, 4u, operands);
+    operands[0] = 4u; operands[1] = 12u; operands[2] = 3u;
+    emit_test_spirv_instruction(words, &count, 32u, 4u, operands);
+    operands[0] = 5u; operands[1] = 12u; operands[2] = 2u;
+    emit_test_spirv_instruction(words, &count, 32u, 4u, operands);
+    operands[0] = 6u; operands[1] = 1u;
+    emit_test_spirv_instruction(words, &count, 33u, 3u, operands);
+    operands[0] = 4u; operands[1] = 7u; operands[2] = 12u;
+    emit_test_spirv_instruction(words, &count, 59u, 4u, operands);
+    operands[0] = 2u; operands[1] = 8u; operands[2] = 0u;
+    emit_test_spirv_instruction(words, &count, 43u, 4u, operands);
+    operands[0] = 2u; operands[1] = 9u; operands[2] = 42u;
+    emit_test_spirv_instruction(words, &count, 43u, 4u, operands);
+    operands[0] = 2u; operands[1] = 16u; operands[2] = 1u;
+    emit_test_spirv_instruction(words, &count, 43u, 4u, operands);
+    operands[0] = 1u; operands[1] = 10u; operands[2] = 0u;
+    operands[3] = 6u;
+    emit_test_spirv_instruction(words, &count, 54u, 5u, operands);
+    operands[0] = 11u;
+    emit_test_spirv_instruction(words, &count, 248u, 2u, operands);
+    operands[0] = 5u; operands[1] = 12u;
+    operands[2] = 7u; operands[3] = 8u;
+    emit_test_spirv_instruction(words, &count, 65u, 5u, operands);
+    operands[0] = 2u; operands[1] = 13u; operands[2] = 12u;
+    emit_test_spirv_instruction(words, &count, 61u, 4u, operands);
+    operands[0] = 2u; operands[1] = 14u;
+    operands[2] = 13u; operands[3] = 9u;
+    emit_test_spirv_instruction(words, &count, 128u, 5u, operands);
+    operands[0] = 5u; operands[1] = 15u;
+    operands[2] = 7u; operands[3] = 16u;
+    emit_test_spirv_instruction(words, &count, 65u, 5u, operands);
+    operands[0] = 15u; operands[1] = 14u;
+    emit_test_spirv_instruction(words, &count, 62u, 3u, operands);
+    emit_test_spirv_instruction(words, &count, 253u, 1u, operands);
+    emit_test_spirv_instruction(words, &count, 56u, 1u, operands);
+    return count;
+}
+
+static int test_process_compute_descriptor_dispatch(
+        RinVkDevice device, RinVkQueue queue, RinVkPhysicalDevice physical,
+        TestProductAdapters* adapters) {
+    const uint64_t buffer_size = 8u;
+    uint32_t spirv[128];
+    const size_t spirv_word_count = make_storage_compute_module(spirv);
+    RinVkPhysicalDeviceMemoryProperties memory_properties;
+    RinVkDescriptorSetLayoutBinding descriptor_binding;
+    RinVkDescriptorSetLayoutCreateInfo descriptor_layout_info;
+    RinVkDescriptorPoolSize descriptor_pool_size;
+    RinVkDescriptorPoolCreateInfo descriptor_pool_info;
+    RinVkDescriptorSetAllocateInfo descriptor_allocate_info;
+    RinVkPipelineLayoutCreateInfo pipeline_layout_info;
+    RinVkShaderModuleCreateInfo shader_info;
+    RinVkComputePipelineCreateInfo pipeline_info;
+    RinVkBufferCreateInfo buffer_info;
+    RinVkMemoryRequirements memory_requirements;
+    RinVkMemoryAllocateInfo memory_allocate_info;
+    RinVkDescriptorBufferInfo descriptor_buffer_info;
+    RinVkWriteDescriptorSet descriptor_write;
+    RinVkCommandPoolCreateInfo command_pool_info;
+    RinVkCommandBufferAllocateInfo command_allocate_info;
+    RinVkCommandBufferBeginInfo command_begin_info;
+    RinVkSubmitInfo submit_info;
+    RinVkDescriptorSetLayout descriptor_layout = 0u;
+    RinVkDescriptorPool descriptor_pool = 0u;
+    RinVkDescriptorSet descriptor_set = 0u;
+    RinVkPipelineLayout pipeline_layout = 0u;
+    RinVkShaderModule shader = 0u;
+    RinVkPipeline pipeline = 0u;
+    RinVkBuffer buffer = 0u;
+    RinVkDeviceMemory memory = 0u;
+    RinVkCommandPool command_pool = 0u;
+    RinVkCommandBuffer command_buffer = NULL;
+    uint32_t memory_type_index = UINT32_MAX;
+    uint32_t sdk_bind_before;
+    uint32_t sdk_unbind_before;
+    uint32_t group_create_before;
+    uint32_t group_destroy_before;
+    uint32_t canonical_submit_before;
+    uint32_t canonical_dispatch_before;
+    uint32_t resource_index;
+    uint32_t active_sdk_resources = 0u;
+    int submitted = 0;
+    int ok = 0;
+
+#define PROCESS_DESCRIPTOR_CHECK(condition) do { \
+    if (!(condition)) { \
+        fprintf(stderr, "process compute descriptor check failed at %s:%d: %s\n", \
+                __FILE__, __LINE__, #condition); \
+        ok = -1; \
+        goto cleanup; \
+    } \
+} while (0)
+
+    if (!device || !queue || !physical || !adapters || !adapters->v8) {
+        fprintf(stderr,
+                "process compute descriptor fixture unavailable: device=%p queue=%p physical=%p adapters=%p v8=%p\n",
+                (void*)device, (void*)queue, (void*)physical,
+                (void*)adapters, adapters ? (void*)adapters->v8 : NULL);
+        return -1;
+    }
+    sdk_bind_before = adapters->sdk_resource_bind_calls;
+    sdk_unbind_before = adapters->sdk_resource_unbind_calls;
+    group_create_before = adapters->sdk_bind_group_create_calls;
+    group_destroy_before = adapters->sdk_object_destroy_calls;
+    canonical_submit_before = adapters->canonical_submit_calls;
+    canonical_dispatch_before = adapters->canonical_dispatch_calls;
+
+    memset(&buffer_info, 0, sizeof(buffer_info));
+    buffer_info.sType = RIN_VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.size = buffer_size;
+    buffer_info.usage = RIN_VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    buffer_info.sharingMode = RIN_VK_SHARING_MODE_EXCLUSIVE;
+    PROCESS_DESCRIPTOR_CHECK(vkCreateBuffer(
+        device, &buffer_info, NULL, &buffer) == RIN_VK_SUCCESS);
+    vkGetBufferMemoryRequirements(device, buffer, &memory_requirements);
+    PROCESS_DESCRIPTOR_CHECK(memory_requirements.size >= buffer_size &&
+        memory_requirements.memoryTypeBits != 0u);
+    memset(&memory_properties, 0, sizeof(memory_properties));
+    vkGetPhysicalDeviceMemoryProperties(physical, &memory_properties);
+    for (resource_index = 0u;
+         resource_index < memory_properties.memoryTypeCount &&
+             resource_index < 32u;
+         ++resource_index)
+        if ((memory_requirements.memoryTypeBits &
+             (UINT32_C(1) << resource_index)) != 0u) {
+            memory_type_index = resource_index;
+            break;
+        }
+    PROCESS_DESCRIPTOR_CHECK(memory_type_index != UINT32_MAX);
+    memset(&memory_allocate_info, 0, sizeof(memory_allocate_info));
+    memory_allocate_info.sType = RIN_VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    memory_allocate_info.allocationSize = memory_requirements.size;
+    memory_allocate_info.memoryTypeIndex = memory_type_index;
+    PROCESS_DESCRIPTOR_CHECK(vkAllocateMemory(
+        device, &memory_allocate_info, NULL, &memory) == RIN_VK_SUCCESS);
+    PROCESS_DESCRIPTOR_CHECK(vkBindBufferMemory(
+        device, buffer, memory, 0u) == RIN_VK_SUCCESS);
+
+    memset(&descriptor_binding, 0, sizeof(descriptor_binding));
+    descriptor_binding.binding = 0u;
+    descriptor_binding.descriptorType = RIN_VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    descriptor_binding.descriptorCount = 1u;
+    descriptor_binding.stageFlags = RIN_VK_SHADER_STAGE_COMPUTE_BIT;
+    memset(&descriptor_layout_info, 0, sizeof(descriptor_layout_info));
+    descriptor_layout_info.sType =
+        RIN_VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    descriptor_layout_info.bindingCount = 1u;
+    descriptor_layout_info.pBindings = &descriptor_binding;
+    PROCESS_DESCRIPTOR_CHECK(vkCreateDescriptorSetLayout(
+        device, &descriptor_layout_info, NULL, &descriptor_layout) ==
+        RIN_VK_SUCCESS);
+
+    memset(&descriptor_pool_size, 0, sizeof(descriptor_pool_size));
+    descriptor_pool_size.type = RIN_VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    descriptor_pool_size.descriptorCount = 1u;
+    memset(&descriptor_pool_info, 0, sizeof(descriptor_pool_info));
+    descriptor_pool_info.sType = RIN_VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    descriptor_pool_info.maxSets = 1u;
+    descriptor_pool_info.poolSizeCount = 1u;
+    descriptor_pool_info.pPoolSizes = &descriptor_pool_size;
+    PROCESS_DESCRIPTOR_CHECK(vkCreateDescriptorPool(
+        device, &descriptor_pool_info, NULL, &descriptor_pool) ==
+        RIN_VK_SUCCESS);
+    memset(&descriptor_allocate_info, 0, sizeof(descriptor_allocate_info));
+    descriptor_allocate_info.sType =
+        RIN_VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    descriptor_allocate_info.descriptorPool = descriptor_pool;
+    descriptor_allocate_info.descriptorSetCount = 1u;
+    descriptor_allocate_info.pSetLayouts = &descriptor_layout;
+    PROCESS_DESCRIPTOR_CHECK(vkAllocateDescriptorSets(
+        device, &descriptor_allocate_info, &descriptor_set) == RIN_VK_SUCCESS);
+    memset(&descriptor_buffer_info, 0, sizeof(descriptor_buffer_info));
+    descriptor_buffer_info.buffer = buffer;
+    descriptor_buffer_info.range = buffer_size;
+    memset(&descriptor_write, 0, sizeof(descriptor_write));
+    descriptor_write.dstSet = descriptor_set;
+    descriptor_write.dstBinding = 0u;
+    descriptor_write.descriptorCount = 1u;
+    descriptor_write.descriptorType = RIN_VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    descriptor_write.pBufferInfo = &descriptor_buffer_info;
+    vkUpdateDescriptorSets(device, 1u, &descriptor_write, 0u, NULL);
+
+    memset(&pipeline_layout_info, 0, sizeof(pipeline_layout_info));
+    pipeline_layout_info.sType =
+        RIN_VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipeline_layout_info.setLayoutCount = 1u;
+    pipeline_layout_info.pSetLayouts = &descriptor_layout;
+    PROCESS_DESCRIPTOR_CHECK(vkCreatePipelineLayout(
+        device, &pipeline_layout_info, NULL, &pipeline_layout) ==
+        RIN_VK_SUCCESS);
+    memset(&shader_info, 0, sizeof(shader_info));
+    shader_info.sType = RIN_VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    shader_info.codeSize = spirv_word_count * sizeof(spirv[0]);
+    shader_info.pCode = spirv;
+    PROCESS_DESCRIPTOR_CHECK(vkCreateShaderModule(
+        device, &shader_info, NULL, &shader) == RIN_VK_SUCCESS);
+    memset(&pipeline_info, 0, sizeof(pipeline_info));
+    pipeline_info.sType = RIN_VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipeline_info.stage.sType =
+        RIN_VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    pipeline_info.stage.stage = RIN_VK_SHADER_STAGE_COMPUTE_BIT;
+    pipeline_info.stage.module = shader;
+    pipeline_info.stage.pName = "main";
+    pipeline_info.layout = pipeline_layout;
+    pipeline_info.basePipelineIndex = -1;
+    PROCESS_DESCRIPTOR_CHECK(vkCreateComputePipelines(
+        device, 0u, 1u, &pipeline_info, NULL, &pipeline) == RIN_VK_SUCCESS);
+    PROCESS_DESCRIPTOR_CHECK(adapters->sdk_last_shader_resource_count == 1u &&
+        adapters->sdk_last_pipeline_token == pipeline);
+
+    memset(&command_pool_info, 0, sizeof(command_pool_info));
+    command_pool_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    command_pool_info.queueFamilyIndex = 0u;
+    PROCESS_DESCRIPTOR_CHECK(vkCreateCommandPool(
+        device, &command_pool_info, NULL, &command_pool) == RIN_VK_SUCCESS);
+    memset(&command_allocate_info, 0, sizeof(command_allocate_info));
+    command_allocate_info.sType =
+        RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    command_allocate_info.commandPool = command_pool;
+    command_allocate_info.level = RIN_VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    command_allocate_info.commandBufferCount = 1u;
+    PROCESS_DESCRIPTOR_CHECK(vkAllocateCommandBuffers(
+        device, &command_allocate_info, &command_buffer) == RIN_VK_SUCCESS);
+    memset(&command_begin_info, 0, sizeof(command_begin_info));
+    command_begin_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    command_begin_info.flags = RIN_VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    PROCESS_DESCRIPTOR_CHECK(vkBeginCommandBuffer(
+        command_buffer, &command_begin_info) == RIN_VK_SUCCESS);
+    vkCmdBindPipeline(command_buffer, RIN_VK_PIPELINE_BIND_POINT_COMPUTE,
+                      pipeline);
+    vkCmdBindDescriptorSets(command_buffer,
+        RIN_VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout, 0u, 1u,
+        &descriptor_set, 0u, NULL);
+    vkCmdDispatch(command_buffer, 2u, 3u, 4u);
+    PROCESS_DESCRIPTOR_CHECK(vkEndCommandBuffer(command_buffer) ==
+                             RIN_VK_SUCCESS);
+    memset(&submit_info, 0, sizeof(submit_info));
+    submit_info.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1u;
+    submit_info.pCommandBuffers = &command_buffer;
+    PROCESS_DESCRIPTOR_CHECK(vkQueueSubmit(queue, 1u, &submit_info, 0u) ==
+                             RIN_VK_SUCCESS);
+    submitted = 1;
+    PROCESS_DESCRIPTOR_CHECK(adapters->sdk_resource_bind_calls ==
+                                 sdk_bind_before + 1u &&
+        adapters->sdk_bind_group_create_calls == group_create_before + 1u &&
+        adapters->sdk_last_resource_binding.allocation != 0u &&
+        adapters->sdk_last_resource_binding.allocation_offset == 0u &&
+        adapters->sdk_last_resource_binding.size_bytes == buffer_size &&
+        adapters->sdk_last_resource_binding.required_gpu_access ==
+            (RIN_GPU_ALLOCATION_GPU_READ | RIN_GPU_ALLOCATION_GPU_WRITE) &&
+        adapters->sdk_last_bind_group_count == 1u &&
+        adapters->sdk_last_bind_group_pipeline_token == pipeline &&
+        adapters->sdk_last_bind_group_bindings[0].resource_cookie ==
+            adapters->sdk_last_resource_binding.resource_cookie &&
+        adapters->sdk_last_bind_group_bindings[0].offset == 0u &&
+        adapters->sdk_last_bind_group_bindings[0].size_bytes == buffer_size &&
+        adapters->sdk_last_bind_group_bindings[0].access ==
+            (RIN_GPU_ALLOCATION_GPU_READ | RIN_GPU_ALLOCATION_GPU_WRITE));
+    PROCESS_DESCRIPTOR_CHECK(adapters->canonical_last_command.type ==
+            RIN_GPU_BACKEND_COMMAND_DISPATCH &&
+        adapters->canonical_last_command.value.dispatch.pipeline_cookie ==
+            pipeline &&
+        adapters->canonical_last_command.value.dispatch.bind_group_cookie ==
+            adapters->sdk_last_bind_group_token &&
+        adapters->canonical_last_command.value.dispatch.group_count_x == 2u &&
+        adapters->canonical_last_command.value.dispatch.group_count_y == 3u &&
+        adapters->canonical_last_command.value.dispatch.group_count_z == 4u &&
+        adapters->canonical_resource_count == 1u &&
+        adapters->canonical_last_resources[0].allocation_handle ==
+            adapters->sdk_last_resource_binding.allocation &&
+        adapters->canonical_last_resources[0].required_gpu_access ==
+            (RIN_VULKAN_PRODUCT_MEMORY_GPU_READ |
+             RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE));
+
+    adapters->sdk_bind_group_destroy_busy_attempts = 1u;
+    PROCESS_DESCRIPTOR_CHECK(vkQueueWaitIdle(queue) == RIN_VK_SUCCESS);
+    submitted = 0;
+    PROCESS_DESCRIPTOR_CHECK(adapters->sdk_bind_group_destroy_busy_attempts == 0u &&
+        adapters->sdk_resource_unbind_calls == sdk_unbind_before + 1u &&
+        adapters->sdk_object_destroy_calls >= group_destroy_before + 2u);
+    for (resource_index = 0u;
+         resource_index < RIN_GPU_PROCESS_MAX_COMPUTE_BINDINGS_V1;
+         ++resource_index)
+        active_sdk_resources += adapters->sdk_resources[resource_index].active;
+    PROCESS_DESCRIPTOR_CHECK(active_sdk_resources == 0u &&
+        adapters->canonical_submit_calls == canonical_submit_before + 1u &&
+        adapters->canonical_dispatch_calls == canonical_dispatch_before + 1u);
+    ok = 0;
+
+cleanup:
+    if (submitted) {
+        const RinVkResult idle_result = vkQueueWaitIdle(queue);
+        if (idle_result != RIN_VK_SUCCESS) ok = -1;
+    }
+    if (command_pool != 0u) vkDestroyCommandPool(device, command_pool, NULL);
+    if (pipeline != 0u) vkDestroyPipeline(device, pipeline, NULL);
+    if (shader != 0u) vkDestroyShaderModule(device, shader, NULL);
+    if (pipeline_layout != 0u)
+        vkDestroyPipelineLayout(device, pipeline_layout, NULL);
+    if (descriptor_pool != 0u)
+        vkDestroyDescriptorPool(device, descriptor_pool, NULL);
+    if (descriptor_layout != 0u)
+        vkDestroyDescriptorSetLayout(device, descriptor_layout, NULL);
+    if (buffer != 0u) vkDestroyBuffer(device, buffer, NULL);
+    if (memory != 0u) vkFreeMemory(device, memory, NULL);
+#undef PROCESS_DESCRIPTOR_CHECK
     return ok;
 }
 
@@ -3293,6 +3785,7 @@ int main(void) {
     uint32_t product_v5_bound = 0u;
     uint32_t product_v6_bound = 0u;
     uint32_t product_v7_bound = 0u;
+    uint32_t product_v8_bound = 0u;
     uint32_t process_backend_initialized = 0u;
     uint32_t surface_created = 0u;
     uint32_t device_created = 0u;
@@ -3399,6 +3892,9 @@ int main(void) {
     CHECK(rin_gpu_vulkan_icd_bind_product_platform_v7(
               product_adapters.v7) == RIN_GPU_VULKAN_OK);
     product_v7_bound = 1u;
+    CHECK(rin_gpu_vulkan_icd_bind_product_platform_v8(
+              product_adapters.v8) == RIN_GPU_VULKAN_OK);
+    product_v8_bound = 1u;
 
 #if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
     memset(g_surfaces, 0, sizeof(g_surfaces));
@@ -3780,19 +4276,24 @@ int main(void) {
         swapchain_created = 0u;
         CHECK(test_process_compute_pipeline_dispatch(
                   device, queue, &product_adapters) == 0);
+        CHECK(test_process_compute_descriptor_dispatch(
+                  device, queue, physical, &product_adapters) == 0);
         CHECK(product_adapters.sdk_queue_bind_calls == software.queue_count &&
               product_adapters.sdk_process_submit_calls ==
                   product_adapters.canonical_submit_calls &&
               product_adapters.sdk_queue_release_calls == 0u &&
               product_adapters.sdk_active_queue_count ==
                   software.queue_count);
+        CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v8(
+                  product_adapters.v8) == RIN_GPU_VULKAN_OK);
+        product_v8_bound = 0u;
         CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v7(
                   product_adapters.v7) == RIN_GPU_VULKAN_OK);
         product_v7_bound = 0u;
         CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v6(
                   product_adapters.v6) == RIN_GPU_VULKAN_OK);
         product_v6_bound = 0u;
-        CHECK(rin_vulkan_rinos_process_submit_backend_v2_detach(
+        CHECK(rin_vulkan_rinos_process_submit_backend_v3_detach(
                   &product_adapters.process_submit_backend) ==
               RIN_VULKAN_PRODUCT_OK);
         process_backend_initialized = 0u;
@@ -3825,6 +4326,18 @@ cleanup:
     if (device_created) vkDestroyDevice(device, NULL);
     if (surface_created) vkDestroySurfaceKHR(instance, surface, NULL);
     if (instance) vkDestroyInstance(instance, NULL);
+    if (product_v8_bound) {
+        const int unbind_result =
+            rin_gpu_vulkan_icd_unbind_product_platform_v8(
+                product_adapters.v8);
+        if (unbind_result == RIN_GPU_VULKAN_OK) {
+            product_v8_bound = 0u;
+        } else {
+            fprintf(stderr, "V8 process-compute unbind returned %d\n",
+                    unbind_result);
+            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
     if (product_v7_bound) {
         const int unbind_result =
             rin_gpu_vulkan_icd_unbind_product_platform_v7(
@@ -3859,7 +4372,7 @@ cleanup:
             result = RIN_VK_ERROR_INITIALIZATION_FAILED;
         } else {
             const int detach_result =
-                rin_vulkan_rinos_process_submit_backend_v2_detach(
+                rin_vulkan_rinos_process_submit_backend_v3_detach(
                     &product_adapters.process_submit_backend);
             if (detach_result != RIN_VULKAN_PRODUCT_OK) {
                 fprintf(stderr,
