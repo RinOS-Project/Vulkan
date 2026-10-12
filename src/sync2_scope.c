@@ -55,11 +55,24 @@ int rin_vk_sync2_stage_mask(uint64_t public_mask, uint64_t* runtime_mask_out) {
         RIN_VK_PIPELINE_STAGE_2_RESOLVE_BIT |
         RIN_VK_PIPELINE_STAGE_2_BLIT_BIT |
         RIN_VK_PIPELINE_STAGE_2_CLEAR_BIT;
+    const uint64_t graphics_shader_stages =
+        RIN_VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+        RIN_VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
     const uint64_t graphics_stages =
         RIN_VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
-        RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        graphics_shader_stages |
+        RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+        RIN_VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT;
+    const uint64_t indirect_stage =
+        RIN_VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
     const uint64_t known = transfer_stages |
                            graphics_stages |
+                           indirect_stage |
                            RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
                            RIN_VK_PIPELINE_STAGE_2_HOST_BIT |
                            RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
@@ -69,6 +82,11 @@ int rin_vk_sync2_stage_mask(uint64_t public_mask, uint64_t* runtime_mask_out) {
         runtime_mask |= RIN_GPU_VULKAN_BARRIER_STAGE_TRANSFER;
     if ((public_mask & graphics_stages) != 0u)
         runtime_mask |= RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS;
+    /* The packet ABI has no indirect-command stage. Cover both graphics
+     * draws and compute dispatches that consume indirect parameters. */
+    if ((public_mask & indirect_stage) != 0u)
+        runtime_mask |= RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS |
+                        RIN_GPU_VULKAN_BARRIER_STAGE_COMPUTE;
     if ((public_mask & RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT) != 0u)
         runtime_mask |= RIN_GPU_VULKAN_BARRIER_STAGE_COMPUTE;
     if ((public_mask & RIN_VK_PIPELINE_STAGE_2_HOST_BIT) != 0u)
@@ -84,7 +102,8 @@ int rin_vk_sync2_semaphore_wait_stage_mask(uint64_t public_mask,
     const uint32_t legacy_transfer = UINT32_C(0x00001000);
     const uint32_t legacy_host = UINT32_C(0x00004000);
     const uint32_t legacy_all_commands = UINT32_C(0x00010000);
-    const uint32_t legacy_graphics = UINT32_C(0x00000404);
+    const uint32_t legacy_graphics =
+        RIN_VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
     const uint32_t legacy_compute = RIN_VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     uint64_t runtime_mask;
     uint32_t legacy_mask = 0u;
@@ -105,8 +124,8 @@ int rin_vk_sync2_semaphore_wait_stage_mask(uint64_t public_mask,
         if ((runtime_mask & RIN_GPU_VULKAN_BARRIER_STAGE_COMPUTE) != 0u)
             legacy_mask |= legacy_compute;
     }
-    /* TOP/BOTTOM are the only additional bits accepted here. The scoped
-     * conversion above deliberately maps BOTTOM (and NONE) to an empty mask. */
+    /* The scoped conversion maps BOTTOM (and NONE) to an empty second scope;
+     * broad graphics scopes project to legacy ALL_GRAPHICS. */
     *legacy_mask_out = legacy_mask;
     return 1;
 }
@@ -133,7 +152,6 @@ int rin_vk_sync2_legacy_stage_mask(uint32_t public_mask,
                            RIN_VK_PIPELINE_STAGE_HOST_BIT |
                            RIN_VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     const uint32_t broad_graphics =
-        RIN_VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT |
         RIN_VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
         RIN_VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
         RIN_VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT |
@@ -153,6 +171,8 @@ int rin_vk_sync2_legacy_stage_mask(uint32_t public_mask,
         (public_mask & RIN_VK_PIPELINE_STAGE_ALL_COMMANDS_BIT) != 0u) {
         sync2_mask |= RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     }
+    if ((public_mask & RIN_VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT) != 0u)
+        sync2_mask |= RIN_VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
     if ((public_mask & (broad_graphics |
                         RIN_VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
                         RIN_VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)) !=
@@ -175,7 +195,8 @@ int rin_vk_sync2_legacy_wait_stage_mask(uint64_t public_mask,
     const uint32_t legacy_transfer = UINT32_C(0x00001000);
     const uint32_t legacy_host = UINT32_C(0x00004000);
     const uint32_t legacy_all_commands = UINT32_C(0x00010000);
-    const uint32_t legacy_graphics = UINT32_C(0x00000404);
+    const uint32_t legacy_graphics =
+        RIN_VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
     const uint32_t legacy_compute =
         RIN_VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     uint64_t source_scope_mask;
@@ -244,10 +265,18 @@ int rin_vk_sync2_access_mask(uint64_t public_mask, uint64_t stage_mask,
         runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ;
     if ((public_mask & RIN_VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT) != 0u)
         runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_WRITE;
-    if ((public_mask & RIN_VK_ACCESS_2_SHADER_STORAGE_READ_BIT) != 0u)
-        runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_COMPUTE_READ;
-    if ((public_mask & RIN_VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT) != 0u)
-        runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_COMPUTE_WRITE;
+    if ((public_mask & RIN_VK_ACCESS_2_SHADER_STORAGE_READ_BIT) != 0u) {
+        if ((runtime_stages & RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS) != 0u)
+            runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ;
+        if ((runtime_stages & RIN_GPU_VULKAN_BARRIER_STAGE_COMPUTE) != 0u)
+            runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_COMPUTE_READ;
+    }
+    if ((public_mask & RIN_VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT) != 0u) {
+        if ((runtime_stages & RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS) != 0u)
+            runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_WRITE;
+        if ((runtime_stages & RIN_GPU_VULKAN_BARRIER_STAGE_COMPUTE) != 0u)
+            runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_COMPUTE_WRITE;
+    }
     if ((public_mask & (memory_read | memory_write)) != 0u &&
         runtime_stages == 0u)
         return 0;
@@ -291,9 +320,15 @@ int rin_vk_sync2_access_stage_valid(uint64_t stage_mask,
     const uint64_t graphics_read = RIN_VK_ACCESS_2_INDEX_READ_BIT |
                                    RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT;
     const uint64_t graphics_write = RIN_VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-    const uint64_t compute_access =
+    const uint64_t shader_access =
         RIN_VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
         RIN_VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    const uint64_t graphics_shader_stages =
+        RIN_VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
     const uint64_t host_access = RIN_VK_ACCESS_2_HOST_READ_BIT |
                                  RIN_VK_ACCESS_2_HOST_WRITE_BIT;
     const uint64_t generic_access = RIN_VK_ACCESS_2_MEMORY_READ_BIT |
@@ -310,16 +345,20 @@ int rin_vk_sync2_access_stage_valid(uint64_t stage_mask,
         return 0;
     if ((access_mask & graphics_read) != 0u &&
         (effective_stages & (RIN_VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+                             RIN_VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
                              RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
         return 0;
     if ((access_mask & graphics_write) != 0u &&
         (effective_stages &
          (RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+          RIN_VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
           RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
         return 0;
-    if ((access_mask & compute_access) != 0u &&
+    if ((access_mask & shader_access) != 0u &&
         (effective_stages &
-         (RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+         (graphics_shader_stages |
+          RIN_VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
+          RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
           RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
         return 0;
     if ((access_mask & transfer_access) != 0u &&

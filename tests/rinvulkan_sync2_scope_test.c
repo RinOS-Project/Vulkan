@@ -33,7 +33,47 @@ static void test_transfer_stage_aliases(void) {
     assert(rin_vk_sync2_recorded_stage_mask_valid(
         RIN_VK_PIPELINE_STAGE_2_COPY_BIT));
     assert(!rin_vk_sync2_recorded_stage_mask_valid(0u));
-    assert(!rin_vk_sync2_stage_mask(UINT64_C(0x8), &runtime_mask));
+    assert(!rin_vk_sync2_stage_mask(UINT64_C(0x80000000), &runtime_mask));
+}
+
+static void test_graphics_shader_stage_projection(void) {
+    const uint64_t graphics_stages =
+        RIN_VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+        RIN_VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
+        RIN_VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT;
+    uint64_t runtime_mask = 0u;
+    uint32_t legacy_mask = 0u;
+
+    assert(RIN_VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT == UINT64_C(0x2));
+    assert(RIN_VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT == UINT64_C(0x8));
+    assert(RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT == UINT64_C(0x80));
+    assert(RIN_VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT == UINT64_C(0x8000));
+    assert(rin_vk_sync2_stage_mask(graphics_stages, &runtime_mask));
+    assert(runtime_mask == RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS);
+    assert(rin_vk_sync2_stage_mask(
+        RIN_VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, &runtime_mask));
+    assert(runtime_mask ==
+           (RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS |
+            RIN_GPU_VULKAN_BARRIER_STAGE_COMPUTE));
+
+    assert(rin_vk_sync2_legacy_wait_stage_mask(
+        RIN_VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT, &legacy_mask));
+    assert(legacy_mask == RIN_VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT);
+    assert(rin_vk_sync2_semaphore_wait_stage_mask(
+        RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, &legacy_mask));
+    assert(legacy_mask == RIN_VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT);
+    assert(rin_vk_sync2_semaphore_wait_stage_mask(
+        RIN_VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, &legacy_mask));
+    assert(legacy_mask == (RIN_VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT |
+                           RIN_VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT));
+    assert(rin_vk_sync2_legacy_stage_mask(
+        RIN_VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, &runtime_mask));
+    assert(runtime_mask == RIN_VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT);
 }
 
 static void test_scope_sensitive_legacy_wait_stages(void) {
@@ -57,7 +97,7 @@ static void test_scope_sensitive_legacy_wait_stages(void) {
             RIN_VK_PIPELINE_STAGE_2_COPY_BIT,
         &legacy_mask));
     assert(legacy_mask == UINT32_C(0x00010000));
-    assert(!rin_vk_sync2_semaphore_wait_stage_mask(UINT64_C(0x8),
+    assert(!rin_vk_sync2_semaphore_wait_stage_mask(UINT64_C(0x80000000),
                                                    &legacy_mask));
 }
 
@@ -111,7 +151,8 @@ static void test_legacy_wait_stage_projection(void) {
     assert(legacy_mask == UINT32_C(0x00005000));
     assert(rin_vk_sync2_legacy_wait_stage_mask(0u, &legacy_mask));
     assert(legacy_mask == 0u);
-    assert(!rin_vk_sync2_legacy_wait_stage_mask(UINT64_C(0x8), &legacy_mask));
+    assert(!rin_vk_sync2_legacy_wait_stage_mask(UINT64_C(0x80000000),
+                                                &legacy_mask));
     assert(!rin_vk_sync2_legacy_wait_stage_mask(
         RIN_VK_PIPELINE_STAGE_2_COPY_BIT, NULL));
 }
@@ -223,6 +264,58 @@ static void test_vertex_input_access_bit_values(void) {
         RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT, 0u));
 }
 
+static void test_graphics_shader_storage_barrier_scope(void) {
+    RinGpuVulkanTransferOpV2 operation;
+    uint64_t runtime_mask = 0u;
+    const uint64_t storage_access =
+        RIN_VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+        RIN_VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    memset(&operation, 0, sizeof(operation));
+
+    assert(rin_vk_sync2_access_mask(
+        storage_access, RIN_VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT, 0u,
+        &runtime_mask));
+    assert(runtime_mask ==
+           (RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ |
+            RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_WRITE));
+    assert(rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        RIN_VK_ACCESS_2_SHADER_STORAGE_READ_BIT, 0u));
+    assert(rin_vk_sync2_barrier_scopes(
+        RIN_VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+        RIN_VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+        RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        RIN_VK_ACCESS_2_SHADER_STORAGE_READ_BIT, &operation));
+    assert(operation.barrier.src_stage_mask ==
+           RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS);
+    assert(operation.barrier.src_access_mask ==
+           RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_WRITE);
+    assert(operation.barrier.dst_stage_mask ==
+           RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS);
+    assert(operation.barrier.dst_access_mask ==
+           RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ);
+
+    assert(rin_vk_sync2_access_mask(
+        storage_access,
+        RIN_VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+            RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        0u, &runtime_mask));
+    assert(runtime_mask ==
+           (RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ |
+            RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_WRITE |
+            RIN_GPU_VULKAN_BARRIER_ACCESS_COMPUTE_READ |
+            RIN_GPU_VULKAN_BARRIER_ACCESS_COMPUTE_WRITE));
+    assert(!rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT,
+        RIN_VK_ACCESS_2_SHADER_STORAGE_READ_BIT, 0u));
+    assert(!rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        RIN_VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, 0u));
+    assert(!rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+        RIN_VK_ACCESS_2_SHADER_STORAGE_READ_BIT, 0u));
+}
+
 static void test_generic_memory_access_follows_stage_scope(void) {
     uint64_t runtime_mask = 0u;
     assert(rin_vk_sync2_access_mask(
@@ -310,11 +403,13 @@ static void test_barrier_scope_packet_mapping(void) {
 int main(void) {
     test_supported_dependency_flags();
     test_transfer_stage_aliases();
+    test_graphics_shader_stage_projection();
     test_scope_sensitive_legacy_wait_stages();
     test_legacy_wait_stage_projection();
     test_legacy_stage_conversion();
     test_compute_storage_barrier_scope();
     test_vertex_input_access_bit_values();
+    test_graphics_shader_storage_barrier_scope();
     test_generic_memory_access_follows_stage_scope();
     test_access_requires_a_compatible_supported_stage();
     test_barrier_scope_packet_mapping();
