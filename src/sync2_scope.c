@@ -225,6 +225,7 @@ int rin_vk_sync2_access_mask(uint64_t public_mask, uint64_t stage_mask,
     const uint64_t memory_write = RIN_VK_ACCESS_2_MEMORY_WRITE_BIT;
     const uint64_t known = RIN_VK_ACCESS_2_TRANSFER_READ_BIT |
                            RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT |
+                           RIN_VK_ACCESS_2_INDEX_READ_BIT |
                            RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT |
                            RIN_VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
                            RIN_VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
@@ -238,7 +239,8 @@ int rin_vk_sync2_access_mask(uint64_t public_mask, uint64_t stage_mask,
     if (!sync2_stage_mask_for_scope(stage_mask, second_scope,
                                     &runtime_stages))
         return 0;
-    if ((public_mask & RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT) != 0u)
+    if ((public_mask & (RIN_VK_ACCESS_2_INDEX_READ_BIT |
+                        RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT)) != 0u)
         runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ;
     if ((public_mask & RIN_VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT) != 0u)
         runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_WRITE;
@@ -286,7 +288,8 @@ int rin_vk_sync2_access_stage_valid(uint64_t stage_mask,
                                     uint32_t second_scope) {
     const uint64_t transfer_access = RIN_VK_ACCESS_2_TRANSFER_READ_BIT |
                                      RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT;
-    const uint64_t graphics_read = RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT;
+    const uint64_t graphics_read = RIN_VK_ACCESS_2_INDEX_READ_BIT |
+                                   RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT;
     const uint64_t graphics_write = RIN_VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
     const uint64_t compute_access =
         RIN_VK_ACCESS_2_SHADER_STORAGE_READ_BIT |

@@ -197,6 +197,32 @@ static void test_compute_storage_barrier_scope(void) {
            RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_READ);
 }
 
+static void test_vertex_input_access_bit_values(void) {
+    uint64_t runtime_mask = 0u;
+    assert(RIN_VK_ACCESS_2_INDEX_READ_BIT == UINT64_C(0x2));
+    assert(RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT == UINT64_C(0x4));
+
+    assert(rin_vk_sync2_access_mask(
+        RIN_VK_ACCESS_2_INDEX_READ_BIT,
+        RIN_VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT, 0u, &runtime_mask));
+    assert(runtime_mask == RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ);
+    assert(rin_vk_sync2_access_mask(
+        RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT,
+        RIN_VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT, 0u, &runtime_mask));
+    assert(runtime_mask == RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ);
+    assert(rin_vk_sync2_access_mask(
+        RIN_VK_ACCESS_2_INDEX_READ_BIT |
+            RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT,
+        RIN_VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT, 0u, &runtime_mask));
+    assert(runtime_mask == RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ);
+    assert(!rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        RIN_VK_ACCESS_2_INDEX_READ_BIT, 0u));
+    assert(!rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT, 0u));
+}
+
 static void test_generic_memory_access_follows_stage_scope(void) {
     uint64_t runtime_mask = 0u;
     assert(rin_vk_sync2_access_mask(
@@ -288,6 +314,7 @@ int main(void) {
     test_legacy_wait_stage_projection();
     test_legacy_stage_conversion();
     test_compute_storage_barrier_scope();
+    test_vertex_input_access_bit_values();
     test_generic_memory_access_follows_stage_scope();
     test_access_requires_a_compatible_supported_stage();
     test_barrier_scope_packet_mapping();
