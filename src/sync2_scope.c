@@ -244,13 +244,25 @@ int rin_vk_sync2_access_mask(uint64_t public_mask, uint64_t stage_mask,
                              uint64_t* runtime_mask_out) {
     const uint64_t memory_read = RIN_VK_ACCESS_2_MEMORY_READ_BIT;
     const uint64_t memory_write = RIN_VK_ACCESS_2_MEMORY_WRITE_BIT;
+    const uint64_t shader_read = RIN_VK_ACCESS_2_UNIFORM_READ_BIT |
+                                 RIN_VK_ACCESS_2_SHADER_READ_BIT |
+                                 RIN_VK_ACCESS_2_SHADER_SAMPLED_READ_BIT |
+                                 RIN_VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+    const uint64_t shader_write = RIN_VK_ACCESS_2_SHADER_WRITE_BIT |
+                                  RIN_VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    const uint64_t graphics_read = RIN_VK_ACCESS_2_INDEX_READ_BIT |
+                                   RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT |
+                                   RIN_VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT |
+                                   RIN_VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+                                   RIN_VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+    const uint64_t graphics_write =
+        RIN_VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
+        RIN_VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     const uint64_t known = RIN_VK_ACCESS_2_TRANSFER_READ_BIT |
                            RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT |
-                           RIN_VK_ACCESS_2_INDEX_READ_BIT |
-                           RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT |
-                           RIN_VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
-                           RIN_VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
-                           RIN_VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT |
+                           RIN_VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT |
+                           shader_read | shader_write | graphics_read |
+                           graphics_write |
                            RIN_VK_ACCESS_2_HOST_READ_BIT |
                            RIN_VK_ACCESS_2_HOST_WRITE_BIT | memory_read |
                            memory_write;
@@ -260,18 +272,23 @@ int rin_vk_sync2_access_mask(uint64_t public_mask, uint64_t stage_mask,
     if (!sync2_stage_mask_for_scope(stage_mask, second_scope,
                                     &runtime_stages))
         return 0;
-    if ((public_mask & (RIN_VK_ACCESS_2_INDEX_READ_BIT |
-                        RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT)) != 0u)
-        runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ;
-    if ((public_mask & RIN_VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT) != 0u)
-        runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_WRITE;
-    if ((public_mask & RIN_VK_ACCESS_2_SHADER_STORAGE_READ_BIT) != 0u) {
+    if ((public_mask & RIN_VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT) != 0u) {
         if ((runtime_stages & RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS) != 0u)
             runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ;
         if ((runtime_stages & RIN_GPU_VULKAN_BARRIER_STAGE_COMPUTE) != 0u)
             runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_COMPUTE_READ;
     }
-    if ((public_mask & RIN_VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT) != 0u) {
+    if ((public_mask & graphics_read) != 0u)
+        runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ;
+    if ((public_mask & graphics_write) != 0u)
+        runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_WRITE;
+    if ((public_mask & shader_read) != 0u) {
+        if ((runtime_stages & RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS) != 0u)
+            runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ;
+        if ((runtime_stages & RIN_GPU_VULKAN_BARRIER_STAGE_COMPUTE) != 0u)
+            runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_COMPUTE_READ;
+    }
+    if ((public_mask & shader_write) != 0u) {
         if ((runtime_stages & RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS) != 0u)
             runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_WRITE;
         if ((runtime_stages & RIN_GPU_VULKAN_BARRIER_STAGE_COMPUTE) != 0u)
@@ -315,12 +332,25 @@ int rin_vk_sync2_access_mask(uint64_t public_mask, uint64_t stage_mask,
 int rin_vk_sync2_access_stage_valid(uint64_t stage_mask,
                                     uint64_t access_mask,
                                     uint32_t second_scope) {
+    const uint64_t indirect_access =
+        RIN_VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
     const uint64_t transfer_access = RIN_VK_ACCESS_2_TRANSFER_READ_BIT |
                                      RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT;
     const uint64_t graphics_read = RIN_VK_ACCESS_2_INDEX_READ_BIT |
                                    RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT;
-    const uint64_t graphics_write = RIN_VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    const uint64_t input_attachment_access =
+        RIN_VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT;
+    const uint64_t color_attachment_access =
+        RIN_VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+        RIN_VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    const uint64_t depth_stencil_access =
+        RIN_VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+        RIN_VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     const uint64_t shader_access =
+        RIN_VK_ACCESS_2_UNIFORM_READ_BIT |
+        RIN_VK_ACCESS_2_SHADER_READ_BIT |
+        RIN_VK_ACCESS_2_SHADER_WRITE_BIT |
+        RIN_VK_ACCESS_2_SHADER_SAMPLED_READ_BIT |
         RIN_VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
         RIN_VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
     const uint64_t graphics_shader_stages =
@@ -343,14 +373,31 @@ int rin_vk_sync2_access_stage_valid(uint64_t stage_mask,
     if (!sync2_effective_stage_mask_for_scope(stage_mask, second_scope,
                                               &effective_stages))
         return 0;
+    if ((access_mask & indirect_access) != 0u &&
+        (effective_stages & (RIN_VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
+                             RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
+        return 0;
     if ((access_mask & graphics_read) != 0u &&
         (effective_stages & (RIN_VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
                              RIN_VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
                              RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
         return 0;
-    if ((access_mask & graphics_write) != 0u &&
+    if ((access_mask & input_attachment_access) != 0u &&
+        (effective_stages &
+         (RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+          RIN_VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
+          RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
+        return 0;
+    if ((access_mask & color_attachment_access) != 0u &&
         (effective_stages &
          (RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+          RIN_VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
+          RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
+        return 0;
+    if ((access_mask & depth_stencil_access) != 0u &&
+        (effective_stages &
+         (RIN_VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+          RIN_VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
           RIN_VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
           RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
         return 0;

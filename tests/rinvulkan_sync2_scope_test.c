@@ -264,6 +264,95 @@ static void test_vertex_input_access_bit_values(void) {
         RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT, 0u));
 }
 
+static void test_core_shader_and_attachment_access_masks(void) {
+    uint64_t runtime_mask = 0u;
+
+    assert(RIN_VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT == UINT64_C(0x1));
+    assert(RIN_VK_ACCESS_2_UNIFORM_READ_BIT == UINT64_C(0x8));
+    assert(RIN_VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT == UINT64_C(0x10));
+    assert(RIN_VK_ACCESS_2_SHADER_READ_BIT == UINT64_C(0x20));
+    assert(RIN_VK_ACCESS_2_SHADER_WRITE_BIT == UINT64_C(0x40));
+    assert(RIN_VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT == UINT64_C(0x80));
+    assert(RIN_VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT == UINT64_C(0x100));
+    assert(RIN_VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT ==
+           UINT64_C(0x200));
+    assert(RIN_VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT ==
+           UINT64_C(0x400));
+    assert(RIN_VK_ACCESS_2_SHADER_SAMPLED_READ_BIT ==
+           UINT64_C(0x0000000100000000));
+
+    assert(rin_vk_sync2_access_mask(
+        RIN_VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
+        RIN_VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, 0u, &runtime_mask));
+    assert(runtime_mask ==
+           (RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ |
+            RIN_GPU_VULKAN_BARRIER_ACCESS_COMPUTE_READ));
+    assert(rin_vk_sync2_access_mask(
+        RIN_VK_ACCESS_2_UNIFORM_READ_BIT |
+            RIN_VK_ACCESS_2_SHADER_READ_BIT |
+            RIN_VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+        RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0u, &runtime_mask));
+    assert(runtime_mask == RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ);
+    assert(rin_vk_sync2_access_mask(
+        RIN_VK_ACCESS_2_SHADER_READ_BIT | RIN_VK_ACCESS_2_SHADER_WRITE_BIT,
+        RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 0u, &runtime_mask));
+    assert(runtime_mask ==
+           (RIN_GPU_VULKAN_BARRIER_ACCESS_COMPUTE_READ |
+            RIN_GPU_VULKAN_BARRIER_ACCESS_COMPUTE_WRITE));
+    assert(rin_vk_sync2_access_mask(
+        RIN_VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT,
+        RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0u, &runtime_mask));
+    assert(runtime_mask == RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ);
+    assert(rin_vk_sync2_access_mask(
+        RIN_VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+            RIN_VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+        RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+            RIN_VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+        0u, &runtime_mask));
+    assert(runtime_mask == RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ);
+    assert(rin_vk_sync2_access_mask(
+        RIN_VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        RIN_VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT, 0u,
+        &runtime_mask));
+    assert(runtime_mask == RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_WRITE);
+}
+
+static void test_core_access_stage_compatibility(void) {
+    assert(rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+        RIN_VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT, 0u));
+    assert(!rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        RIN_VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT, 0u));
+    assert(rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        RIN_VK_ACCESS_2_UNIFORM_READ_BIT, 0u));
+    assert(!rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_COPY_BIT,
+        RIN_VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, 0u));
+    assert(rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        RIN_VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT, 0u));
+    assert(!rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        RIN_VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT, 0u));
+    assert(rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        RIN_VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT, 0u));
+    assert(!rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        RIN_VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT, 0u));
+    assert(rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+        RIN_VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT, 0u));
+    assert(!rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        RIN_VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, 0u));
+    assert(!rin_vk_sync2_access_mask(
+        UINT64_C(0x8000000000000000), RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        0u, (uint64_t[1]){0u}));
+}
+
 static void test_graphics_shader_storage_barrier_scope(void) {
     RinGpuVulkanTransferOpV2 operation;
     uint64_t runtime_mask = 0u;
@@ -336,7 +425,7 @@ static void test_generic_memory_access_follows_stage_scope(void) {
         RIN_VK_ACCESS_2_MEMORY_READ_BIT | RIN_VK_ACCESS_2_MEMORY_WRITE_BIT,
         RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0u, &runtime_mask));
     assert(runtime_mask == RIN_GPU_VULKAN_BARRIER_ACCESS_ALL);
-    assert(!rin_vk_sync2_access_mask(UINT64_C(0x20),
+    assert(!rin_vk_sync2_access_mask(UINT64_C(0x8000000000000000),
                                     RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 0u,
                                     &runtime_mask));
     assert(!rin_vk_sync2_access_mask(RIN_VK_ACCESS_2_MEMORY_READ_BIT, 0u,
@@ -409,6 +498,8 @@ int main(void) {
     test_legacy_stage_conversion();
     test_compute_storage_barrier_scope();
     test_vertex_input_access_bit_values();
+    test_core_shader_and_attachment_access_masks();
+    test_core_access_stage_compatibility();
     test_graphics_shader_storage_barrier_scope();
     test_generic_memory_access_follows_stage_scope();
     test_access_requires_a_compatible_supported_stage();
