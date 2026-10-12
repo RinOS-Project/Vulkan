@@ -33,7 +33,8 @@ typedef enum RinVulkanExampleRuntimeLifecycleStageV1 {
     RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_STAGE_NONE = 0,
     RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_STAGE_UNBIND = 1,
     RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_STAGE_SHUTDOWN = 2,
-    RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_STAGE_DISCONNECT = 3
+    RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_STAGE_DISCONNECT = 3,
+    RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_STAGE_PRODUCT_PLATFORM = 4
 } RinVulkanExampleRuntimeLifecycleStageV1;
 
 typedef enum RinVulkanExampleRuntimeLifecycleResultV1 {
@@ -41,6 +42,8 @@ typedef enum RinVulkanExampleRuntimeLifecycleResultV1 {
     RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_INVALID = -1,
     RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_ACTION_FAILED = -2
 } RinVulkanExampleRuntimeLifecycleResultV1;
+
+typedef int (*RinVulkanExampleRuntimeProductCleanupV1)(void* context);
 
 static inline int rin_vulkan_example_runtime_lifecycle_cleanup_v1(
     RinVulkanExampleRuntimeLifecycleV1* lifecycle,
@@ -102,6 +105,43 @@ static inline int rin_vulkan_example_runtime_lifecycle_cleanup_v1(
     }
 
     return RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_OK;
+}
+
+/* Re-entry cleanup preserves dependency order: product/queue resources first,
+ * then the runtime binding, runtime, and catalog. A failed stage keeps its
+ * owner state intact so the next entry can retry it. */
+static inline int rin_vulkan_example_runtime_lifecycle_cleanup_entry_v1(
+    RinVulkanExampleRuntimeLifecycleV1* lifecycle,
+    const RinVulkanExampleRuntimeLifecycleActionsV1* actions,
+    RinVulkanExampleRuntimeProductCleanupV1 cleanup_product,
+    void* product_context, uint32_t* failed_stage_out,
+    int* action_result_out) {
+    int action_result;
+
+    if (!lifecycle || !actions || !cleanup_product || !product_context ||
+        !failed_stage_out || !action_result_out ||
+        lifecycle->struct_size != sizeof(*lifecycle) ||
+        lifecycle->version !=
+            RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_V1_VERSION ||
+        (lifecycle->flags &
+         ~RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_KNOWN_FLAGS) != 0u ||
+        lifecycle->reserved != 0u || actions->struct_size != sizeof(*actions) ||
+        actions->version != RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_V1_VERSION ||
+        !actions->context || !actions->unbind_runtime ||
+        !actions->shutdown_runtime || !actions->disconnect_catalog)
+        return RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_INVALID;
+
+    *failed_stage_out = RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_STAGE_NONE;
+    *action_result_out = 0;
+    action_result = cleanup_product(product_context);
+    if (action_result != 0) {
+        *failed_stage_out =
+            RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_STAGE_PRODUCT_PLATFORM;
+        *action_result_out = action_result;
+        return RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_ACTION_FAILED;
+    }
+    return rin_vulkan_example_runtime_lifecycle_cleanup_v1(
+        lifecycle, actions, failed_stage_out, action_result_out);
 }
 
 #endif

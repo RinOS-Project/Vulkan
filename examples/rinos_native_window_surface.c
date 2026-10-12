@@ -246,7 +246,13 @@ static int cleanup_disconnect_rinos_catalog(void* context) {
     return rin_vulkan_rinos_catalog_disconnect_v1(&g_rinos_vulkan_catalog);
 }
 
-static void cleanup_rinos_runtime(int* exit_status) {
+static int cleanup_rinos_product_platform_action(void* context) {
+    (void)context;
+    return cleanup_rinos_product_platform() ? 0 :
+        RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_ACTION_FAILED;
+}
+
+static int cleanup_rinos_owned_state(void) {
     RinVulkanExampleRuntimeLifecycleActionsV1 actions;
     uint32_t failed_stage = RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_STAGE_NONE;
     int action_result = 0;
@@ -259,14 +265,17 @@ static void cleanup_rinos_runtime(int* exit_status) {
     actions.unbind_runtime = cleanup_unbind_rinos_runtime;
     actions.shutdown_runtime = cleanup_shutdown_rinos_runtime;
     actions.disconnect_catalog = cleanup_disconnect_rinos_catalog;
-    result = rin_vulkan_example_runtime_lifecycle_cleanup_v1(
-        &g_rinos_vulkan_lifecycle, &actions, &failed_stage, &action_result);
+    result = rin_vulkan_example_runtime_lifecycle_cleanup_entry_v1(
+        &g_rinos_vulkan_lifecycle, &actions,
+        cleanup_rinos_product_platform_action, &g_rinos_product_platform,
+        &failed_stage, &action_result);
     if (result != RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_OK) {
         fprintf(stderr,
-                "RinVk runtime lifecycle cleanup failed at stage %u: %d (%d)\n",
+                "RinVk owned-state cleanup failed at stage %u: %d (%d)\n",
                 failed_stage, result, action_result);
-        *exit_status = 1;
+        return 0;
     }
+    return 1;
 }
 
 static int bind_admitted_vulkan_catalog(void) {
@@ -985,6 +994,9 @@ static int rinos_native_window_surface_main(void) {
                 "previous Compositor completion is still registered\n");
         return 1;
     }
+#if defined(__rinos__)
+    if (!cleanup_rinos_owned_state()) return 1;
+#endif
     memset(&g_native_window_completion, 0,
            sizeof(g_native_window_completion));
 
@@ -1173,12 +1185,7 @@ cleanup:
     if (surface != 0u) vkDestroySurfaceKHR(instance, surface, NULL);
     if (instance) vkDestroyInstance(instance, NULL);
 #if defined(__rinos__)
-    if (!cleanup_rinos_product_platform()) {
-        /* Keep the SDK runtime alive for any callback retained by the ICD. */
-        exit_status = 1;
-    } else {
-        cleanup_rinos_runtime(&exit_status);
-    }
+    if (!cleanup_rinos_owned_state()) exit_status = 1;
 #endif
     if (window != RIN_WINDOW_HANDLE_INVALID) {
         if (g_native_window_completion_registered != 0u) {
