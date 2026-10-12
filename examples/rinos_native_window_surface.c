@@ -14,14 +14,54 @@
 #if defined(__rinos__)
 #include <rin/base.h>
 #include <rinvulkan/rinos_catalog_v1.h>
+#include "rinos_native_window_runtime_lifecycle_v1.h"
 #include "rinos_sdk_target_backend_v1.h"
 #include <stdio.h>
 #include <string.h>
 
 static RinVulkanRinOSCatalogV1 g_rinos_vulkan_catalog;
 static RinGpuVulkanRuntimeV1 g_rinos_vulkan_runtime;
-static uint32_t g_rinos_vulkan_runtime_initialized;
-static uint32_t g_rinos_vulkan_runtime_bound;
+static RinVulkanExampleRuntimeLifecycleV1 g_rinos_vulkan_lifecycle = {
+    sizeof(RinVulkanExampleRuntimeLifecycleV1),
+    RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_V1_VERSION, 0u, 0u};
+
+static int cleanup_unbind_rinos_runtime(void* context) {
+    (void)context;
+    return rin_gpu_vulkan_icd_unbind_runtime(&g_rinos_vulkan_runtime);
+}
+
+static int cleanup_shutdown_rinos_runtime(void* context) {
+    (void)context;
+    return rin_gpu_vulkan_runtime_shutdown(&g_rinos_vulkan_runtime);
+}
+
+static int cleanup_disconnect_rinos_catalog(void* context) {
+    (void)context;
+    return rin_vulkan_rinos_catalog_disconnect_v1(&g_rinos_vulkan_catalog);
+}
+
+static void cleanup_rinos_runtime(int* exit_status) {
+    RinVulkanExampleRuntimeLifecycleActionsV1 actions;
+    uint32_t failed_stage = RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_STAGE_NONE;
+    int action_result = 0;
+    int result;
+
+    memset(&actions, 0, sizeof(actions));
+    actions.struct_size = sizeof(actions);
+    actions.version = RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_V1_VERSION;
+    actions.context = &g_rinos_vulkan_lifecycle;
+    actions.unbind_runtime = cleanup_unbind_rinos_runtime;
+    actions.shutdown_runtime = cleanup_shutdown_rinos_runtime;
+    actions.disconnect_catalog = cleanup_disconnect_rinos_catalog;
+    result = rin_vulkan_example_runtime_lifecycle_cleanup_v1(
+        &g_rinos_vulkan_lifecycle, &actions, &failed_stage, &action_result);
+    if (result != RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_OK) {
+        fprintf(stderr,
+                "RinVk runtime lifecycle cleanup failed at stage %u: %d (%d)\n",
+                failed_stage, result, action_result);
+        *exit_status = 1;
+    }
+}
 
 static int bind_admitted_vulkan_catalog(void) {
     uint64_t handle_secret = 0u;
@@ -29,6 +69,10 @@ static int bind_admitted_vulkan_catalog(void) {
     RinResult sdk_result;
     int result;
 
+    if (g_rinos_vulkan_lifecycle.flags != 0u) {
+        fprintf(stderr, "RinVk runtime lifecycle still owns resources\n");
+        return 0;
+    }
     random_bytes.address = (uint64_t)(uintptr_t)&handle_secret;
     random_bytes.size = sizeof(handle_secret);
     sdk_result = rin_random_fill_v1(random_bytes);
@@ -38,6 +82,9 @@ static int bind_admitted_vulkan_catalog(void) {
         return 0;
     }
     result = rin_vulkan_rinos_catalog_connect_v1(&g_rinos_vulkan_catalog);
+    if (g_rinos_vulkan_catalog.struct_size != 0u)
+        g_rinos_vulkan_lifecycle.flags |=
+            RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_CATALOG_CONNECTED;
     if (result != RIN_GPU_VULKAN_OK) {
         fprintf(stderr, "admitted Vulkan catalog query failed: %d\n", result);
         memset(&handle_secret, 0, sizeof(handle_secret));
@@ -52,13 +99,15 @@ static int bind_admitted_vulkan_catalog(void) {
                 result);
         return 0;
     }
-    g_rinos_vulkan_runtime_initialized = 1u;
+    g_rinos_vulkan_lifecycle.flags |=
+        RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_RUNTIME_INITIALIZED;
     result = rin_gpu_vulkan_icd_bind_runtime(&g_rinos_vulkan_runtime);
     if (result != RIN_GPU_VULKAN_OK) {
         fprintf(stderr, "RinVk ICD runtime binding failed: %d\n", result);
         return 0;
     }
-    g_rinos_vulkan_runtime_bound = 1u;
+    g_rinos_vulkan_lifecycle.flags |=
+        RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_RUNTIME_BOUND;
     return 1;
 }
 #endif
@@ -901,38 +950,7 @@ cleanup:
     if (surface != 0u) vkDestroySurfaceKHR(instance, surface, NULL);
     if (instance) vkDestroyInstance(instance, NULL);
 #if defined(__rinos__)
-    if (g_rinos_vulkan_runtime_bound != 0u) {
-        runtime_result = rin_gpu_vulkan_icd_unbind_runtime(
-            &g_rinos_vulkan_runtime);
-        if (runtime_result != RIN_GPU_VULKAN_OK) {
-            fprintf(stderr, "RinVk ICD runtime unbind failed: %d\n",
-                    runtime_result);
-            exit_status = 1;
-        } else {
-            g_rinos_vulkan_runtime_bound = 0u;
-        }
-    }
-    if (g_rinos_vulkan_runtime_initialized != 0u &&
-        g_rinos_vulkan_runtime_bound == 0u) {
-        runtime_result = rin_gpu_vulkan_runtime_shutdown(
-            &g_rinos_vulkan_runtime);
-        if (runtime_result != RIN_GPU_VULKAN_OK) {
-            fprintf(stderr, "RinVk runtime shutdown failed: %d\n",
-                    runtime_result);
-            exit_status = 1;
-        } else {
-            g_rinos_vulkan_runtime_initialized = 0u;
-        }
-    }
-    if (g_rinos_vulkan_catalog.struct_size != 0u) {
-        runtime_result = rin_vulkan_rinos_catalog_disconnect_v1(
-            &g_rinos_vulkan_catalog);
-        if (runtime_result != RIN_GPU_VULKAN_OK) {
-            fprintf(stderr, "Vulkan catalog channel close failed: %d\n",
-                    runtime_result);
-            exit_status = 1;
-        }
-    }
+    cleanup_rinos_runtime(&exit_status);
 #endif
     if (window != RIN_WINDOW_HANDLE_INVALID) {
         if (g_native_window_completion_registered != 0u) {
