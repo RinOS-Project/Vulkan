@@ -2591,7 +2591,7 @@ static RinVkResult record_process_wait_barrier(
     RinVkCommandPoolCreateInfo pool_info;
     RinVkCommandBufferAllocateInfo allocate_info;
     RinVkCommandBufferBeginInfo begin_info;
-    RinVkMemoryBarrier2 barrier;
+    RinVkMemoryBarrier2 barriers[2];
     RinVkDependencyInfo dependency;
     RinVkResult result;
 
@@ -2615,16 +2615,21 @@ static RinVkResult record_process_wait_barrier(
     result = vkBeginCommandBuffer(recorded->command_buffer, &begin_info);
     if (result != RIN_VK_SUCCESS) return result;
 
-    memset(&barrier, 0, sizeof(barrier));
-    barrier.sType = RIN_VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
-    barrier.srcStageMask = RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-    barrier.srcAccessMask = RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT;
-    barrier.dstStageMask = RIN_VK_PIPELINE_STAGE_2_HOST_BIT;
-    barrier.dstAccessMask = RIN_VK_ACCESS_2_HOST_READ_BIT;
+    memset(barriers, 0, sizeof(barriers));
+    barriers[0].sType = RIN_VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    barriers[0].srcStageMask = RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    barriers[0].srcAccessMask = RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    barriers[0].dstStageMask = RIN_VK_PIPELINE_STAGE_2_HOST_BIT;
+    barriers[0].dstAccessMask = RIN_VK_ACCESS_2_HOST_READ_BIT;
+    barriers[1].sType = RIN_VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    barriers[1].srcStageMask = RIN_VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT;
+    barriers[1].srcAccessMask = RIN_VK_ACCESS_2_SHADER_WRITE_BIT;
+    barriers[1].dstStageMask = RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    barriers[1].dstAccessMask = RIN_VK_ACCESS_2_SHADER_READ_BIT;
     memset(&dependency, 0, sizeof(dependency));
     dependency.sType = RIN_VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    dependency.memoryBarrierCount = 1u;
-    dependency.pMemoryBarriers = &barrier;
+    dependency.memoryBarrierCount = 2u;
+    dependency.pMemoryBarriers = barriers;
     vkCmdPipelineBarrier2(recorded->command_buffer, &dependency);
     return vkEndCommandBuffer(recorded->command_buffer);
 }
@@ -2643,6 +2648,8 @@ static RinVkResult test_process_submit_wait_completion(
     RinVkCommandBufferSubmitInfo command_buffer_info;
     RinVkSubmitInfo2 submit;
     const uint32_t submits_before = adapters->canonical_submit_calls;
+    const uint32_t barriers_before =
+        adapters->canonical_graphics_barrier_count;
     const uint32_t opaque_prepares_before =
         g_opaque_process_prepare_calls;
     const uint32_t opaque_submits_before = g_opaque_process_submit_calls;
@@ -2696,6 +2703,20 @@ static RinVkResult test_process_submit_wait_completion(
                 "process wait producer submit: result=%d canonical=%u expected=%u\n",
                 result, adapters->canonical_submit_calls,
                 submits_before + 1u);
+        goto done;
+    }
+    if (adapters->canonical_graphics_barrier_count != barriers_before + 2u ||
+        adapters->canonical_last_graphics_barrier.source_stage !=
+            RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS ||
+        adapters->canonical_last_graphics_barrier.source_access !=
+            RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_WRITE ||
+        adapters->canonical_last_graphics_barrier.destination_stage !=
+            RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS ||
+        adapters->canonical_last_graphics_barrier.destination_access !=
+            RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ) {
+        fprintf(stderr,
+                "public sync2 shader barrier did not reach process submit\n");
+        result = RIN_VK_ERROR_INITIALIZATION_FAILED;
         goto done;
     }
     if (adapters->deferred_completion_value == 0u ||
