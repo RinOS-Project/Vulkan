@@ -57,7 +57,8 @@ endif()
 # authenticated RinOS SDK process context.
 add_library(RinVulkanRinOSProcessBackend STATIC
     src/rinos_process_submit_backend_v1.c
-    src/rinos_catalog_v1.c)
+    src/rinos_catalog_v1.c
+    src/rinos_process_product_platform_v1.c)
 add_library(RinVulkan::RinOSProcessBackend ALIAS
     RinVulkanRinOSProcessBackend)
 target_compile_features(RinVulkanRinOSProcessBackend PUBLIC c_std_11)
@@ -97,7 +98,8 @@ if(RINVULKAN_BUILD_RINOS_NATIVE_WINDOW_EXAMPLE)
     target_compile_features(rinvulkan-native-window-surface-example
         PRIVATE c_std_11)
     target_link_libraries(rinvulkan-native-window-surface-example
-        PRIVATE RinVulkan::RinVulkan RinRuntime::RinRuntime)
+        PRIVATE RinVulkan::RinVulkan RinVulkan::RinOSProcessBackend
+                RinRuntime::RinRuntime)
     if(MSVC)
         target_compile_options(rinvulkan-native-window-surface-example
             PRIVATE /W4)

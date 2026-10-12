@@ -228,10 +228,12 @@ typedef int (*RinVulkanProductSubmitV3Fn)(
     void* context, const RinVulkanProductSubmissionV3* submission,
     const RinVulkanProductResourceV1* resources, uint32_t resource_count);
 
-/* OS-Core owns the adapter object and all physical execution.  The Vulkan
- * library sees only this fixed, API-neutral product contract.  A missing
- * callback is rejected during binding; no callback is interpreted as a
- * software-success path. */
+/* The platform owner owns the adapter object and all physical execution. The
+ * Vulkan library sees only this fixed, API-neutral product contract. The V1
+ * prepare/submit callbacks are an inseparable pair. Both may be absent only
+ * for a V6 canonical process-submit route; submissions outside that route
+ * require a separately bound native V2/V3 callback pair or are unsupported.
+ * Missing callbacks never imply software success. */
 typedef struct RinVulkanProductPlatformV1 {
     uint32_t struct_size;
     uint32_t version;
@@ -253,6 +255,8 @@ typedef struct RinVulkanProductPlatformV2 {
     uint32_t struct_size;
     uint32_t version;
     RinVulkanProductPlatformV1* base;
+    /* An inseparable pair; both may be absent when the platform uses only
+     * canonical V6 process submission and does not accept native queue waits. */
     RinVulkanProductPrepareSubmissionV2Fn prepare_submission_v2;
     RinVulkanProductSubmitV2Fn submit_v2;
     uint64_t reserved[2];
@@ -264,6 +268,8 @@ typedef struct RinVulkanProductPlatformV3 {
     uint32_t struct_size;
     uint32_t version;
     RinVulkanProductPlatformV2* base;
+    /* An inseparable pair; both may be absent when the platform uses only
+     * canonical V6 process submission and does not accept scoped waits. */
     RinVulkanProductPrepareSubmissionV3Fn prepare_submission_v3;
     RinVulkanProductSubmitV3Fn submit_v3;
     uint64_t reserved[2];

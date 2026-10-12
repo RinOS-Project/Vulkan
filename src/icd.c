@@ -5021,6 +5021,23 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
     memset(&submission_v3, 0, sizeof(submission_v3));
     memset(&process_receipt, 0, sizeof(process_receipt));
     memset(&process_status, 0, sizeof(process_status));
+    memset(waits, 0, sizeof(waits));
+    memset(immutable_waits, 0, sizeof(immutable_waits));
+    memset(scoped_waits, 0, sizeof(scoped_waits));
+    memset(immutable_scoped_waits, 0, sizeof(immutable_scoped_waits));
+    if (!use_process_commands_v6 && !use_v2 && !use_v3 &&
+        (!product->prepare_submission || !product->submit)) {
+        if (product_v3 && product_v3->prepare_submission_v3 &&
+            product_v3->submit_v3) {
+            use_v3 = 1;
+        } else if (product_v2 && product_v2->prepare_submission_v2 &&
+                   product_v2->submit_v2) {
+            use_v2 = 1;
+        } else {
+            release_product();
+            return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        }
+    }
     if (use_process_commands_v6 && !use_v2 && !use_v3) {
         product_result = submit_canonical_process_commands(
             product_v6, slot, &process_receipt);
@@ -6680,22 +6697,24 @@ int rin_gpu_vulkan_icd_unbind_runtime(RinGpuVulkanRuntimeV1* runtime) {
 
 static int product_platform_ready(RinVulkanProductPlatformV1* platform) {
     RinVulkanProductStatusV1 status;
+    const int has_legacy_prepare =
+        platform && platform->prepare_submission != NULL;
+    const int has_legacy_submit = platform && platform->submit != NULL;
     memset(&status, 0, sizeof(status));
     if (!platform ||
         platform->struct_size != sizeof(*platform) ||
         platform->version != RIN_VULKAN_PRODUCT_PLATFORM_VERSION ||
         !platform->context || !platform->get_status || !platform->poll ||
-        !platform->destroy_allocation || !platform->prepare_submission ||
-        !platform->submit || !platform->allocate ||
+        !platform->destroy_allocation ||
+        (has_legacy_prepare != has_legacy_submit) || !platform->allocate ||
         !platform->query_allocation ||
         platform->get_status(platform->context, &status) !=
             RIN_VULKAN_PRODUCT_OK ||
         status.struct_size != sizeof(status) ||
         status.version != RIN_VULKAN_PRODUCT_PLATFORM_VERSION ||
         status.flags != RIN_VULKAN_PRODUCT_STATUS_READY ||
-        status.queue_count == 0u || status.pending_submission_count != 0u ||
-        status.active_resource_lease_count != 0u ||
-        status.completed_values[0] != 0u)
+        status.queue_count == 0u ||
+        status.queue_count > RIN_VULKAN_PRODUCT_MAX_QUEUES)
         return 0;
     return 1;
 }
@@ -6756,8 +6775,9 @@ int rin_gpu_vulkan_icd_bind_product_platform_v2(
     if (!platform || (uintptr_t)platform == RIN_VK_ICD_BINDING_TRANSITION ||
         platform->struct_size != sizeof(*platform) ||
         platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V2_VERSION ||
-        !platform->base || !platform->prepare_submission_v2 ||
-        !platform->submit_v2 ||
+        !platform->base ||
+        ((platform->prepare_submission_v2 == NULL) !=
+         (platform->submit_v2 == NULL)) ||
         !wsi_zero_words(platform->reserved, 2u))
         return RIN_GPU_VULKAN_INVALID_ARGUMENT;
     if (!__atomic_compare_exchange_n(&g_product_binding_v2, &expected,
@@ -6851,8 +6871,10 @@ int rin_gpu_vulkan_icd_bind_product_platform_v3(
     if (!platform || (uintptr_t)platform == RIN_VK_ICD_BINDING_TRANSITION ||
         platform->struct_size != sizeof(*platform) ||
         platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V3_VERSION ||
-        !platform->base || !platform->prepare_submission_v3 ||
-        !platform->submit_v3 || !wsi_zero_words(platform->reserved, 2u))
+        !platform->base ||
+        ((platform->prepare_submission_v3 == NULL) !=
+         (platform->submit_v3 == NULL)) ||
+        !wsi_zero_words(platform->reserved, 2u))
         return RIN_GPU_VULKAN_INVALID_ARGUMENT;
     if (!__atomic_compare_exchange_n(&g_product_binding_v3, &expected,
                                      RIN_VK_ICD_BINDING_TRANSITION, 0,

@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: MIT */
 /* One-frame RinOS application example for the ordinary Compositor WSI path.
- * RinOS bootstrap imports only the admitted physical profile and queue routes;
- * product memory/submission/WSI bindings remain separate requirements. This
- * example never initializes the software host platform as a fallback. */
+ * It binds the admitted physical profile, process memory/resource adapter,
+ * and canonical process-submit route. Presentation remains a Compositor
+ * import and is not the separate VK_KHR_display direct-scanout path. */
 #if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -14,6 +14,7 @@
 #if defined(__rinos__)
 #include <rin/base.h>
 #include <rinvulkan/rinos_catalog_v1.h>
+#include <rinvulkan/rinos_process_product_platform_v1.h>
 #include "rinos_native_window_runtime_lifecycle_v1.h"
 #include "rinos_sdk_target_backend_v1.h"
 #include <stdio.h>
@@ -21,9 +22,214 @@
 
 static RinVulkanRinOSCatalogV1 g_rinos_vulkan_catalog;
 static RinGpuVulkanRuntimeV1 g_rinos_vulkan_runtime;
+static RinVulkanRinOSProcessProductPlatformV1 g_rinos_product_platform;
+static RinVulkanRinOSProcessSubmitBackendV4 g_rinos_process_submit_backend;
+static uint32_t g_rinos_product_binding_mask;
 static RinVulkanExampleRuntimeLifecycleV1 g_rinos_vulkan_lifecycle = {
     sizeof(RinVulkanExampleRuntimeLifecycleV1),
     RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_V1_VERSION, 0u, 0u};
+
+enum {
+    RINOS_PRODUCT_BIND_V1 = 1u << 0,
+    RINOS_PRODUCT_BIND_V2 = 1u << 1,
+    RINOS_PRODUCT_BIND_V3 = 1u << 2,
+    RINOS_PRODUCT_BIND_V4 = 1u << 3,
+    RINOS_PRODUCT_BIND_V5 = 1u << 4,
+    RINOS_PRODUCT_BIND_V6 = 1u << 5,
+    RINOS_PRODUCT_BIND_V7 = 1u << 6,
+    RINOS_PRODUCT_BIND_V8 = 1u << 7
+};
+
+static int bind_rinos_product_platform(uint64_t device_id,
+                                       uint64_t device_generation,
+                                       uint32_t queue_family) {
+    RinVulkanRinOSQueueCreateInfoV1 queue_info;
+    RinVulkanRinOSProcessQueueMapV4 mappings[
+        RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V4_MAX_QUEUE_MAPPINGS];
+    uint32_t mapping_count = 0u;
+    int result;
+
+    if (device_id == 0u || device_generation == 0u ||
+        g_rinos_product_binding_mask != 0u ||
+        g_rinos_product_platform.struct_size != 0u ||
+        g_rinos_process_submit_backend.struct_size != 0u) {
+        fprintf(stderr, "RinOS product-platform lifecycle is not empty\n");
+        return 0;
+    }
+    memset(&queue_info, 0, sizeof(queue_info));
+    queue_info.queue_family_index = queue_family;
+    queue_info.queue_count = 1u;
+    memset(mappings, 0, sizeof(mappings));
+    result = rin_vulkan_rinos_catalog_build_queue_maps_v1(
+        &g_rinos_vulkan_catalog, device_id, device_generation, &queue_info,
+        1u, mappings,
+        RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V4_MAX_QUEUE_MAPPINGS,
+        &mapping_count);
+    if (result != RIN_GPU_VULKAN_OK || mapping_count != 1u) {
+        fprintf(stderr, "RinOS queue-route admission failed: %d (%u)\n",
+                result, mapping_count);
+        return 0;
+    }
+    result = rin_vulkan_rinos_process_product_platform_v1_init(
+        &g_rinos_product_platform, device_id, device_generation);
+    if (result != RIN_VULKAN_PRODUCT_OK) {
+        fprintf(stderr, "RinOS product-platform initialization failed: %d\n",
+                result);
+        return 0;
+    }
+
+#define RINOS_BIND_PRODUCT(stage, expression, label)                        \
+    do {                                                                     \
+        result = (expression);                                               \
+        if (result != RIN_GPU_VULKAN_OK) {                                   \
+            fprintf(stderr, "%s failed: %d\n", (label), result);           \
+            return 0;                                                        \
+        }                                                                    \
+        g_rinos_product_binding_mask |= (stage);                             \
+    } while (0)
+
+    RINOS_BIND_PRODUCT(
+        RINOS_PRODUCT_BIND_V1,
+        rin_gpu_vulkan_icd_bind_product_platform(
+            &g_rinos_product_platform.platform_v1),
+        "bind product platform V1");
+    RINOS_BIND_PRODUCT(
+        RINOS_PRODUCT_BIND_V2,
+        rin_gpu_vulkan_icd_bind_product_platform_v2(
+            &g_rinos_product_platform.platform_v2),
+        "bind product platform V2");
+    RINOS_BIND_PRODUCT(
+        RINOS_PRODUCT_BIND_V3,
+        rin_gpu_vulkan_icd_bind_product_platform_v3(
+            &g_rinos_product_platform.platform_v3),
+        "bind product platform V3");
+    RINOS_BIND_PRODUCT(
+        RINOS_PRODUCT_BIND_V4,
+        rin_gpu_vulkan_icd_bind_product_platform_v4(
+            &g_rinos_product_platform.platform_v4),
+        "bind product platform V4");
+    RINOS_BIND_PRODUCT(
+        RINOS_PRODUCT_BIND_V5,
+        rin_gpu_vulkan_icd_bind_product_platform_v5(
+            &g_rinos_product_platform.platform_v5),
+        "bind product platform V5");
+
+    result = rin_vulkan_rinos_process_submit_backend_v4_init(
+        &g_rinos_process_submit_backend,
+        &g_rinos_product_platform.platform_v5, device_id, device_generation,
+        mappings, mapping_count);
+    if (result != RIN_VULKAN_PRODUCT_OK) {
+        fprintf(stderr, "RinOS process-submit backend init failed: %d\n",
+                result);
+        return 0;
+    }
+    RINOS_BIND_PRODUCT(
+        RINOS_PRODUCT_BIND_V6,
+        rin_gpu_vulkan_icd_bind_product_platform_v6(
+            &g_rinos_process_submit_backend.platform_v6),
+        "bind product platform V6");
+    RINOS_BIND_PRODUCT(
+        RINOS_PRODUCT_BIND_V7,
+        rin_gpu_vulkan_icd_bind_product_platform_v7(
+            rin_vulkan_rinos_process_submit_backend_v4_platform_v7(
+                &g_rinos_process_submit_backend)),
+        "bind product platform V7");
+    RINOS_BIND_PRODUCT(
+        RINOS_PRODUCT_BIND_V8,
+        rin_gpu_vulkan_icd_bind_product_platform_v8(
+            rin_vulkan_rinos_process_submit_backend_v4_platform_v8(
+                &g_rinos_process_submit_backend)),
+        "bind product platform V8");
+#undef RINOS_BIND_PRODUCT
+    return 1;
+}
+
+static int cleanup_rinos_product_platform(void) {
+    int result;
+
+#define RINOS_UNBIND_PRODUCT(stage, expression, label)                      \
+    do {                                                                     \
+        if ((g_rinos_product_binding_mask & (stage)) != 0u) {                \
+            result = (expression);                                           \
+            if (result != RIN_GPU_VULKAN_OK) {                               \
+                fprintf(stderr, "%s failed: %d; retaining parent lifetimes\n", \
+                        (label), result);                                    \
+                return 0;                                                    \
+            }                                                                \
+            g_rinos_product_binding_mask &= ~(stage);                       \
+        }                                                                    \
+    } while (0)
+
+    RINOS_UNBIND_PRODUCT(
+        RINOS_PRODUCT_BIND_V8,
+        rin_gpu_vulkan_icd_unbind_product_platform_v8(
+            &g_rinos_process_submit_backend.platform_v8),
+        "unbind product platform V8");
+    RINOS_UNBIND_PRODUCT(
+        RINOS_PRODUCT_BIND_V7,
+        rin_gpu_vulkan_icd_unbind_product_platform_v7(
+            &g_rinos_process_submit_backend.platform_v7),
+        "unbind product platform V7");
+    RINOS_UNBIND_PRODUCT(
+        RINOS_PRODUCT_BIND_V6,
+        rin_gpu_vulkan_icd_unbind_product_platform_v6(
+            &g_rinos_process_submit_backend.platform_v6),
+        "unbind product platform V6");
+    if (g_rinos_process_submit_backend.struct_size != 0u) {
+        result = rin_vulkan_rinos_process_submit_backend_v4_detach(
+            &g_rinos_process_submit_backend);
+        if (result != RIN_VULKAN_PRODUCT_OK) {
+            fprintf(stderr,
+                    "RinOS process-submit backend detach failed: %d; "
+                    "retaining parent lifetimes\n", result);
+            return 0;
+        }
+    }
+    RINOS_UNBIND_PRODUCT(
+        RINOS_PRODUCT_BIND_V5,
+        rin_gpu_vulkan_icd_unbind_product_platform_v5(
+            &g_rinos_product_platform.platform_v5),
+        "unbind product platform V5");
+    RINOS_UNBIND_PRODUCT(
+        RINOS_PRODUCT_BIND_V4,
+        rin_gpu_vulkan_icd_unbind_product_platform_v4(
+            &g_rinos_product_platform.platform_v4),
+        "unbind product platform V4");
+    RINOS_UNBIND_PRODUCT(
+        RINOS_PRODUCT_BIND_V3,
+        rin_gpu_vulkan_icd_unbind_product_platform_v3(
+            &g_rinos_product_platform.platform_v3),
+        "unbind product platform V3");
+    if ((g_rinos_product_binding_mask & RINOS_PRODUCT_BIND_V2) != 0u) {
+        result = rin_gpu_vulkan_icd_unbind_product_platform_v2(
+            &g_rinos_product_platform.platform_v2);
+        if (result != RIN_GPU_VULKAN_OK) {
+            fprintf(stderr,
+                    "unbind product platform V2 failed: %d; retaining "
+                    "parent lifetimes\n", result);
+            return 0;
+        }
+        g_rinos_product_binding_mask &=
+            ~(RINOS_PRODUCT_BIND_V2 | RINOS_PRODUCT_BIND_V1);
+    } else {
+        RINOS_UNBIND_PRODUCT(
+            RINOS_PRODUCT_BIND_V1,
+            rin_gpu_vulkan_icd_unbind_product_platform(
+                &g_rinos_product_platform.platform_v1),
+            "unbind product platform V1");
+    }
+    if (g_rinos_product_platform.struct_size != 0u) {
+        result = rin_vulkan_rinos_process_product_platform_v1_destroy(
+            &g_rinos_product_platform);
+        if (result != RIN_VULKAN_PRODUCT_OK) {
+            fprintf(stderr, "RinOS product-platform destroy failed: %d\n",
+                    result);
+            return 0;
+        }
+    }
+#undef RINOS_UNBIND_PRODUCT
+    return g_rinos_product_binding_mask == 0u;
+}
 
 static int cleanup_unbind_rinos_runtime(void* context) {
     (void)context;
@@ -283,6 +489,8 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
                                    uint32_t queue_family,
                                    RinVkSurfaceKHR surface,
                                    RinRuntimeGuiHandle window,
+                                   uint64_t product_device_id,
+                                   uint64_t product_device_generation,
                                    RinVulkanExampleFrameCompletion* completion) {
     static const char* const device_extensions[] = {
         RIN_VK_KHR_SWAPCHAIN_EXTENSION,
@@ -297,7 +505,7 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
     RinVkPhysicalDeviceFeatures2 physical_features;
     RinVkPhysicalDeviceSynchronization2Features synchronization2;
     RinVkSwapchainCreateInfoKHR swapchain_info;
-    RinVkSemaphoreCreateInfo semaphore_info;
+    RinVkFenceCreateInfo fence_info;
     RinVkCommandPoolCreateInfo pool_info;
     RinVkCommandBufferAllocateInfo command_info;
     RinVkCommandBufferBeginInfo begin_info;
@@ -310,8 +518,7 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
     RinVkDevice device = NULL;
     RinVkQueue queue = NULL;
     RinVkSwapchainKHR swapchain = 0u;
-    RinVkSemaphore image_available = 0u;
-    RinVkSemaphore render_complete = 0u;
+    RinVkFence image_acquired = 0u;
     RinVkCommandPool command_pool = NULL;
     RinVkCommandBuffer command_buffer = NULL;
     RinVkSurfaceFormatKHR selected_format = {0};
@@ -336,6 +543,11 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
     int submission_pending = 0;
     int exit_status = 1;
 
+#if !defined(__rinos__)
+    (void)product_device_id;
+    (void)product_device_generation;
+#endif
+
     memset(&capabilities, 0, sizeof(capabilities));
     vk_result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
         physical_device, surface, &capabilities);
@@ -349,12 +561,15 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
          capabilities.minImageCount > capabilities.maxImageCount) ||
         capabilities.maxImageArrayLayers == 0u ||
         (capabilities.supportedUsageFlags &
-         RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u ||
+         (RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+          RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) !=
+            (RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+             RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT) ||
         capabilities.currentTransform == 0u ||
         (capabilities.supportedTransforms & capabilities.currentTransform) ==
             0u) {
         fprintf(stderr,
-                "surface does not expose a valid one-frame transfer path\n");
+                "surface does not expose a valid transfer/readback path\n");
         goto cleanup;
     }
     composite_alpha = choose_composite_alpha(
@@ -504,6 +719,12 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
             (uint32_t)(sizeof(device_extensions) /
                        sizeof(device_extensions[0]));
         device_info.ppEnabledExtensionNames = device_extensions;
+#if defined(__rinos__)
+        if (!bind_rinos_product_platform(product_device_id,
+                                         product_device_generation,
+                                         queue_family))
+            goto cleanup;
+#endif
         vk_result = vkCreateDevice(physical_device, &device_info, NULL,
                                    &device);
     }
@@ -577,26 +798,14 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
         goto cleanup;
     }
 
-    memset(&semaphore_info, 0, sizeof(semaphore_info));
-    semaphore_info.sType = RIN_VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    vk_result = vkCreateSemaphore(device, &semaphore_info, NULL,
-                                  &image_available);
-    if (vk_result != RIN_VK_SUCCESS || image_available == 0u) {
+    memset(&fence_info, 0, sizeof(fence_info));
+    fence_info.sType = RIN_VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    vk_result = vkCreateFence(device, &fence_info, NULL, &image_acquired);
+    if (vk_result != RIN_VK_SUCCESS || image_acquired == 0u) {
         if (vk_result != RIN_VK_SUCCESS)
-            report_vk_failure("vkCreateSemaphore(image-available)",
-                              vk_result);
+            report_vk_failure("vkCreateFence(image-acquired)", vk_result);
         else
-            fprintf(stderr, "image-available semaphore is null\n");
-        goto cleanup;
-    }
-    vk_result = vkCreateSemaphore(device, &semaphore_info, NULL,
-                                  &render_complete);
-    if (vk_result != RIN_VK_SUCCESS || render_complete == 0u) {
-        if (vk_result != RIN_VK_SUCCESS)
-            report_vk_failure("vkCreateSemaphore(render-complete)",
-                              vk_result);
-        else
-            fprintf(stderr, "render-complete semaphore is null\n");
+            fprintf(stderr, "image-acquired fence is null\n");
         goto cleanup;
     }
 
@@ -627,7 +836,7 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
     }
 
     vk_result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
-                                      image_available, 0u, &image_index);
+                                      0u, image_acquired, &image_index);
     if (vk_result != RIN_VK_SUCCESS &&
         vk_result != RIN_VK_SUBOPTIMAL_KHR) {
         report_vk_failure("vkAcquireNextImageKHR", vk_result);
@@ -635,6 +844,11 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
     }
     if (image_index >= image_count) {
         fprintf(stderr, "acquired swapchain image index is out of range\n");
+        goto cleanup;
+    }
+    vk_result = vkWaitForFences(device, 1u, &image_acquired, 1u, UINT64_MAX);
+    if (vk_result != RIN_VK_SUCCESS) {
+        report_vk_failure("vkWaitForFences(image-acquired)", vk_result);
         goto cleanup;
     }
 
@@ -678,16 +892,10 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
     }
 
     {
-        const uint32_t wait_stage = RIN_VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
         memset(&submit_info, 0, sizeof(submit_info));
         submit_info.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submit_info.waitSemaphoreCount = 1u;
-        submit_info.pWaitSemaphores = &image_available;
-        submit_info.pWaitDstStageMask = &wait_stage;
         submit_info.commandBufferCount = 1u;
         submit_info.pCommandBuffers = &command_buffer;
-        submit_info.signalSemaphoreCount = 1u;
-        submit_info.pSignalSemaphores = &render_complete;
         vk_result = vkQueueSubmit(queue, 1u, &submit_info, 0u);
     }
     if (vk_result != RIN_VK_SUCCESS) {
@@ -696,10 +904,19 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
     }
     submission_pending = 1;
 
+    /* V6 canonical process submission has no native queue-wait callbacks.
+     * Complete this queue work before the ordinary surface hands pixels to
+     * the Compositor; this is not a direct-display/scanout path. */
+    vk_result = vkQueueWaitIdle(queue);
+    if (vk_result != RIN_VK_SUCCESS) {
+        report_vk_failure("vkQueueWaitIdle(before Compositor present)",
+                          vk_result);
+        goto cleanup;
+    }
+    submission_pending = 0;
+
     memset(&present_info, 0, sizeof(present_info));
     present_info.sType = RIN_VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-    present_info.waitSemaphoreCount = 1u;
-    present_info.pWaitSemaphores = &render_complete;
     present_info.swapchainCount = 1u;
     present_info.pSwapchains = &swapchain;
     present_info.pImageIndices = &image_index;
@@ -715,12 +932,6 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
                               : swapchain_present_result);
         goto cleanup;
     }
-    vk_result = vkQueueWaitIdle(queue);
-    if (vk_result != RIN_VK_SUCCESS) {
-        report_vk_failure("vkQueueWaitIdle", vk_result);
-        goto cleanup;
-    }
-    submission_pending = 0;
     vk_result = wait_for_compositor_commit(completion);
     if (vk_result != RIN_VK_SUCCESS) {
         report_vk_failure("Compositor damage/commit", vk_result);
@@ -738,10 +949,8 @@ cleanup:
     }
     if (device && command_pool != NULL)
         vkDestroyCommandPool(device, command_pool, NULL);
-    if (device && render_complete != 0u)
-        vkDestroySemaphore(device, render_complete, NULL);
-    if (device && image_available != 0u)
-        vkDestroySemaphore(device, image_available, NULL);
+    if (device && image_acquired != 0u)
+        vkDestroyFence(device, image_acquired, NULL);
     free(swapchain_images);
     if (device && swapchain != 0u)
         vkDestroySwapchainKHR(device, swapchain, NULL);
@@ -934,9 +1143,23 @@ static int rinos_native_window_surface_main(void) {
                 printf("RinOS native-window surface is supported by "
                        "device %u, queue family %u.\n", device_index, family);
                 free(queue_families);
+#if defined(__rinos__)
+                if (device_index >= g_rinos_vulkan_catalog.device_count) {
+                    fprintf(stderr,
+                            "runtime/catalog physical-device ordering diverged\n");
+                    goto cleanup;
+                }
                 exit_status = present_one_clear_frame(
                     physical_devices[device_index], family, surface, window,
+                    g_rinos_vulkan_catalog.devices[device_index].device_id,
+                    g_rinos_vulkan_catalog.devices[device_index]
+                        .device_generation,
                     &g_native_window_completion);
+#else
+                exit_status = present_one_clear_frame(
+                    physical_devices[device_index], family, surface, window,
+                    0u, 0u, &g_native_window_completion);
+#endif
                 goto cleanup;
             }
         }
@@ -950,7 +1173,12 @@ cleanup:
     if (surface != 0u) vkDestroySurfaceKHR(instance, surface, NULL);
     if (instance) vkDestroyInstance(instance, NULL);
 #if defined(__rinos__)
-    cleanup_rinos_runtime(&exit_status);
+    if (!cleanup_rinos_product_platform()) {
+        /* Keep the SDK runtime alive for any callback retained by the ICD. */
+        exit_status = 1;
+    } else {
+        cleanup_rinos_runtime(&exit_status);
+    }
 #endif
     if (window != RIN_WINDOW_HANDLE_INVALID) {
         if (g_native_window_completion_registered != 0u) {

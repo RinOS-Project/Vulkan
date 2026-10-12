@@ -21,13 +21,16 @@ callback; those images are not required to be direct-scanout allocations.
 Final-output scanout remains separate. On RinOS, the example binds the SDK
 target backend to the real `RIN_SYS_SDK_CALL` syscall, queries the authenticated
 `ringpu-capability` catalog, and binds admitted physical profiles into the
-process-local RinVk runtime before `vkCreateInstance`. The queue-route adapter
-can translate the actual device queue-create order into V4
-logical-to-physical mappings. This is catalog/bootstrap integration only: it
-does not yet compose the V1–V8 product memory, submission, and WSI platform
-owners needed to accept a production device and frame. It does not initialize
-the host software platform or silently fall back when the physical runtime is
-unavailable.
+process-local RinVk runtime before `vkCreateInstance`. Before device creation,
+it composes the SDK-backed V1–V5 memory/resource adapter with the V4
+logical-to-physical queue mapping and V6–V8 canonical process-submit adapter.
+The one-frame example uses the transfer/clear/readback operations supported by
+that canonical path; operations without a real provider remain unsupported.
+It completes queue work before handing pixels to the ordinary Compositor
+surface rather than pretending process-submit supports native wait
+semaphores. This is not a `VK_KHR_display` direct-scanout path. The example
+does not initialize the host software platform or silently fall back when the
+physical runtime is unavailable.
 
 For the RinOS x86_64 debug user-app artifact, build the focused Meson target
 from the repository root:
@@ -37,22 +40,21 @@ catalog entry or run at boot. The optional POSIX CMake target remains useful
 for host-side compilation and links RinRuntime's Compositor transport.
 
 `rinvulkan_rinos_process_submit_backend_v1.h` adds an opt-in RinOS SDK adapter
-for the V6 canonical process-submit callback. It binds authenticated process
-queue tokens, translates resource records, verifies the returned generation-
-bound receipt, and retains queue leases when release must be retried. It is a
-submit/lifetime slice only: it does not create the per-process Vulkan runtime,
-provide the V5 memory/resource parent, establish a trusted device profile, or
-register native-window WSI. Applications must quiesce and unbind V6 before
-detaching this adapter.
+for V6 canonical process-submit and V7/V8 process-compute object lifecycle.
+It binds authenticated process queue tokens, translates resource records,
+verifies generation-bound receipts, and retains queue leases when release must
+be retried. `rinos_process_product_platform_v1.h` supplies the SDK-backed
+status, allocation, mapping, synchronization, and resource-binding parent used
+by the app bootstrap. The sample unbinds V8→V6, detaches actual queue tokens,
+then releases the V5→V1 parent before the runtime. Native-window surface stays
+on RinRuntime's Compositor import path; physical-display WSI/provider
+registration and final scanout remain separate and are not claimed complete.
 
-The user-app target therefore still has no process-local production Vulkan
-runtime bootstrap. RinOS-SDK provides process-owned GPU allocation/queue calls,
-but no process API that creates or attaches the RinVulkan runtime and its
-device/WSI callbacks; the remaining platform objects are not yet composed by
-the application path. The sample reports real `vkCreateInstance`/device errors
-and exits; it does not manufacture a device, install a compatibility renderer,
-or fall back to the software backend. Building this artifact verifies the
-application source and app-link graph, not that the `.RIN` artifact builds or a
-hardware-backed frame is displayed. Keep app runtime/bootstrap and
-Compositor-present validation unchecked until the process binding and
-production WSI path are connected.
+The user-app target now has a process-local catalog/runtime and V1–V8
+SDK-backed memory/submit bootstrap for this supported transfer example. It
+reports real SDK/Vulkan errors; it does not manufacture a device, install a
+compatibility renderer, or fall back to the software backend. Building the
+artifact verifies the application source and app-link graph, not that the
+`.RIN` artifact builds or a hardware-backed frame is displayed. Host fixture
+success and provenance validity are separate evidence, and real-device
+validation remains open until the exact platform/GPU routing is tested.
