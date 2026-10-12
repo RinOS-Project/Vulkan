@@ -13893,7 +13893,8 @@ RinVkResult RIN_VKAPI_CALL vkCreateQueryPool(
     struct RinVkDevice_T* owner = device_slot(device);
     RinVkQueryPoolSlot* slot;
     RinVulkanProductPlatformV9* platform;
-    uint32_t index;
+    uint32_t pool_index;
+    uint32_t query_index;
     int status = RIN_VULKAN_PRODUCT_OK;
     (void)allocator;
     if (!query_pool_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
@@ -13910,7 +13911,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateQueryPool(
         return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
     platform = acquire_process_query_platform();
     if (!platform) return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
-    slot = reserve_query_pool_slot(owner, &index);
+    slot = reserve_query_pool_slot(owner, &pool_index);
     if (!slot) {
         release_product();
         return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
@@ -13918,8 +13919,8 @@ RinVkResult RIN_VKAPI_CALL vkCreateQueryPool(
     slot->query_type = create_info->queryType;
     slot->query_count = create_info->queryCount;
     slot->pipeline_statistics = create_info->pipelineStatistics;
-    for (index = 0u; index < slot->query_count; ++index) {
-        RinVkQueryValue* query = &slot->queries[index];
+    for (query_index = 0u; query_index < slot->query_count; ++query_index) {
+        RinVkQueryValue* query = &slot->queries[query_index];
         query->process_query_token = reserve_process_query_token();
         if (query->process_query_token == 0u) {
             status = RIN_VULKAN_PRODUCT_LIMIT;
@@ -13936,8 +13937,9 @@ RinVkResult RIN_VKAPI_CALL vkCreateQueryPool(
     }
     if (status != RIN_VULKAN_PRODUCT_OK) {
         int all_destroyed = 1;
-        for (index = 0u; index < slot->query_count; ++index) {
-            RinVkQueryValue* query = &slot->queries[index];
+        for (query_index = 0u; query_index < slot->query_count;
+             ++query_index) {
+            RinVkQueryValue* query = &slot->queries[query_index];
             if (query->process_query_active == 0u) continue;
             if (platform->destroy_process_query(
                     platform->context, query->process_query_token) ==
@@ -13957,7 +13959,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateQueryPool(
     }
     release_product();
     __atomic_store_n(&slot->state, 1u, __ATOMIC_RELEASE);
-    *query_pool_out = resource_handle(RIN_VK_QUERY_POOL_TAG, index,
+    *query_pool_out = resource_handle(RIN_VK_QUERY_POOL_TAG, pool_index,
                                        slot->generation);
     return RIN_VK_SUCCESS;
 }
