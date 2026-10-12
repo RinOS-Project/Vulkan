@@ -81,6 +81,29 @@ static void test_legacy_wait_stage_projection(void) {
     assert(rin_vk_sync2_legacy_wait_stage_mask(
         RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, &legacy_mask));
     assert(legacy_mask == UINT32_C(0x00010000));
+    /* Event/reset operations project a first scope: TOP is empty, while
+     * BOTTOM includes every preceding command. */
+    assert(rin_vk_sync2_legacy_wait_stage_mask(
+        RIN_VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, &legacy_mask));
+    assert(legacy_mask == 0u);
+    assert(rin_vk_sync2_legacy_wait_stage_mask(
+        RIN_VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, &legacy_mask));
+    assert(legacy_mask == UINT32_C(0x00010000));
+    assert(rin_vk_sync2_legacy_wait_stage_mask(
+        RIN_VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT |
+            RIN_VK_PIPELINE_STAGE_2_COPY_BIT,
+        &legacy_mask));
+    assert(legacy_mask == UINT32_C(0x00001000));
+    assert(rin_vk_sync2_legacy_wait_stage_mask(
+        RIN_VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT |
+            RIN_VK_PIPELINE_STAGE_2_COPY_BIT,
+        &legacy_mask));
+    assert(legacy_mask == UINT32_C(0x00010000));
+    assert(rin_vk_sync2_legacy_wait_stage_mask(
+        RIN_VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT |
+            RIN_VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+        &legacy_mask));
+    assert(legacy_mask == UINT32_C(0x00010000));
     assert(rin_vk_sync2_legacy_wait_stage_mask(
         RIN_VK_PIPELINE_STAGE_2_COPY_BIT |
             RIN_VK_PIPELINE_STAGE_2_HOST_BIT,

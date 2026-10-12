@@ -178,13 +178,25 @@ int rin_vk_sync2_legacy_wait_stage_mask(uint64_t public_mask,
     const uint32_t legacy_graphics = UINT32_C(0x00000404);
     const uint32_t legacy_compute =
         RIN_VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    uint64_t source_scope_mask;
     uint64_t runtime_mask;
     uint32_t legacy_mask = 0u;
 
-    if (!legacy_mask_out ||
-        !rin_vk_sync2_stage_mask(public_mask, &runtime_mask))
+    if (!legacy_mask_out)
         return 0;
-    if ((public_mask & RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) != 0u) {
+    /* This projection is used for event operations' first synchronization
+     * scope. TOP_OF_PIPE contributes no execution stage there, while
+     * BOTTOM_OF_PIPE denotes ALL_COMMANDS. Semaphore waits have the opposite
+     * direction and use rin_vk_sync2_semaphore_wait_stage_mask(). */
+    source_scope_mask = public_mask &
+        ~(RIN_VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT |
+          RIN_VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT);
+    if (!rin_vk_sync2_stage_mask(source_scope_mask, &runtime_mask))
+        return 0;
+    if ((public_mask & RIN_VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT) != 0u)
+        runtime_mask = RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS;
+    if (runtime_mask == RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS ||
+        (public_mask & RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) != 0u) {
         legacy_mask = legacy_all_commands;
     } else {
         if ((runtime_mask & RIN_GPU_VULKAN_BARRIER_STAGE_TRANSFER) != 0u)
