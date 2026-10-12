@@ -46,7 +46,7 @@ static int bind_rinos_product_platform(uint64_t device_id,
                                        uint32_t queue_family) {
     RinVulkanRinOSQueueCreateInfoV1 queue_info;
     RinVulkanRinOSProcessQueueMapV4 mappings[
-        RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V5_MAX_QUEUE_MAPPINGS];
+        RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V4_MAX_QUEUE_MAPPINGS];
     uint32_t mapping_count = 0u;
     int result;
 
@@ -64,7 +64,7 @@ static int bind_rinos_product_platform(uint64_t device_id,
     result = rin_vulkan_rinos_catalog_build_queue_maps_v1(
         &g_rinos_vulkan_catalog, device_id, device_generation, &queue_info,
         1u, mappings,
-        RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V5_MAX_QUEUE_MAPPINGS,
+        RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V4_MAX_QUEUE_MAPPINGS,
         &mapping_count);
     if (result != RIN_GPU_VULKAN_OK || mapping_count != 1u) {
         fprintf(stderr, "RinOS queue-route admission failed: %d (%u)\n",
