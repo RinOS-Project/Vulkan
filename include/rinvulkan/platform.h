@@ -15,6 +15,7 @@
 #define RIN_VULKAN_PRODUCT_PLATFORM_V6_VERSION 6u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V7_VERSION 7u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V8_VERSION 8u
+#define RIN_VULKAN_PRODUCT_PLATFORM_V9_VERSION 9u
 #define RIN_VULKAN_PRODUCT_PROCESS_SUBMIT_RECEIPT_V1_VERSION 1u
 #define RIN_VULKAN_PRODUCT_MEMORY_VERSION 1u
 #define RIN_VULKAN_PRODUCT_MAX_QUEUES 8u
@@ -420,11 +421,48 @@ typedef struct RinVulkanProductPlatformV8 {
     uint64_t reserved[2];
 } RinVulkanProductPlatformV8;
 
+/* V9 connects Vulkan query-pool lifetime and readback to process-owned
+ * RinGPU queries. Values are API-independent device query values; callers
+ * must not synthesize a device result from queue submission sequence data. */
+#define RIN_VULKAN_PRODUCT_PROCESS_QUERY_RESULT_V9_VERSION 1u
+#define RIN_VULKAN_PRODUCT_PROCESS_QUERY_VALUE_COUNT_V9 8u
+#define RIN_VULKAN_PRODUCT_QUERY_TYPE_TIMESTAMP_V9 1u
+typedef struct RinVulkanProductProcessQueryResultV9 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint32_t query_type;
+    uint32_t available;
+    uint32_t reserved0;
+    uint32_t reserved1;
+    uint64_t values[RIN_VULKAN_PRODUCT_PROCESS_QUERY_VALUE_COUNT_V9];
+} RinVulkanProductProcessQueryResultV9;
+
+typedef int (*RinVulkanProductCreateProcessQueryV9Fn)(
+    void* context, uint64_t query_cookie, uint32_t query_type);
+typedef int (*RinVulkanProductDestroyProcessQueryV9Fn)(
+    void* context, uint64_t query_cookie);
+typedef int (*RinVulkanProductGetProcessQueryResultV9Fn)(
+    void* context, uint64_t query_cookie,
+    RinVulkanProductProcessQueryResultV9* result_out);
+
+typedef struct RinVulkanProductPlatformV9 {
+    uint32_t struct_size;
+    uint32_t version;
+    RinVulkanProductPlatformV8* base;
+    void* context;
+    RinVulkanProductCreateProcessQueryV9Fn create_process_query;
+    RinVulkanProductDestroyProcessQueryV9Fn destroy_process_query;
+    RinVulkanProductGetProcessQueryResultV9Fn get_process_query_result;
+    uint64_t reserved[2];
+} RinVulkanProductPlatformV9;
+
 #ifdef __cplusplus
 static_assert(sizeof(RinVulkanProductResourceV1) == 16u,
               "Vulkan product resource ABI drift");
 static_assert(sizeof(RinVulkanProductProcessComputeBindingV8) == 72u,
               "Vulkan process compute binding V8 ABI drift");
+static_assert(sizeof(RinVulkanProductProcessQueryResultV9) == 88u,
+              "Vulkan process query result V9 ABI drift");
 static_assert(sizeof(RinVulkanProductReportV1) == 128u,
               "Vulkan product report ABI drift");
 static_assert(sizeof(RinVulkanProductStatusV1) == 128u,
@@ -442,6 +480,8 @@ _Static_assert(sizeof(RinVulkanProductResourceV1) == 16u,
                "Vulkan product resource ABI drift");
 _Static_assert(sizeof(RinVulkanProductProcessComputeBindingV8) == 72u,
                "Vulkan process compute binding V8 ABI drift");
+_Static_assert(sizeof(RinVulkanProductProcessQueryResultV9) == 88u,
+               "Vulkan process query result V9 ABI drift");
 _Static_assert(sizeof(RinVulkanProductReportV1) == 128u,
                "Vulkan product report ABI drift");
 _Static_assert(sizeof(RinVulkanProductStatusV1) == 128u,

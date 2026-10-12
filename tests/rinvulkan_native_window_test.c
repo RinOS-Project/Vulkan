@@ -77,6 +77,17 @@ typedef struct TestSdkProcessResource {
     RinGpuProcessResourceBindingV1 binding;
 } TestSdkProcessResource;
 
+#define TEST_SDK_PROCESS_QUERY_CAPACITY 4u
+#define TEST_SDK_PROCESS_COMMAND_CAPTURE 8u
+
+typedef struct TestSdkProcessQuery {
+    uint32_t active;
+    uint32_t reserved;
+    uint64_t token;
+    RinGpuProcessQueryDescV1 descriptor;
+    RinGpuProcessQueryResultV1 result;
+} TestSdkProcessQuery;
+
 typedef struct TestProductAdapters {
     RinGpuVulkanSoftwarePlatformV1* software;
     RinVulkanProductPlatformV2 v2;
@@ -86,11 +97,13 @@ typedef struct TestProductAdapters {
     RinVulkanProductPlatformV6* v6;
     RinVulkanProductPlatformV7* v7;
     RinVulkanProductPlatformV8* v8;
+    RinVulkanProductPlatformV9* v9;
     RinVulkanProductPlatformV6 software_v6;
-    RinVulkanRinOSProcessSubmitBackendV3 process_submit_backend;
+    RinVulkanRinOSProcessSubmitBackendV5 process_submit_backend;
     TestSdkProcessQueue sdk_queues[RIN_GPU_PROCESS_MAX_QUEUES_V1];
     TestSdkProcessResource sdk_resources[
         RIN_GPU_PROCESS_MAX_COMPUTE_BINDINGS_V1];
+    TestSdkProcessQuery sdk_queries[TEST_SDK_PROCESS_QUERY_CAPACITY];
     uint32_t sdk_queue_bind_calls;
     uint32_t sdk_queue_release_calls;
     uint32_t sdk_process_submit_calls;
@@ -98,6 +111,12 @@ typedef struct TestProductAdapters {
     uint32_t sdk_shader_module_create_calls;
     uint32_t sdk_compute_pipeline_create_calls;
     uint32_t sdk_object_destroy_calls;
+    uint32_t sdk_query_create_calls;
+    uint32_t sdk_query_result_calls;
+    uint64_t sdk_last_query_token;
+    uint32_t sdk_last_command_count;
+    RinGpuBackendCommandV1 sdk_last_commands[
+        TEST_SDK_PROCESS_COMMAND_CAPTURE];
     uint32_t sdk_resource_bind_calls;
     uint32_t sdk_resource_unbind_calls;
     uint32_t sdk_bind_group_create_calls;
@@ -790,6 +809,10 @@ static int test_backend_barrier_scope_to_vk(
         uint32_t* stage_out, uint32_t* access_out) {
     const uint32_t known_stages = RIN_GPU_PIPELINE_STAGE_COPY |
         RIN_GPU_PIPELINE_STAGE_HOST | RIN_GPU_PIPELINE_STAGE_VERTEX_INPUT |
+        RIN_GPU_PIPELINE_STAGE_VERTEX_SHADER |
+        RIN_GPU_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS |
+        RIN_GPU_PIPELINE_STAGE_FRAGMENT_SHADER |
+        RIN_GPU_PIPELINE_STAGE_LATE_FRAGMENT_TESTS |
         RIN_GPU_PIPELINE_STAGE_COLOR_OUTPUT |
         RIN_GPU_PIPELINE_STAGE_COMPUTE_SHADER;
     const uint32_t known_access = RIN_GPU_RESOURCE_READ |
@@ -819,6 +842,10 @@ static int test_backend_barrier_scope_to_vk(
         RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_READ,
         RIN_GPU_VULKAN_BARRIER_ACCESS_HOST_WRITE);
     if ((backend_stage & (RIN_GPU_PIPELINE_STAGE_VERTEX_INPUT |
+                          RIN_GPU_PIPELINE_STAGE_VERTEX_SHADER |
+                          RIN_GPU_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS |
+                          RIN_GPU_PIPELINE_STAGE_FRAGMENT_SHADER |
+                          RIN_GPU_PIPELINE_STAGE_LATE_FRAGMENT_TESTS |
                           RIN_GPU_PIPELINE_STAGE_COLOR_OUTPUT)) != 0u) {
         stage |= RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS;
         if ((backend_access & RIN_GPU_RESOURCE_READ) != 0u)
@@ -1468,6 +1495,31 @@ static int test_submit_process_commands_v6(
             operation->image_to_buffer_region.copy_height = copy->copy_height;
             continue;
         }
+        if (command->type == RIN_GPU_BACKEND_COMMAND_BEGIN_QUERY ||
+            command->type == RIN_GPU_BACKEND_COMMAND_END_QUERY ||
+            command->type == RIN_GPU_BACKEND_COMMAND_RESET_QUERY) {
+            uint32_t query_index;
+            int query_found = 0;
+            if (pending_image != 0u ||
+                command->value.query.query_cookie == 0u ||
+                command->value.query.query_type !=
+                    RIN_GPU_PROCESS_QUERY_TIMESTAMP_V1 ||
+                command->value.query.reserved != 0u)
+                return RIN_VULKAN_PRODUCT_PROTOCOL;
+            for (query_index = 0u;
+                 query_index < TEST_SDK_PROCESS_QUERY_CAPACITY;
+                 ++query_index) {
+                const TestSdkProcessQuery* query =
+                    &adapters->sdk_queries[query_index];
+                if (query->active == 1u &&
+                    query->token == command->value.query.query_cookie) {
+                    query_found = 1;
+                    break;
+                }
+            }
+            if (!query_found) return RIN_VULKAN_PRODUCT_PROTOCOL;
+            continue;
+        }
         if (command->type == RIN_GPU_BACKEND_COMMAND_TRANSITION_IMAGE) {
             if (pending_image != 0u ||
                 command->value.image_transition.image_cookie == 0u ||
@@ -1841,6 +1893,7 @@ RinResult rin_gpu_process_object_destroy_v1(
         uint64_t device_id, uint64_t device_generation,
         uint64_t object_token) {
     TestProductAdapters* adapters = g_process_submit_adapters;
+    uint32_t index;
     if (!adapters || device_id != TEST_PROCESS_SUBMIT_DEVICE_ID ||
         device_generation != TEST_PROCESS_SUBMIT_DEVICE_GENERATION ||
         object_token == 0u)
@@ -1853,7 +1906,71 @@ RinResult rin_gpu_process_object_destroy_v1(
         --adapters->sdk_bind_group_destroy_busy_attempts;
         return RIN_ERROR_BUSY;
     }
+    for (index = 0u; index < TEST_SDK_PROCESS_QUERY_CAPACITY; ++index) {
+        if (adapters->sdk_queries[index].active == 1u &&
+            adapters->sdk_queries[index].token == object_token) {
+            memset(&adapters->sdk_queries[index], 0,
+                   sizeof(adapters->sdk_queries[index]));
+            break;
+        }
+    }
     return RIN_SUCCESS;
+}
+
+RinResult rin_gpu_process_query_create_v1(
+        uint64_t device_id, uint64_t device_generation, uint64_t query_token,
+        const RinGpuProcessQueryDescV1* descriptor) {
+    TestProductAdapters* adapters = g_process_submit_adapters;
+    uint32_t index;
+    TestSdkProcessQuery* free_query = NULL;
+    if (!adapters || device_id != TEST_PROCESS_SUBMIT_DEVICE_ID ||
+        device_generation != TEST_PROCESS_SUBMIT_DEVICE_GENERATION ||
+        query_token == 0u || !descriptor ||
+        descriptor->struct_size != sizeof(*descriptor) ||
+        descriptor->version != RIN_GPU_PROCESS_QUERY_DESC_VERSION_V1 ||
+        descriptor->query_type != RIN_GPU_PROCESS_QUERY_TIMESTAMP_V1 ||
+        descriptor->flags != 0u || descriptor->reserved0 != 0u ||
+        descriptor->reserved1 != 0u)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    for (index = 0u; index < TEST_SDK_PROCESS_QUERY_CAPACITY; ++index) {
+        TestSdkProcessQuery* query = &adapters->sdk_queries[index];
+        if (query->active == 1u && query->token == query_token)
+            return RIN_ERROR_BUSY;
+        if (!free_query && query->active == 0u) free_query = query;
+    }
+    if (!free_query) return RIN_ERROR_TABLE_FULL;
+    memset(free_query, 0, sizeof(*free_query));
+    free_query->active = 1u;
+    free_query->token = query_token;
+    free_query->descriptor = *descriptor;
+    free_query->result.struct_size = sizeof(free_query->result);
+    free_query->result.version = RIN_GPU_PROCESS_QUERY_RESULT_VERSION_V1;
+    free_query->result.query_type = descriptor->query_type;
+    adapters->sdk_last_query_token = query_token;
+    ++adapters->sdk_query_create_calls;
+    return RIN_SUCCESS;
+}
+
+RinResult rin_gpu_process_query_result_v1(
+        uint64_t device_id, uint64_t device_generation, uint64_t query_token,
+        RinGpuProcessQueryResultV1* result_out) {
+    TestProductAdapters* adapters = g_process_submit_adapters;
+    uint32_t index;
+    if (!adapters || device_id != TEST_PROCESS_SUBMIT_DEVICE_ID ||
+        device_generation != TEST_PROCESS_SUBMIT_DEVICE_GENERATION ||
+        query_token == 0u || !result_out ||
+        result_out->struct_size != sizeof(*result_out) ||
+        result_out->version != RIN_GPU_PROCESS_QUERY_RESULT_VERSION_V1)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    for (index = 0u; index < TEST_SDK_PROCESS_QUERY_CAPACITY; ++index) {
+        const TestSdkProcessQuery* query = &adapters->sdk_queries[index];
+        if (query->active == 1u && query->token == query_token) {
+            *result_out = query->result;
+            ++adapters->sdk_query_result_calls;
+            return RIN_SUCCESS;
+        }
+    }
+    return RIN_ERROR_STALE_HANDLE;
 }
 
 static RinResult test_product_result_to_sdk(int result) {
@@ -1946,6 +2063,14 @@ RinResult rin_gpu_process_submit_v1(
     }
     commands = (const RinGpuBackendCommandV1*)
         (uintptr_t)descriptor->commands.address;
+    adapters->sdk_last_command_count = 0u;
+    memset(adapters->sdk_last_commands, 0,
+           sizeof(adapters->sdk_last_commands));
+    if (descriptor->command_count <= TEST_SDK_PROCESS_COMMAND_CAPTURE) {
+        adapters->sdk_last_command_count = descriptor->command_count;
+        memcpy(adapters->sdk_last_commands, commands,
+               descriptor->command_count * sizeof(*commands));
+    }
     memset(&product_receipt, 0, sizeof(product_receipt));
     result = adapters->software_v6.submit_process_commands(
         adapters->software_v6.context, queue_id, commands,
@@ -1977,7 +2102,8 @@ RinResult rin_gpu_process_submit_v1(
 static int initialize_product_adapters(
         TestProductAdapters* adapters,
         RinGpuVulkanSoftwarePlatformV1* software) {
-    uint32_t queue_ids[RIN_GPU_PROCESS_MAX_QUEUES_V1];
+    RinVulkanRinOSProcessQueueMapV4 queue_mappings[
+        RIN_GPU_PROCESS_MAX_QUEUES_V1];
     uint32_t index;
     int result;
     memset(adapters, 0, sizeof(*adapters));
@@ -2016,24 +2142,31 @@ static int initialize_product_adapters(
     if (software->queue_count == 0u ||
         software->queue_count > RIN_GPU_PROCESS_MAX_QUEUES_V1)
         return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
-    for (index = 0u; index < software->queue_count; ++index)
-        queue_ids[index] = index;
-    result = rin_vulkan_rinos_process_submit_backend_v3_init(
+    for (index = 0u; index < software->queue_count; ++index) {
+        queue_mappings[index].logical_queue_id = index;
+        queue_mappings[index].physical_queue_id = index;
+    }
+    result = rin_vulkan_rinos_process_submit_backend_v5_init(
         &adapters->process_submit_backend, &adapters->v5,
         TEST_PROCESS_SUBMIT_DEVICE_ID,
-        TEST_PROCESS_SUBMIT_DEVICE_GENERATION, queue_ids,
+        TEST_PROCESS_SUBMIT_DEVICE_GENERATION, queue_mappings,
         software->queue_count);
     if (result != RIN_VULKAN_PRODUCT_OK) return result;
     {
+        adapters->v6 =
+            &adapters->process_submit_backend.submit_backend.platform_v6;
         adapters->v7 =
-            rin_vulkan_rinos_process_submit_backend_v3_platform_v7(
-                &adapters->process_submit_backend);
+            &adapters->process_submit_backend.submit_backend.platform_v7;
         adapters->v8 =
-            rin_vulkan_rinos_process_submit_backend_v3_platform_v8(
+            &adapters->process_submit_backend.submit_backend.platform_v8;
+        adapters->v9 =
+            rin_vulkan_rinos_process_submit_backend_v5_platform_v9(
                 &adapters->process_submit_backend);
-        if (!adapters->v7 || !adapters->v8 || !adapters->v7->base)
+        if (!adapters->v6 || !adapters->v7 || !adapters->v8 ||
+            !adapters->v9 || adapters->v7->base != adapters->v6 ||
+            adapters->v8->base != adapters->v7 ||
+            adapters->v9->base != adapters->v8)
             return RIN_VULKAN_PRODUCT_STATE;
-        adapters->v6 = adapters->v7->base;
     }
     return RIN_VULKAN_PRODUCT_OK;
 }
@@ -2087,6 +2220,169 @@ static size_t make_descriptor_free_compute_module(uint32_t* words) {
     emit_test_spirv_instruction(words, &count, 253u, 1u, operands);
     emit_test_spirv_instruction(words, &count, 56u, 1u, operands);
     return count;
+}
+
+static int test_process_timestamp_query(
+        RinVkDevice device, RinVkQueue queue,
+        TestProductAdapters* adapters) {
+    RinVkQueryPoolCreateInfo query_info;
+    RinVkQueryPool query_pool = 0u;
+    RinVkCommandPoolCreateInfo pool_info;
+    RinVkCommandPool command_pool = 0u;
+    RinVkCommandBufferAllocateInfo allocate_info;
+    RinVkCommandBuffer command_buffer = NULL;
+    RinVkCommandBufferBeginInfo begin_info;
+    RinVkMemoryBarrier2 barrier;
+    RinVkDependencyInfo dependency_info;
+    RinVkSubmitInfo submit_info;
+    uint64_t results[2] = {UINT64_MAX, UINT64_MAX};
+    const uint64_t expected_timestamp = UINT64_C(0x123456789abcdef0);
+    uint32_t query_create_before;
+    uint32_t query_result_before;
+    uint32_t submit_before;
+    uint32_t canonical_submit_before;
+    int ok = 0;
+
+#define PROCESS_QUERY_CHECK(condition) do { \
+    if (!(condition)) { \
+        fprintf(stderr, "process timestamp query check failed: %s:%d: %s\n", \
+                __FILE__, __LINE__, #condition); \
+        goto cleanup; \
+    } \
+} while (0)
+
+    if (!adapters || !adapters->v9 || !queue) return -1;
+    query_create_before = adapters->sdk_query_create_calls;
+    query_result_before = adapters->sdk_query_result_calls;
+    submit_before = adapters->sdk_process_submit_calls;
+    canonical_submit_before = adapters->canonical_submit_calls;
+
+    memset(&query_info, 0, sizeof(query_info));
+    query_info.sType = RIN_VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+    query_info.queryType = RIN_VK_QUERY_TYPE_TIMESTAMP;
+    query_info.queryCount = 1u;
+    PROCESS_QUERY_CHECK(vkCreateQueryPool(
+        device, &query_info, NULL, &query_pool) == RIN_VK_SUCCESS);
+    PROCESS_QUERY_CHECK(query_pool != 0u &&
+        adapters->sdk_query_create_calls == query_create_before + 1u &&
+        adapters->sdk_last_query_token != 0u);
+
+    memset(&pool_info, 0, sizeof(pool_info));
+    pool_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pool_info.queueFamilyIndex = 0u;
+    PROCESS_QUERY_CHECK(vkCreateCommandPool(
+        device, &pool_info, NULL, &command_pool) == RIN_VK_SUCCESS);
+    memset(&allocate_info, 0, sizeof(allocate_info));
+    allocate_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocate_info.commandPool = command_pool;
+    allocate_info.level = RIN_VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocate_info.commandBufferCount = 1u;
+    PROCESS_QUERY_CHECK(vkAllocateCommandBuffers(
+        device, &allocate_info, &command_buffer) == RIN_VK_SUCCESS);
+    memset(&begin_info, 0, sizeof(begin_info));
+    begin_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = RIN_VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    PROCESS_QUERY_CHECK(vkBeginCommandBuffer(
+        command_buffer, &begin_info) == RIN_VK_SUCCESS);
+    vkCmdResetQueryPool(command_buffer, query_pool, 0u, 1u);
+    memset(&barrier, 0, sizeof(barrier));
+    barrier.sType = RIN_VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    barrier.dstStageMask = RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    memset(&dependency_info, 0, sizeof(dependency_info));
+    dependency_info.sType = RIN_VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency_info.memoryBarrierCount = 1u;
+    dependency_info.pMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(command_buffer, &dependency_info);
+    vkCmdWriteTimestamp(command_buffer,
+                        RIN_VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                        query_pool, 0u);
+    PROCESS_QUERY_CHECK(vkEndCommandBuffer(command_buffer) ==
+                        RIN_VK_SUCCESS);
+    memset(&submit_info, 0, sizeof(submit_info));
+    submit_info.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1u;
+    submit_info.pCommandBuffers = &command_buffer;
+    PROCESS_QUERY_CHECK(vkQueueSubmit(queue, 1u, &submit_info, 0u) ==
+                        RIN_VK_SUCCESS);
+    PROCESS_QUERY_CHECK(vkQueueWaitIdle(queue) == RIN_VK_SUCCESS);
+    PROCESS_QUERY_CHECK(adapters->sdk_process_submit_calls ==
+                            submit_before + 1u &&
+        adapters->canonical_submit_calls == canonical_submit_before + 1u &&
+        adapters->sdk_last_command_count == 4u &&
+        adapters->sdk_last_commands[0].type ==
+            RIN_GPU_BACKEND_COMMAND_RESET_QUERY &&
+        adapters->sdk_last_commands[1].type ==
+            RIN_GPU_BACKEND_COMMAND_GRAPHICS_BARRIER_V2 &&
+        adapters->sdk_last_commands[2].type ==
+            RIN_GPU_BACKEND_COMMAND_BEGIN_QUERY &&
+        adapters->sdk_last_commands[3].type ==
+            RIN_GPU_BACKEND_COMMAND_END_QUERY);
+    PROCESS_QUERY_CHECK(
+        adapters->sdk_last_commands[0].value.query.query_cookie ==
+            adapters->sdk_last_query_token &&
+        adapters->sdk_last_commands[2].value.query.query_cookie ==
+            adapters->sdk_last_query_token &&
+        adapters->sdk_last_commands[3].value.query.query_cookie ==
+            adapters->sdk_last_query_token &&
+        adapters->sdk_last_commands[0].value.query.query_type ==
+            RIN_GPU_PROCESS_QUERY_TIMESTAMP_V1 &&
+        adapters->sdk_last_commands[2].value.query.query_type ==
+            RIN_GPU_PROCESS_QUERY_TIMESTAMP_V1 &&
+        adapters->sdk_last_commands[3].value.query.query_type ==
+            RIN_GPU_PROCESS_QUERY_TIMESTAMP_V1);
+
+    PROCESS_QUERY_CHECK(vkGetQueryPoolResults(
+        device, query_pool, 0u, 1u, sizeof(results), results, sizeof(results),
+        RIN_VK_QUERY_RESULT_64_BIT |
+            RIN_VK_QUERY_RESULT_WITH_AVAILABILITY_BIT |
+            RIN_VK_QUERY_RESULT_PARTIAL_BIT) == RIN_VK_NOT_READY);
+    PROCESS_QUERY_CHECK(adapters->sdk_query_result_calls ==
+                            query_result_before + 1u &&
+                        results[0] == 0u && results[1] == 0u);
+    {
+        uint32_t index;
+        int query_found = 0;
+        for (index = 0u; index < TEST_SDK_PROCESS_QUERY_CAPACITY; ++index) {
+            TestSdkProcessQuery* query = &adapters->sdk_queries[index];
+            if (query->active == 1u &&
+                query->token == adapters->sdk_last_query_token) {
+                query->result.available = 1u;
+                query->result.values[0] = expected_timestamp;
+                query_found = 1;
+                break;
+            }
+        }
+        PROCESS_QUERY_CHECK(query_found);
+    }
+    results[0] = 0u;
+    results[1] = 0u;
+    PROCESS_QUERY_CHECK(vkGetQueryPoolResults(
+        device, query_pool, 0u, 1u, sizeof(results), results, sizeof(results),
+        RIN_VK_QUERY_RESULT_64_BIT |
+            RIN_VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) == RIN_VK_SUCCESS);
+    PROCESS_QUERY_CHECK(adapters->sdk_query_result_calls ==
+                            query_result_before + 2u &&
+                        results[0] == expected_timestamp &&
+                        results[1] == 1u);
+
+    vkDestroyQueryPool(device, query_pool, NULL);
+    query_pool = 0u;
+    {
+        uint32_t index;
+        for (index = 0u; index < TEST_SDK_PROCESS_QUERY_CAPACITY; ++index)
+            PROCESS_QUERY_CHECK(adapters->sdk_queries[index].active == 0u ||
+                adapters->sdk_queries[index].token !=
+                    adapters->sdk_last_query_token);
+    }
+    ok = 1;
+
+cleanup:
+    if (command_pool != NULL)
+        vkDestroyCommandPool(device, command_pool, NULL);
+    if (query_pool != 0u) vkDestroyQueryPool(device, query_pool, NULL);
+#undef PROCESS_QUERY_CHECK
+    return ok ? 0 : -1;
 }
 
 static int test_process_compute_pipeline_dispatch(
@@ -2707,15 +3003,47 @@ static RinVkResult test_process_submit_wait_completion(
     }
     if (adapters->canonical_graphics_barrier_count != barriers_before + 2u ||
         adapters->canonical_last_graphics_barrier.source_stage !=
-            RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS ||
+            (RIN_GPU_PIPELINE_STAGE_VERTEX_INPUT |
+             RIN_GPU_PIPELINE_STAGE_VERTEX_SHADER |
+             RIN_GPU_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS |
+             RIN_GPU_PIPELINE_STAGE_FRAGMENT_SHADER |
+             RIN_GPU_PIPELINE_STAGE_LATE_FRAGMENT_TESTS |
+             RIN_GPU_PIPELINE_STAGE_COLOR_OUTPUT) ||
         adapters->canonical_last_graphics_barrier.source_access !=
-            RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_WRITE ||
+            RIN_GPU_RESOURCE_WRITE ||
         adapters->canonical_last_graphics_barrier.destination_stage !=
-            RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS ||
+            (RIN_GPU_PIPELINE_STAGE_VERTEX_INPUT |
+             RIN_GPU_PIPELINE_STAGE_VERTEX_SHADER |
+             RIN_GPU_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS |
+             RIN_GPU_PIPELINE_STAGE_FRAGMENT_SHADER |
+             RIN_GPU_PIPELINE_STAGE_LATE_FRAGMENT_TESTS |
+             RIN_GPU_PIPELINE_STAGE_COLOR_OUTPUT) ||
         adapters->canonical_last_graphics_barrier.destination_access !=
-            RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ) {
+            RIN_GPU_RESOURCE_READ) {
         fprintf(stderr,
-                "public sync2 shader barrier did not reach process submit\n");
+                "public sync2 shader barrier scope mismatch at process submit: "
+                "count=%u before=%u last=%llu/%llu->%llu/%llu "
+                "expected=%llu/%llu->%llu/%llu\n",
+                adapters->canonical_graphics_barrier_count,
+                barriers_before,
+                (unsigned long long)adapters->canonical_last_graphics_barrier.source_stage,
+                (unsigned long long)adapters->canonical_last_graphics_barrier.source_access,
+                (unsigned long long)adapters->canonical_last_graphics_barrier.destination_stage,
+                (unsigned long long)adapters->canonical_last_graphics_barrier.destination_access,
+                (unsigned long long)(RIN_GPU_PIPELINE_STAGE_VERTEX_INPUT |
+                    RIN_GPU_PIPELINE_STAGE_VERTEX_SHADER |
+                    RIN_GPU_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS |
+                    RIN_GPU_PIPELINE_STAGE_FRAGMENT_SHADER |
+                    RIN_GPU_PIPELINE_STAGE_LATE_FRAGMENT_TESTS |
+                    RIN_GPU_PIPELINE_STAGE_COLOR_OUTPUT),
+                (unsigned long long)RIN_GPU_RESOURCE_WRITE,
+                (unsigned long long)(RIN_GPU_PIPELINE_STAGE_VERTEX_INPUT |
+                    RIN_GPU_PIPELINE_STAGE_VERTEX_SHADER |
+                    RIN_GPU_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS |
+                    RIN_GPU_PIPELINE_STAGE_FRAGMENT_SHADER |
+                    RIN_GPU_PIPELINE_STAGE_LATE_FRAGMENT_TESTS |
+                    RIN_GPU_PIPELINE_STAGE_COLOR_OUTPUT),
+                (unsigned long long)RIN_GPU_RESOURCE_READ);
         result = RIN_VK_ERROR_INITIALIZATION_FAILED;
         goto done;
     }
@@ -3807,6 +4135,7 @@ int main(void) {
     uint32_t product_v6_bound = 0u;
     uint32_t product_v7_bound = 0u;
     uint32_t product_v8_bound = 0u;
+    uint32_t product_v9_bound = 0u;
     uint32_t process_backend_initialized = 0u;
     uint32_t surface_created = 0u;
     uint32_t device_created = 0u;
@@ -3916,6 +4245,9 @@ int main(void) {
     CHECK(rin_gpu_vulkan_icd_bind_product_platform_v8(
               product_adapters.v8) == RIN_GPU_VULKAN_OK);
     product_v8_bound = 1u;
+    CHECK(rin_gpu_vulkan_icd_bind_product_platform_v9(
+              product_adapters.v9) == RIN_GPU_VULKAN_OK);
+    product_v9_bound = 1u;
 
 #if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
     memset(g_surfaces, 0, sizeof(g_surfaces));
@@ -4299,12 +4631,17 @@ int main(void) {
                   device, queue, &product_adapters) == 0);
         CHECK(test_process_compute_descriptor_dispatch(
                   device, queue, physical, &product_adapters) == 0);
+        CHECK(test_process_timestamp_query(
+                  device, queue, &product_adapters) == 0);
         CHECK(product_adapters.sdk_queue_bind_calls == software.queue_count &&
               product_adapters.sdk_process_submit_calls ==
                   product_adapters.canonical_submit_calls &&
               product_adapters.sdk_queue_release_calls == 0u &&
               product_adapters.sdk_active_queue_count ==
                   software.queue_count);
+        CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v9(
+                  product_adapters.v9) == RIN_GPU_VULKAN_OK);
+        product_v9_bound = 0u;
         CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v8(
                   product_adapters.v8) == RIN_GPU_VULKAN_OK);
         product_v8_bound = 0u;
@@ -4314,7 +4651,7 @@ int main(void) {
         CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v6(
                   product_adapters.v6) == RIN_GPU_VULKAN_OK);
         product_v6_bound = 0u;
-        CHECK(rin_vulkan_rinos_process_submit_backend_v3_detach(
+        CHECK(rin_vulkan_rinos_process_submit_backend_v5_detach(
                   &product_adapters.process_submit_backend) ==
               RIN_VULKAN_PRODUCT_OK);
         process_backend_initialized = 0u;
@@ -4347,6 +4684,18 @@ cleanup:
     if (device_created) vkDestroyDevice(device, NULL);
     if (surface_created) vkDestroySurfaceKHR(instance, surface, NULL);
     if (instance) vkDestroyInstance(instance, NULL);
+    if (product_v9_bound) {
+        const int unbind_result =
+            rin_gpu_vulkan_icd_unbind_product_platform_v9(
+                product_adapters.v9);
+        if (unbind_result == RIN_GPU_VULKAN_OK) {
+            product_v9_bound = 0u;
+        } else {
+            fprintf(stderr, "V9 process-query unbind returned %d\n",
+                    unbind_result);
+            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
     if (product_v8_bound) {
         const int unbind_result =
             rin_gpu_vulkan_icd_unbind_product_platform_v8(
@@ -4393,7 +4742,7 @@ cleanup:
             result = RIN_VK_ERROR_INITIALIZATION_FAILED;
         } else {
             const int detach_result =
-                rin_vulkan_rinos_process_submit_backend_v3_detach(
+                rin_vulkan_rinos_process_submit_backend_v5_detach(
                     &product_adapters.process_submit_backend);
             if (detach_result != RIN_VULKAN_PRODUCT_OK) {
                 fprintf(stderr,

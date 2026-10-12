@@ -14,6 +14,8 @@ static RinResult object_destroy_result;
 static RinResult resource_bind_result;
 static RinResult resource_unbind_result;
 static RinResult bind_group_create_result;
+static RinResult query_create_result;
+static RinResult query_read_result;
 static uint32_t fail_resource_bind_call;
 static RinGpuProcessQueueV1 fail_release_token;
 static RinGpuProcessSubmitReceiptV1 supplied_receipt;
@@ -44,6 +46,11 @@ static uint64_t observed_shader_token;
 static uint64_t observed_pipeline_token;
 static uint64_t observed_pipeline_shader_token;
 static uint64_t observed_destroy_tokens[8];
+static uint32_t query_create_calls;
+static uint32_t query_read_calls;
+static uint64_t observed_query_token;
+static RinGpuProcessQueryDescV1 observed_query_desc;
+static RinGpuProcessQueryResultV1 supplied_query_result;
 
 RinResult rin_gpu_process_queue_bind_v1(
     uint64_t device_id, uint64_t device_generation, uint32_t queue_id,
@@ -203,6 +210,37 @@ RinResult rin_gpu_process_object_destroy_v1(
     return object_destroy_result;
 }
 
+RinResult rin_gpu_process_query_create_v1(
+    uint64_t device_id, uint64_t device_generation, uint64_t query_token,
+    const RinGpuProcessQueryDescV1* descriptor) {
+    ++query_create_calls;
+    if (device_id != UINT64_C(0x1111) ||
+        device_generation != UINT64_C(0x2222) || query_token == 0u ||
+        !descriptor || descriptor->struct_size != sizeof(*descriptor) ||
+        descriptor->version != RIN_GPU_PROCESS_QUERY_DESC_VERSION_V1 ||
+        descriptor->flags != 0u || descriptor->reserved0 != 0u ||
+        descriptor->reserved1 != 0u)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    observed_query_token = query_token;
+    observed_query_desc = *descriptor;
+    return query_create_result;
+}
+
+RinResult rin_gpu_process_query_result_v1(
+    uint64_t device_id, uint64_t device_generation, uint64_t query_token,
+    RinGpuProcessQueryResultV1* result_out) {
+    ++query_read_calls;
+    if (device_id != UINT64_C(0x1111) ||
+        device_generation != UINT64_C(0x2222) ||
+        query_token != observed_query_token || !result_out ||
+        result_out->struct_size != sizeof(*result_out) ||
+        result_out->version != RIN_GPU_PROCESS_QUERY_RESULT_VERSION_V1)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    if (query_read_result != RIN_SUCCESS) return query_read_result;
+    *result_out = supplied_query_result;
+    return RIN_SUCCESS;
+}
+
 #define CHECK(expression) \
     do { \
         if (!(expression)) { \
@@ -224,6 +262,8 @@ static void reset_mocks(void) {
     resource_bind_result = RIN_SUCCESS;
     resource_unbind_result = RIN_SUCCESS;
     bind_group_create_result = RIN_SUCCESS;
+    query_create_result = RIN_SUCCESS;
+    query_read_result = RIN_SUCCESS;
     fail_resource_bind_call = 0u;
     memset(&supplied_receipt, 0, sizeof(supplied_receipt));
     supplied_receipt.struct_size = sizeof(supplied_receipt);
@@ -259,6 +299,14 @@ static void reset_mocks(void) {
     observed_pipeline_token = 0u;
     observed_pipeline_shader_token = 0u;
     memset(observed_destroy_tokens, 0, sizeof(observed_destroy_tokens));
+    query_create_calls = 0u;
+    query_read_calls = 0u;
+    observed_query_token = 0u;
+    memset(&observed_query_desc, 0, sizeof(observed_query_desc));
+    memset(&supplied_query_result, 0, sizeof(supplied_query_result));
+    supplied_query_result.struct_size = sizeof(supplied_query_result);
+    supplied_query_result.version = RIN_GPU_PROCESS_QUERY_RESULT_VERSION_V1;
+    supplied_query_result.query_type = RIN_GPU_PROCESS_QUERY_TIMESTAMP_V1;
 }
 
 int main(void) {
@@ -266,6 +314,7 @@ int main(void) {
     RinVulkanRinOSProcessSubmitBackendV2 backend_v2 = {0};
     RinVulkanRinOSProcessSubmitBackendV3 backend_v3 = {0};
     RinVulkanRinOSProcessSubmitBackendV4 backend_v4 = {0};
+    RinVulkanRinOSProcessSubmitBackendV5 backend_v5 = {0};
     RinVulkanProductPlatformV5 parent = {0};
     uint32_t queue_ids[2] = {0u, 2u};
     RinVulkanRinOSProcessQueueMapV4 queue_mappings[3] = {
@@ -281,6 +330,7 @@ int main(void) {
     RinVulkanProductPlatformV8* platform_v8;
     RinVulkanProductPlatformV7* platform_v7_v4;
     RinVulkanProductPlatformV8* platform_v8_v4;
+    RinVulkanProductPlatformV9* platform_v9;
     RinVulkanProductProcessComputeBindingV8 process_bindings[2] = {{0}};
     uint8_t shader_ir[sizeof(RinShaderHeaderV1)] = {0};
     uint64_t process_pipeline_token = 0u;
@@ -620,6 +670,72 @@ int main(void) {
     CHECK(rin_vulkan_rinos_process_submit_backend_v4_detach(&backend_v4) ==
           RIN_VULKAN_PRODUCT_OK);
     CHECK(backend_v4.state == 0u && release_calls >= 3u);
+
+    reset_mocks();
+    CHECK(rin_vulkan_rinos_process_submit_backend_v5_init(
+              &backend_v5, &parent, 0x1111u, 0x2222u,
+              queue_mappings, 3u) == RIN_VULKAN_PRODUCT_OK);
+    CHECK(rin_vulkan_rinos_process_submit_backend_v5_valid(&backend_v5));
+    platform_v9 = rin_vulkan_rinos_process_submit_backend_v5_platform_v9(
+        &backend_v5);
+    CHECK(platform_v9 && platform_v9->base ==
+              &backend_v5.submit_backend.platform_v8 &&
+          platform_v9->create_process_query &&
+          platform_v9->destroy_process_query &&
+          platform_v9->get_process_query_result);
+    CHECK(platform_v9->create_process_query(
+              platform_v9->context, UINT64_C(0x5263000100000201),
+              RIN_GPU_PROCESS_QUERY_TIMESTAMP_V1) == RIN_VULKAN_PRODUCT_OK);
+    CHECK(query_create_calls == 1u &&
+          observed_query_token == UINT64_C(0x5263000100000201) &&
+          observed_query_desc.query_type ==
+              RIN_GPU_PROCESS_QUERY_TIMESTAMP_V1 &&
+          backend_v5.queries[0].active == 1u);
+    supplied_query_result.available = 0u;
+    supplied_query_result.values[0] = 0u;
+    {
+        RinVulkanProductProcessQueryResultV9 query_result = {0};
+        CHECK(platform_v9->get_process_query_result(
+                  platform_v9->context, observed_query_token,
+                  &query_result) == RIN_VULKAN_PRODUCT_OK);
+        CHECK(query_read_calls == 1u && query_result.struct_size ==
+                  sizeof(query_result) && query_result.version ==
+                  RIN_VULKAN_PRODUCT_PROCESS_QUERY_RESULT_V9_VERSION &&
+              query_result.query_type ==
+                  RIN_VULKAN_PRODUCT_QUERY_TYPE_TIMESTAMP_V9 &&
+              query_result.available == 0u && query_result.values[0] == 0u);
+        supplied_query_result.available = 1u;
+        supplied_query_result.values[0] = UINT64_C(0x123456789);
+        CHECK(platform_v9->get_process_query_result(
+                  platform_v9->context, observed_query_token,
+                  &query_result) == RIN_VULKAN_PRODUCT_OK);
+        CHECK(query_read_calls == 2u && query_result.available == 1u &&
+              query_result.values[0] == UINT64_C(0x123456789));
+    }
+    object_destroy_result = RIN_ERROR_BUSY;
+    CHECK(platform_v9->destroy_process_query(
+              platform_v9->context, observed_query_token) ==
+          RIN_VULKAN_PRODUCT_BUSY);
+    CHECK(rin_vulkan_rinos_process_submit_backend_v5_valid(&backend_v5) &&
+          backend_v5.queries[0].active == 1u);
+    object_destroy_result = RIN_SUCCESS;
+    CHECK(platform_v9->destroy_process_query(
+              platform_v9->context, observed_query_token) ==
+          RIN_VULKAN_PRODUCT_OK);
+    CHECK(backend_v5.queries[0].active == 0u &&
+          backend_v5.queries[0].query_token == 0u);
+
+    CHECK(platform_v9->create_process_query(
+              platform_v9->context, UINT64_C(0x5263000100000202),
+              RIN_GPU_PROCESS_QUERY_TIMESTAMP_V1) == RIN_VULKAN_PRODUCT_OK);
+    object_destroy_result = RIN_ERROR_BUSY;
+    CHECK(rin_vulkan_rinos_process_submit_backend_v5_detach(&backend_v5) ==
+          RIN_VULKAN_PRODUCT_BUSY);
+    CHECK(backend_v5.state == 2u && backend_v5.queries[0].active == 1u);
+    object_destroy_result = RIN_SUCCESS;
+    CHECK(rin_vulkan_rinos_process_submit_backend_v5_detach(&backend_v5) ==
+          RIN_VULKAN_PRODUCT_OK);
+    CHECK(backend_v5.state == 0u && release_calls == 2u);
 
     puts("RinVulkan RinOS process-submit/compute adapter: PASS");
     return 0;

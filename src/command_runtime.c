@@ -84,8 +84,12 @@ static void reset_recording(RinGpuVulkanCommandBufferV1* buffer) {
     buffer->record_error = 0u;
     buffer->copy_count = 0u;
     memset(buffer->copies, 0, sizeof(buffer->copies));
+    memset(buffer->copy_order, 0, sizeof(buffer->copy_order));
     buffer->transfer_op_count = 0u;
     memset(buffer->transfer_ops, 0, sizeof(buffer->transfer_ops));
+    memset(buffer->transfer_op_order, 0,
+           sizeof(buffer->transfer_op_order));
+    buffer->command_order_next = 0u;
     memset(buffer->transfer_op_compute_phase, 0,
            sizeof(buffer->transfer_op_compute_phase));
     buffer->descriptor_bind_recorded = 0u;
@@ -492,7 +496,8 @@ int rin_gpu_vulkan_command_buffer_record_copies(
         return RIN_GPU_VULKAN_COMMAND_INVALID_STATE;
     }
     if (copy_count > RIN_GPU_VULKAN_COMMAND_MAX_COPIES -
-                         buffer->copy_count) {
+                         buffer->copy_count ||
+        buffer->command_order_next > UINT32_MAX - copy_count) {
         return RIN_GPU_VULKAN_COMMAND_LIMIT;
     }
     for (index = 0u; index < copy_count; ++index) {
@@ -506,6 +511,9 @@ int rin_gpu_vulkan_command_buffer_record_copies(
     }
     memcpy(&buffer->copies[buffer->copy_count], copies,
            sizeof(*copies) * (size_t)copy_count);
+    for (index = 0u; index < copy_count; ++index)
+        buffer->copy_order[buffer->copy_count + index] =
+            buffer->command_order_next++;
     buffer->copy_count += copy_count;
     return RIN_GPU_VULKAN_COMMAND_OK;
 }
@@ -708,8 +716,13 @@ int rin_gpu_vulkan_command_buffer_record_transfer_ops(
               operations[index].sample_count != 4u)))
             return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
     }
+    if (buffer->command_order_next > UINT32_MAX - operation_count)
+        return RIN_GPU_VULKAN_COMMAND_LIMIT;
     memcpy(&buffer->transfer_ops[buffer->transfer_op_count], operations,
            sizeof(*operations) * (size_t)operation_count);
+    for (index = 0u; index < operation_count; ++index)
+        buffer->transfer_op_order[buffer->transfer_op_count + index] =
+            buffer->command_order_next++;
     buffer->transfer_op_count += operation_count;
     return RIN_GPU_VULKAN_COMMAND_OK;
 }
@@ -766,18 +779,34 @@ int rin_gpu_vulkan_command_buffer_record_query(
         RinGpuVulkanCommandRuntimeV1* runtime,
         RinGpuVulkanCommandBufferV1* handle, uint64_t query_pool,
         uint32_t query, uint32_t flags, uint32_t operation) {
+    return rin_gpu_vulkan_command_buffer_record_query_at_stage(
+        runtime, handle, query_pool, query, flags, operation, 0u);
+}
+
+int rin_gpu_vulkan_command_buffer_record_query_at_stage(
+        RinGpuVulkanCommandRuntimeV1* runtime,
+        RinGpuVulkanCommandBufferV1* handle, uint64_t query_pool,
+        uint32_t query, uint32_t flags, uint32_t operation,
+        uint64_t stage_mask) {
     RinGpuVulkanCommandBufferV1* buffer = buffer_slot(runtime, handle);
     if (!buffer || buffer->lifecycle != RIN_GPU_VULKAN_COMMAND_BUFFER_RECORDING ||
         query_pool == 0u || operation < RIN_GPU_VULKAN_QUERY_COMMAND_BEGIN ||
         operation > RIN_GPU_VULKAN_QUERY_COMMAND_TIMESTAMP ||
         buffer->query_command_count >=
-            RIN_GPU_VULKAN_COMMAND_MAX_QUERY_COMMANDS)
+            RIN_GPU_VULKAN_COMMAND_MAX_QUERY_COMMANDS ||
+        buffer->command_order_next == UINT32_MAX ||
+        (operation != RIN_GPU_VULKAN_QUERY_COMMAND_TIMESTAMP &&
+         stage_mask != 0u))
         return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
     buffer->query_commands[buffer->query_command_count].query_pool = query_pool;
     buffer->query_commands[buffer->query_command_count].query = query;
     buffer->query_commands[buffer->query_command_count].flags = flags;
     buffer->query_commands[buffer->query_command_count].operation = operation;
     buffer->query_commands[buffer->query_command_count].reserved = 0u;
+    buffer->query_commands[buffer->query_command_count].stage_mask = stage_mask;
+    buffer->query_commands[buffer->query_command_count].command_order =
+        buffer->command_order_next++;
+    buffer->query_commands[buffer->query_command_count].reserved2 = 0u;
     ++buffer->query_command_count;
     return RIN_GPU_VULKAN_COMMAND_OK;
 }

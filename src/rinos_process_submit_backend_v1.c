@@ -1535,3 +1535,314 @@ int rin_vulkan_rinos_process_submit_backend_v4_detach(
     memset(backend, 0, sizeof(*backend));
     return RIN_VULKAN_PRODUCT_OK;
 }
+
+static int rinos_v5_create_process_query(
+    void* context, uint64_t query_token, uint32_t query_type);
+static int rinos_v5_destroy_process_query(void* context,
+                                          uint64_t query_token);
+static int rinos_v5_get_process_query_result(
+    void* context, uint64_t query_token,
+    RinVulkanProductProcessQueryResultV9* result_out);
+
+static int rinos_v5_valid_unlocked(
+        const RinVulkanRinOSProcessSubmitBackendV5* backend) {
+    uint32_t index;
+    uint32_t active_count = 0u;
+    const RinVulkanProductPlatformV8* platform_v8;
+    if (!backend || backend->struct_size != sizeof(*backend) ||
+        backend->version != RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V5_VERSION ||
+        backend->state != RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_ACTIVE ||
+        backend->reserved[0] != 0u || backend->reserved[1] != 0u ||
+        !rin_vulkan_rinos_process_submit_backend_v4_valid(
+            &backend->submit_backend))
+        return 0;
+    platform_v8 = rin_vulkan_rinos_process_submit_backend_v4_platform_v8(
+        (RinVulkanRinOSProcessSubmitBackendV4*)&backend->submit_backend);
+    if (!platform_v8 || backend->platform_v9.struct_size !=
+                            sizeof(backend->platform_v9) ||
+        backend->platform_v9.version !=
+            RIN_VULKAN_PRODUCT_PLATFORM_V9_VERSION ||
+        backend->platform_v9.base != platform_v8 ||
+        backend->platform_v9.context != backend ||
+        backend->platform_v9.create_process_query !=
+            rinos_v5_create_process_query ||
+        backend->platform_v9.destroy_process_query !=
+            rinos_v5_destroy_process_query ||
+        backend->platform_v9.get_process_query_result !=
+            rinos_v5_get_process_query_result ||
+        backend->platform_v9.reserved[0] != 0u ||
+        backend->platform_v9.reserved[1] != 0u)
+        return 0;
+    for (index = 0u;
+         index < RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V5_MAX_QUERIES;
+         ++index) {
+        const RinVulkanRinOSProcessQueryV5* query = &backend->queries[index];
+        uint32_t prior;
+        if (query->active == 0u) {
+            if (query->query_token != 0u || query->reserved != 0u) return 0;
+            continue;
+        }
+        if (query->active != 1u || query->query_token == 0u ||
+            query->reserved != 0u)
+            return 0;
+        ++active_count;
+        for (prior = 0u; prior < index; ++prior)
+            if (backend->queries[prior].active == 1u &&
+                backend->queries[prior].query_token == query->query_token)
+                return 0;
+    }
+    return active_count <=
+           RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V5_MAX_QUERIES;
+}
+
+static int rinos_v5_query_find(
+        RinVulkanRinOSProcessSubmitBackendV5* backend, uint64_t query_token,
+        uint32_t* index_out) {
+    uint32_t index;
+    for (index = 0u;
+         index < RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V5_MAX_QUERIES;
+         ++index) {
+        if (backend->queries[index].active == 1u &&
+            backend->queries[index].query_token == query_token) {
+            if (index_out) *index_out = index;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int rinos_v5_create_process_query(
+        void* context, uint64_t query_token, uint32_t query_type) {
+    RinVulkanRinOSProcessSubmitBackendV5* backend =
+        (RinVulkanRinOSProcessSubmitBackendV5*)context;
+    RinGpuProcessQueryDescV1 descriptor;
+    uint32_t free_index = RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V5_MAX_QUERIES;
+    uint32_t index;
+    RinResult sdk_result;
+    if (!backend || query_token == 0u ||
+        (query_type != RIN_GPU_PROCESS_QUERY_TIMESTAMP_V1 &&
+         query_type != RIN_GPU_PROCESS_QUERY_OCCLUSION_V1 &&
+         query_type != RIN_GPU_PROCESS_QUERY_PIPELINE_STATISTICS_V1))
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    if (!rinos_try_lock(&backend->lock)) return RIN_VULKAN_PRODUCT_BUSY;
+    if (!rinos_v5_valid_unlocked(backend)) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_STATE;
+    }
+    if (rinos_v5_query_find(backend, query_token, NULL)) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_BUSY;
+    }
+    for (index = 0u;
+         index < RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V5_MAX_QUERIES;
+         ++index)
+        if (backend->queries[index].active == 0u) {
+            free_index = index;
+            break;
+        }
+    if (free_index ==
+        RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V5_MAX_QUERIES) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_LIMIT;
+    }
+    memset(&descriptor, 0, sizeof(descriptor));
+    descriptor.struct_size = sizeof(descriptor);
+    descriptor.version = RIN_GPU_PROCESS_QUERY_DESC_VERSION_V1;
+    descriptor.query_type = query_type;
+    sdk_result = rin_gpu_process_query_create_v1(
+        backend->submit_backend.compute_backend.compute_backend.submit_backend
+            .device_id,
+        backend->submit_backend.compute_backend.compute_backend.submit_backend
+            .device_generation,
+        query_token, &descriptor);
+    if (sdk_result == RIN_SUCCESS) {
+        backend->queries[free_index].query_token = query_token;
+        backend->queries[free_index].reserved = 0u;
+        backend->queries[free_index].active = 1u;
+    }
+    __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+    return rinos_map_sdk_result(sdk_result);
+}
+
+static int rinos_v5_destroy_process_query(void* context,
+                                         uint64_t query_token) {
+    RinVulkanRinOSProcessSubmitBackendV5* backend =
+        (RinVulkanRinOSProcessSubmitBackendV5*)context;
+    uint32_t index;
+    RinResult sdk_result;
+    if (!backend || query_token == 0u)
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    if (!rinos_try_lock(&backend->lock)) return RIN_VULKAN_PRODUCT_BUSY;
+    if (!rinos_v5_valid_unlocked(backend)) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_STATE;
+    }
+    if (!rinos_v5_query_find(backend, query_token, &index)) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    }
+    sdk_result = rin_gpu_process_object_destroy_v1(
+        backend->submit_backend.compute_backend.compute_backend.submit_backend
+            .device_id,
+        backend->submit_backend.compute_backend.compute_backend.submit_backend
+            .device_generation,
+        query_token);
+    if (sdk_result == RIN_SUCCESS)
+        memset(&backend->queries[index], 0, sizeof(backend->queries[index]));
+    __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+    return rinos_map_sdk_result(sdk_result);
+}
+
+static int rinos_v5_get_process_query_result(
+        void* context, uint64_t query_token,
+        RinVulkanProductProcessQueryResultV9* result_out) {
+    RinVulkanRinOSProcessSubmitBackendV5* backend =
+        (RinVulkanRinOSProcessSubmitBackendV5*)context;
+    RinGpuProcessQueryResultV1 sdk_result_data;
+    RinResult sdk_result;
+    if (!backend || query_token == 0u || !result_out ||
+        !rinos_range_valid(result_out, sizeof(*result_out)))
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    memset(result_out, 0, sizeof(*result_out));
+    result_out->struct_size = sizeof(*result_out);
+    result_out->version =
+        RIN_VULKAN_PRODUCT_PROCESS_QUERY_RESULT_V9_VERSION;
+    if (!rinos_try_lock(&backend->lock)) return RIN_VULKAN_PRODUCT_BUSY;
+    if (!rinos_v5_valid_unlocked(backend)) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_STATE;
+    }
+    if (!rinos_v5_query_find(backend, query_token, NULL)) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    }
+    memset(&sdk_result_data, 0, sizeof(sdk_result_data));
+    sdk_result_data.struct_size = sizeof(sdk_result_data);
+    sdk_result_data.version = RIN_GPU_PROCESS_QUERY_RESULT_VERSION_V1;
+    sdk_result = rin_gpu_process_query_result_v1(
+        backend->submit_backend.compute_backend.compute_backend.submit_backend
+            .device_id,
+        backend->submit_backend.compute_backend.compute_backend.submit_backend
+            .device_generation,
+        query_token, &sdk_result_data);
+    __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+    if (sdk_result != RIN_SUCCESS) return rinos_map_sdk_result(sdk_result);
+    if (sdk_result_data.struct_size != sizeof(sdk_result_data) ||
+        sdk_result_data.version != RIN_GPU_PROCESS_QUERY_RESULT_VERSION_V1 ||
+        sdk_result_data.available > 1u || sdk_result_data.reserved0 != 0u ||
+        sdk_result_data.reserved1 != 0u)
+        return RIN_VULKAN_PRODUCT_PROTOCOL;
+    result_out->query_type = sdk_result_data.query_type;
+    result_out->available = sdk_result_data.available;
+    memcpy(result_out->values, sdk_result_data.values,
+           sizeof(result_out->values));
+    return RIN_VULKAN_PRODUCT_OK;
+}
+
+int rin_vulkan_rinos_process_submit_backend_v5_init(
+        RinVulkanRinOSProcessSubmitBackendV5* backend,
+        RinVulkanProductPlatformV5* parent, uint64_t device_id,
+        uint64_t device_generation,
+        const RinVulkanRinOSProcessQueueMapV4* mappings,
+        uint32_t mapping_count) {
+    int result;
+    if (!backend || !parent || device_id == 0u || device_generation == 0u)
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    memset(backend, 0, sizeof(*backend));
+    __atomic_store_n(&backend->lock, 1u, __ATOMIC_RELAXED);
+    backend->struct_size = sizeof(*backend);
+    backend->version = RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V5_VERSION;
+    backend->state = RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_CLEANUP_PENDING;
+    result = rin_vulkan_rinos_process_submit_backend_v4_init(
+        &backend->submit_backend, parent, device_id, device_generation,
+        mappings, mapping_count);
+    if (result != RIN_VULKAN_PRODUCT_OK) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return result;
+    }
+    backend->platform_v9.struct_size = sizeof(backend->platform_v9);
+    backend->platform_v9.version = RIN_VULKAN_PRODUCT_PLATFORM_V9_VERSION;
+    backend->platform_v9.base =
+        rin_vulkan_rinos_process_submit_backend_v4_platform_v8(
+            &backend->submit_backend);
+    backend->platform_v9.context = backend;
+    backend->platform_v9.create_process_query =
+        rinos_v5_create_process_query;
+    backend->platform_v9.destroy_process_query =
+        rinos_v5_destroy_process_query;
+    backend->platform_v9.get_process_query_result =
+        rinos_v5_get_process_query_result;
+    backend->state = RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_ACTIVE;
+    __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+    if (!rin_vulkan_rinos_process_submit_backend_v5_valid(backend)) {
+        backend->state = RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_CLEANUP_PENDING;
+        return RIN_VULKAN_PRODUCT_PROTOCOL;
+    }
+    return RIN_VULKAN_PRODUCT_OK;
+}
+
+int rin_vulkan_rinos_process_submit_backend_v5_valid(
+        const RinVulkanRinOSProcessSubmitBackendV5* backend) {
+    return backend && __atomic_load_n(&backend->lock, __ATOMIC_ACQUIRE) == 0u &&
+           rinos_v5_valid_unlocked(backend);
+}
+
+RinVulkanProductPlatformV9*
+rin_vulkan_rinos_process_submit_backend_v5_platform_v9(
+        RinVulkanRinOSProcessSubmitBackendV5* backend) {
+    return rin_vulkan_rinos_process_submit_backend_v5_valid(backend)
+               ? &backend->platform_v9
+               : NULL;
+}
+
+int rin_vulkan_rinos_process_submit_backend_v5_detach(
+        RinVulkanRinOSProcessSubmitBackendV5* backend) {
+    uint32_t index;
+    int first_error = RIN_VULKAN_PRODUCT_OK;
+    int result;
+    if (!backend || !rinos_try_lock(&backend->lock))
+        return backend ? RIN_VULKAN_PRODUCT_BUSY
+                       : RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    if (backend->struct_size != sizeof(*backend) ||
+        backend->version != RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V5_VERSION ||
+        (backend->state != RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_ACTIVE &&
+         backend->state !=
+             RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_CLEANUP_PENDING)) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_STATE;
+    }
+    backend->state = RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_CLEANUP_PENDING;
+    for (index = 0u;
+         index < RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V5_MAX_QUERIES;
+         ++index) {
+        RinVulkanRinOSProcessQueryV5* query = &backend->queries[index];
+        RinResult sdk_result;
+        if (query->active == 0u) continue;
+        if (query->active != 1u || query->query_token == 0u ||
+            query->reserved != 0u) {
+            if (first_error == RIN_VULKAN_PRODUCT_OK)
+                first_error = RIN_VULKAN_PRODUCT_PROTOCOL;
+            continue;
+        }
+        sdk_result = rin_gpu_process_object_destroy_v1(
+            backend->submit_backend.compute_backend.compute_backend
+                .submit_backend.device_id,
+            backend->submit_backend.compute_backend.compute_backend
+                .submit_backend.device_generation,
+            query->query_token);
+        if (sdk_result == RIN_SUCCESS)
+            memset(query, 0, sizeof(*query));
+        else if (first_error == RIN_VULKAN_PRODUCT_OK)
+            first_error = rinos_map_sdk_result(sdk_result);
+    }
+    if (first_error != RIN_VULKAN_PRODUCT_OK) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return first_error;
+    }
+    __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+    result = rin_vulkan_rinos_process_submit_backend_v4_detach(
+        &backend->submit_backend);
+    if (result != RIN_VULKAN_PRODUCT_OK) return result;
+    memset(backend, 0, sizeof(*backend));
+    return RIN_VULKAN_PRODUCT_OK;
+}

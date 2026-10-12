@@ -25,6 +25,8 @@ extern "C" {
 #define RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V4_VERSION UINT32_C(4)
 #define RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V4_MAX_QUEUE_MAPPINGS \
     RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V1_MAX_QUEUES
+#define RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V5_VERSION UINT32_C(5)
+#define RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V5_MAX_QUERIES UINT32_C(2048)
 #define RIN_VULKAN_RINOS_PROCESS_RESOURCE_COOKIE_TAG UINT64_C(0x5261)
 /* Reserved process-token tag for the private shader-module child associated
  * with a RinVk pipeline token. */
@@ -128,6 +130,27 @@ typedef struct RinVulkanRinOSProcessSubmitBackendV4 {
     uint64_t reserved[2];
 } RinVulkanRinOSProcessSubmitBackendV4;
 
+typedef struct RinVulkanRinOSProcessQueryV5 {
+    uint64_t query_token;
+    uint32_t active;
+    uint32_t reserved;
+} RinVulkanRinOSProcessQueryV5;
+
+/* V5 composes V4's authenticated SDK submit route with real process-query
+ * create/result/destroy operations. The token table keeps query objects owned
+ * until SDK destruction succeeds, including cleanup retries at detach. */
+typedef struct RinVulkanRinOSProcessSubmitBackendV5 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint32_t state;
+    volatile uint32_t lock;
+    RinVulkanRinOSProcessSubmitBackendV4 submit_backend;
+    RinVulkanProductPlatformV9 platform_v9;
+    RinVulkanRinOSProcessQueryV5 queries[
+        RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V5_MAX_QUERIES];
+    uint64_t reserved[2];
+} RinVulkanRinOSProcessSubmitBackendV5;
+
 /* Initialize caller-zeroed storage for the current RinOS process. Each queue
  * ID is bound through the authenticated RinOS SDK; the returned V6 callback
  * submits canonical RinGPU records through the process-submit syscall. The
@@ -201,6 +224,20 @@ rin_vulkan_rinos_process_submit_backend_v4_platform_v8(
     RinVulkanRinOSProcessSubmitBackendV4* backend);
 int rin_vulkan_rinos_process_submit_backend_v4_detach(
     RinVulkanRinOSProcessSubmitBackendV4* backend);
+
+int rin_vulkan_rinos_process_submit_backend_v5_init(
+    RinVulkanRinOSProcessSubmitBackendV5* backend,
+    RinVulkanProductPlatformV5* parent, uint64_t device_id,
+    uint64_t device_generation,
+    const RinVulkanRinOSProcessQueueMapV4* mappings,
+    uint32_t mapping_count);
+int rin_vulkan_rinos_process_submit_backend_v5_valid(
+    const RinVulkanRinOSProcessSubmitBackendV5* backend);
+RinVulkanProductPlatformV9*
+rin_vulkan_rinos_process_submit_backend_v5_platform_v9(
+    RinVulkanRinOSProcessSubmitBackendV5* backend);
+int rin_vulkan_rinos_process_submit_backend_v5_detach(
+    RinVulkanRinOSProcessSubmitBackendV5* backend);
 
 #ifdef __cplusplus
 }

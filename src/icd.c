@@ -88,6 +88,7 @@
 #define RIN_VK_DISPLAY_TAG UINT64_C(0x5244)
 #define RIN_VK_DISPLAY_MODE_TAG UINT64_C(0x524f)
 #define RIN_VK_PROCESS_COMPUTE_BIND_GROUP_TAG UINT64_C(0x5262)
+#define RIN_VK_PROCESS_QUERY_TOKEN_TAG UINT64_C(0x5263)
 #define RIN_VK_SURFACE_TAG UINT64_C(0x5259)
 #define RIN_VK_NATIVE_WINDOW_SURFACE_TAG UINT64_C(0x525a)
 #define RIN_VK_SWAPCHAIN_TAG UINT64_C(0x5257)
@@ -432,8 +433,11 @@ typedef struct RinVkPipelineSlot {
 typedef struct RinVkQueryValue {
     uint64_t values[9];
     uint64_t availability;
+    uint64_t process_query_token;
     uint32_t active;
     uint32_t pending;
+    uint32_t process_query_active;
+    uint32_t reserved;
 } RinVkQueryValue;
 
 typedef struct RinVkQueryPoolSlot {
@@ -626,8 +630,10 @@ static uintptr_t g_product_binding_v5;
 static uintptr_t g_product_binding_v6;
 static uintptr_t g_product_binding_v7;
 static uintptr_t g_product_binding_v8;
+static uintptr_t g_product_binding_v9;
 static uint32_t g_active_product_calls;
 static volatile uint64_t g_next_process_bind_group_token = UINT64_C(1);
+static volatile uint64_t g_next_process_query_token = UINT64_C(1);
 static uintptr_t g_wsi_binding;
 static uint32_t g_active_wsi_calls;
 static struct RinVkInstance_T g_instances[RIN_GPU_VULKAN_MAX_INSTANCES];
@@ -1427,6 +1433,42 @@ static RinVulkanProductPlatformV8* product_v8_for_base(
         return NULL;
     platform = (RinVulkanProductPlatformV8*)binding;
     return platform->base == base ? platform : NULL;
+}
+
+static RinVulkanProductPlatformV9* product_v9_for_base(
+        const RinVulkanProductPlatformV8* base) {
+    const uintptr_t binding =
+        __atomic_load_n(&g_product_binding_v9, __ATOMIC_ACQUIRE);
+    RinVulkanProductPlatformV9* platform;
+    if (binding == 0u || binding == RIN_VK_ICD_BINDING_TRANSITION)
+        return NULL;
+    platform = (RinVulkanProductPlatformV9*)binding;
+    return platform->base == base ? platform : NULL;
+}
+
+/* Holds one active product call until the returned V9 query callback finishes.
+ * This prevents the versioned adapter from being unbound during an SDK call. */
+static RinVulkanProductPlatformV9* acquire_process_query_platform(void) {
+    RinVulkanProductPlatformV1* product = acquire_product();
+    RinVulkanProductPlatformV2* product_v2;
+    RinVulkanProductPlatformV3* product_v3;
+    RinVulkanProductPlatformV4* product_v4;
+    RinVulkanProductPlatformV5* product_v5;
+    RinVulkanProductPlatformV6* product_v6;
+    RinVulkanProductPlatformV7* product_v7;
+    RinVulkanProductPlatformV8* product_v8;
+    RinVulkanProductPlatformV9* product_v9;
+    if (!product) return NULL;
+    product_v2 = product_v2_for_base(product);
+    product_v3 = product_v2 ? product_v3_for_base(product_v2) : NULL;
+    product_v4 = product_v3 ? product_v4_for_base(product_v3) : NULL;
+    product_v5 = product_v4 ? product_v5_for_base(product_v4) : NULL;
+    product_v6 = product_v5 ? product_v6_for_base(product_v5) : NULL;
+    product_v7 = product_v6 ? product_v7_for_base(product_v6) : NULL;
+    product_v8 = product_v7 ? product_v8_for_base(product_v7) : NULL;
+    product_v9 = product_v8 ? product_v9_for_base(product_v8) : NULL;
+    if (!product_v9) release_product();
+    return product_v9;
 }
 
 static int product_v4_memory_mapping_available_for_profile(
@@ -3000,6 +3042,15 @@ static int pipeline_slots_active(void) {
     return 0;
 }
 
+static int query_pool_slots_active(void) {
+    uint32_t index;
+    for (index = 0u; index < RIN_VK_MAX_QUERY_POOLS; ++index)
+        if (__atomic_load_n(&g_query_pools[index].state,
+                            __ATOMIC_ACQUIRE) != 0u)
+            return 1;
+    return 0;
+}
+
 static struct RinVkQueue_T* queue_slot(RinVkQueue queue) {
     uint32_t index;
     uint32_t queue_index;
@@ -3721,15 +3772,116 @@ static RinVulkanProductPlatformV3* bound_product_v3(void) {
     return base ? product_v3_for_base(base) : NULL;
 }
 
+#define RIN_VK_PROCESS_QUERY_COMMAND_LIMIT \
+    (RIN_VK_MAX_SUBMIT_COMMAND_BUFFERS * \
+     RIN_GPU_VULKAN_COMMAND_MAX_QUERY_COMMANDS)
+
+static uint32_t submission_query_command_count(
+        const RinVkSubmissionSlot* slot) {
+    uint32_t total = 0u;
+    uint32_t index;
+    if (!slot) return 0u;
+    for (index = 0u; index < slot->command_buffer_count; ++index) {
+        const RinGpuVulkanCommandBufferV1* buffer =
+            slot->command_buffers[index];
+        if (!buffer || buffer->query_command_count >
+                           RIN_GPU_VULKAN_COMMAND_MAX_QUERY_COMMANDS ||
+            total > RIN_VK_PROCESS_QUERY_COMMAND_LIMIT -
+                        buffer->query_command_count)
+            return UINT32_MAX;
+        total += buffer->query_command_count;
+    }
+    return total;
+}
+
+static int routed_process_query_commands_v6_supported(
+        const RinVkSubmissionSlot* slot) {
+    uint32_t buffer_index;
+    if (!slot || slot->compute_packet || slot->graphics_packet ||
+        slot->command_stream_packet)
+        return 0;
+    for (buffer_index = 0u; buffer_index < slot->command_buffer_count;
+         ++buffer_index) {
+        const RinGpuVulkanCommandBufferV1* buffer =
+            slot->command_buffers[buffer_index];
+        uint32_t index;
+        uint32_t prior_order = 0u;
+        int have_prior_order = 0;
+        if (!buffer || buffer->event_command_count != 0u ||
+            buffer->query_command_count >
+                RIN_GPU_VULKAN_COMMAND_MAX_QUERY_COMMANDS ||
+            buffer->copy_count > RIN_GPU_VULKAN_COMMAND_MAX_COPIES ||
+            buffer->transfer_op_count >
+                RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS)
+            return 0;
+        for (index = 0u; index < buffer->copy_count; ++index) {
+            const uint32_t order = buffer->copy_order[index];
+            if (order >= buffer->command_order_next ||
+                (have_prior_order && order <= prior_order))
+                return 0;
+            prior_order = order;
+            have_prior_order = 1;
+        }
+        for (index = 0u; index < buffer->transfer_op_count; ++index) {
+            const uint32_t order = buffer->transfer_op_order[index];
+            if (order >= buffer->command_order_next ||
+                (have_prior_order && order <= prior_order))
+                return 0;
+            prior_order = order;
+            have_prior_order = 1;
+        }
+        prior_order = 0u;
+        have_prior_order = 0;
+        for (index = 0u; index < buffer->query_command_count; ++index) {
+            const RinGpuVulkanQueryCommandV1* command =
+                &buffer->query_commands[index];
+            RinVkQueryPoolSlot* pool = query_pool_slot(
+                (RinVkDevice)slot->owner,
+                (RinVkQueryPool)command->query_pool);
+            if (!pool || command->query >= pool->query_count ||
+                pool->query_type != RIN_VK_QUERY_TYPE_TIMESTAMP ||
+                command->flags != 0u || command->reserved != 0u ||
+                command->reserved2 != 0u ||
+                command->command_order >= buffer->command_order_next ||
+                (have_prior_order &&
+                 command->command_order <= prior_order) ||
+                pool->queries[command->query].process_query_active != 1u ||
+                pool->queries[command->query].process_query_token == 0u)
+                return 0;
+            if (command->operation ==
+                RIN_GPU_VULKAN_QUERY_COMMAND_TIMESTAMP) {
+                if (command->stage_mask !=
+                    RIN_VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT)
+                    return 0;
+            } else if (command->operation ==
+                       RIN_GPU_VULKAN_QUERY_COMMAND_RESET) {
+                if (command->stage_mask != 0u) return 0;
+            } else {
+                return 0;
+            }
+            prior_order = command->command_order;
+            have_prior_order = 1;
+        }
+    }
+    return 1;
+}
+
 static int routed_process_commands_v6_available(
         const RinVkSubmissionSlot* slot) {
     RinVulkanProductPlatformV3* product_v3;
     RinVulkanProductPlatformV4* product_v4;
     RinVulkanProductPlatformV5* product_v5;
 
+    uint32_t query_count;
     if (!slot || !slot->owner || slot->command_buffer_count == 0u ||
-        slot->routed_packet.op_count == 0u || slot->command_stream_packet ||
-        slot->compute_packet || slot->graphics_packet)
+        slot->command_stream_packet || slot->compute_packet ||
+        slot->graphics_packet)
+        return 0;
+    query_count = submission_query_command_count(slot);
+    if (query_count == UINT32_MAX ||
+        (slot->routed_packet.op_count == 0u && query_count == 0u) ||
+        (query_count != 0u &&
+         !routed_process_query_commands_v6_supported(slot)))
         return 0;
     product_v3 = bound_product_v3();
     product_v4 = product_v3 ? product_v4_for_base(product_v3) : NULL;
@@ -3987,6 +4139,10 @@ static int process_vulkan_barrier_to_backend(
         PROCESS_MAP_BARRIER_STAGE((stage_mask), \
             RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS, (core_stage), \
             RIN_GPU_PIPELINE_STAGE_VERTEX_INPUT | \
+                RIN_GPU_PIPELINE_STAGE_VERTEX_SHADER | \
+                RIN_GPU_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS | \
+                RIN_GPU_PIPELINE_STAGE_FRAGMENT_SHADER | \
+                RIN_GPU_PIPELINE_STAGE_LATE_FRAGMENT_TESTS | \
                 RIN_GPU_PIPELINE_STAGE_COLOR_OUTPUT); \
         PROCESS_MAP_BARRIER_STAGE((stage_mask), \
             RIN_GPU_VULKAN_BARRIER_STAGE_COMPUTE, (core_stage), \
@@ -4019,14 +4175,70 @@ static int process_vulkan_barrier_to_backend(
     return 1;
 }
 
+typedef struct RinVkProcessCommandOrder {
+    uint32_t command_buffer_index;
+    uint32_t command_order;
+} RinVkProcessCommandOrder;
+
+typedef struct RinVkProcessQueryRecord {
+    uint32_t command_buffer_index;
+    const RinGpuVulkanQueryCommandV1* command;
+} RinVkProcessQueryRecord;
+
+static int routed_packet_operation_order(
+        const RinVkSubmissionSlot* slot, uint32_t operation_index,
+        RinVkProcessCommandOrder* order_out) {
+    uint32_t buffer_index;
+    uint32_t base = 0u;
+    if (!slot || !order_out || operation_index >= slot->routed_packet.op_count)
+        return 0;
+    for (buffer_index = 0u; buffer_index < slot->command_buffer_count;
+         ++buffer_index) {
+        const RinGpuVulkanCommandBufferV1* buffer =
+            slot->command_buffers[buffer_index];
+        uint32_t packet_index;
+        if (!buffer || buffer->copy_count > UINT32_MAX - base ||
+            buffer->transfer_op_count >
+                UINT32_MAX - base - buffer->copy_count)
+            return 0;
+        if (operation_index >= base &&
+            operation_index - base < buffer->copy_count) {
+            packet_index = operation_index - base;
+            order_out->command_buffer_index = buffer_index;
+            order_out->command_order = buffer->copy_order[packet_index];
+            return 1;
+        }
+        base += buffer->copy_count;
+        if (operation_index >= base &&
+            operation_index - base < buffer->transfer_op_count) {
+            packet_index = operation_index - base;
+            order_out->command_buffer_index = buffer_index;
+            order_out->command_order =
+                buffer->transfer_op_order[packet_index];
+            return 1;
+        }
+        base += buffer->transfer_op_count;
+    }
+    return 0;
+}
+
 static int translate_routed_process_commands(
         RinVkSubmissionSlot* slot, RinGpuBackendCommandV1** commands_out,
         uint32_t* command_count_out) {
     RinVkCommandResourceUse uses[RIN_VK_MAX_SUBMISSION_RESOURCE_USES];
-    RinGpuBackendCommandV1* commands;
+    RinVkProcessCommandOrder operation_orders[
+        RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS * 2u];
+    RinVkProcessQueryRecord query_records[
+        RIN_VK_PROCESS_QUERY_COMMAND_LIMIT];
+    RinGpuBackendCommandV1* commands = NULL;
+    RinGpuBackendCommandV1* merged_commands = NULL;
+    RinVkProcessCommandOrder* command_orders = NULL;
     uint32_t use_count = 0u;
     uint32_t command_count = 0u;
     uint32_t operation_index;
+    uint32_t query_count;
+    uint32_t query_record_count = 0u;
+    uint32_t merged_count = 0u;
     uint32_t capacity;
     if (commands_out) *commands_out = NULL;
     if (command_count_out) *command_count_out = 0u;
@@ -4038,22 +4250,50 @@ static int translate_routed_process_commands(
         slot->routed_packet.reserved != 0u ||
         slot->routed_packet.reserved_route != 0u ||
         slot->routed_packet.product_queue_id != slot->queue_id ||
-        slot->routed_packet.op_count == 0u ||
         slot->routed_packet.op_count > RIN_GPU_VULKAN_TRANSFER_BATCH_MAX_OPS ||
-        slot->routed_packet.op_count > UINT32_MAX / 2u ||
         !snapshot_command_resource_uses(
             slot->command_buffers, slot->command_buffer_count,
             slot->routed_packet.op_count, uses, &use_count))
         return RIN_VULKAN_PRODUCT_UNSUPPORTED;
-
-    capacity = slot->routed_packet.op_count * 2u;
+    query_count = submission_query_command_count(slot);
+    if (query_count == UINT32_MAX ||
+        (query_count != 0u &&
+         !routed_process_query_commands_v6_supported(slot)) ||
+        slot->routed_packet.op_count > (UINT32_MAX - query_count * 2u) / 2u)
+        return RIN_VULKAN_PRODUCT_UNSUPPORTED;
+    capacity = slot->routed_packet.op_count * 2u + query_count * 2u;
+    if (capacity == 0u) return RIN_VULKAN_PRODUCT_UNSUPPORTED;
     commands = (RinGpuBackendCommandV1*)calloc(capacity, sizeof(*commands));
-    if (!commands) return RIN_VULKAN_PRODUCT_NO_SPACE;
+    command_orders = (RinVkProcessCommandOrder*)calloc(
+        capacity, sizeof(*command_orders));
+    merged_commands = (RinGpuBackendCommandV1*)calloc(
+        capacity, sizeof(*merged_commands));
+    if (!commands || !command_orders || !merged_commands) {
+        free(commands);
+        free(command_orders);
+        free(merged_commands);
+        return RIN_VULKAN_PRODUCT_NO_SPACE;
+    }
+    for (uint32_t buffer_index = 0u;
+         buffer_index < slot->command_buffer_count; ++buffer_index) {
+        const RinGpuVulkanCommandBufferV1* buffer =
+            slot->command_buffers[buffer_index];
+        for (uint32_t query_index = 0u;
+             query_index < buffer->query_command_count; ++query_index) {
+            query_records[query_record_count].command_buffer_index =
+                buffer_index;
+            query_records[query_record_count].command =
+                &buffer->query_commands[query_index];
+            ++query_record_count;
+        }
+    }
+    if (query_record_count != query_count) goto protocol_error;
     for (operation_index = 0u;
          operation_index < slot->routed_packet.op_count; ++operation_index) {
         const RinGpuVulkanTransferOpV2* operation =
             &slot->routed_packet.operations[operation_index];
         RinGpuBackendCommandV1* command;
+        const uint32_t command_start = command_count;
         if (operation->reserved != 0u) goto protocol_error;
         if (operation->type == RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_COPY) {
             const RinVkCommandResourceUse* source_use =
@@ -4718,7 +4958,138 @@ static int translate_routed_process_commands(
         } else {
             goto unsupported;
         }
+        if (!routed_packet_operation_order(
+                slot, operation_index, &operation_orders[operation_index]))
+            goto protocol_error;
+        for (uint32_t command_order_index = command_start;
+             command_order_index < command_count; ++command_order_index) {
+            command_orders[command_order_index].command_buffer_index =
+                operation_orders[operation_index].command_buffer_index;
+            command_orders[command_order_index].command_order =
+                operation_orders[operation_index].command_order;
+        }
     }
+    {
+        uint32_t command_index = 0u;
+        uint32_t query_index = 0u;
+        while (command_index < command_count &&
+               query_index < query_record_count) {
+            const RinVkProcessCommandOrder command_order =
+                command_orders[command_index];
+            const RinVkProcessQueryRecord* query_record =
+                &query_records[query_index];
+            const RinGpuVulkanQueryCommandV1* query_command =
+                query_record->command;
+            const RinVkProcessCommandOrder query_order = {
+                query_record->command_buffer_index,
+                query_command->command_order};
+            const int command_precedes_query =
+                command_order.command_buffer_index <
+                    query_order.command_buffer_index ||
+                (command_order.command_buffer_index ==
+                     query_order.command_buffer_index &&
+                 command_order.command_order < query_order.command_order);
+            if (command_order.command_buffer_index ==
+                    query_order.command_buffer_index &&
+                command_order.command_order == query_order.command_order)
+                goto protocol_error;
+            if (command_precedes_query) {
+                merged_commands[merged_count++] = commands[command_index++];
+            } else {
+                RinVkQueryPoolSlot* pool = query_pool_slot(
+                    (RinVkDevice)slot->owner,
+                    (RinVkQueryPool)query_command->query_pool);
+                RinVkQueryValue* query;
+                uint32_t operation_count;
+                uint32_t query_operation_index;
+                if (!pool || query_command->query >= pool->query_count)
+                    goto protocol_error;
+                query = &pool->queries[query_command->query];
+                if (query->process_query_active != 1u ||
+                    query->process_query_token == 0u)
+                    goto protocol_error;
+                operation_count = query_command->operation ==
+                        RIN_GPU_VULKAN_QUERY_COMMAND_TIMESTAMP
+                    ? 2u
+                    : 1u;
+                if (merged_count > capacity - operation_count)
+                    goto protocol_error;
+                for (query_operation_index = 0u;
+                     query_operation_index < operation_count;
+                     ++query_operation_index) {
+                    RinGpuBackendCommandV1* query_backend_command =
+                        &merged_commands[merged_count++];
+                    memset(query_backend_command, 0,
+                           sizeof(*query_backend_command));
+                    if (query_command->operation ==
+                        RIN_GPU_VULKAN_QUERY_COMMAND_RESET) {
+                        query_backend_command->type =
+                            RIN_GPU_BACKEND_COMMAND_RESET_QUERY;
+                    } else {
+                        query_backend_command->type =
+                            query_operation_index == 0u
+                                ? RIN_GPU_BACKEND_COMMAND_BEGIN_QUERY
+                                : RIN_GPU_BACKEND_COMMAND_END_QUERY;
+                    }
+                    query_backend_command->value.query.query_cookie =
+                        query->process_query_token;
+                    query_backend_command->value.query.query_type =
+                        RIN_VULKAN_PRODUCT_QUERY_TYPE_TIMESTAMP_V9;
+                }
+                ++query_index;
+            }
+        }
+        while (command_index < command_count)
+            merged_commands[merged_count++] = commands[command_index++];
+        while (query_index < query_record_count) {
+            const RinVkProcessQueryRecord* query_record =
+                &query_records[query_index++];
+            const RinGpuVulkanQueryCommandV1* query_command =
+                query_record->command;
+            RinVkQueryPoolSlot* pool = query_pool_slot(
+                (RinVkDevice)slot->owner,
+                (RinVkQueryPool)query_command->query_pool);
+            RinVkQueryValue* query;
+            uint32_t operation_count;
+            uint32_t query_operation_index;
+            if (!pool || query_command->query >= pool->query_count)
+                goto protocol_error;
+            query = &pool->queries[query_command->query];
+            if (query->process_query_active != 1u ||
+                query->process_query_token == 0u)
+                goto protocol_error;
+            operation_count = query_command->operation ==
+                    RIN_GPU_VULKAN_QUERY_COMMAND_TIMESTAMP
+                ? 2u
+                : 1u;
+            if (merged_count > capacity - operation_count)
+                goto protocol_error;
+            for (query_operation_index = 0u;
+                 query_operation_index < operation_count;
+                 ++query_operation_index) {
+                RinGpuBackendCommandV1* query_backend_command =
+                    &merged_commands[merged_count++];
+                memset(query_backend_command, 0,
+                       sizeof(*query_backend_command));
+                query_backend_command->type =
+                    query_command->operation ==
+                            RIN_GPU_VULKAN_QUERY_COMMAND_RESET
+                        ? RIN_GPU_BACKEND_COMMAND_RESET_QUERY
+                        : (query_operation_index == 0u
+                               ? RIN_GPU_BACKEND_COMMAND_BEGIN_QUERY
+                               : RIN_GPU_BACKEND_COMMAND_END_QUERY);
+                query_backend_command->value.query.query_cookie =
+                    query->process_query_token;
+                query_backend_command->value.query.query_type =
+                    RIN_VULKAN_PRODUCT_QUERY_TYPE_TIMESTAMP_V9;
+            }
+        }
+    }
+    free(commands);
+    free(command_orders);
+    commands = merged_commands;
+    merged_commands = NULL;
+    command_count = merged_count;
     if (command_count == 0u) goto unsupported;
     *commands_out = commands;
     *command_count_out = command_count;
@@ -4726,9 +5097,13 @@ static int translate_routed_process_commands(
 
 protocol_error:
     free(commands);
+    free(command_orders);
+    free(merged_commands);
     return RIN_VULKAN_PRODUCT_PROTOCOL;
 unsupported:
     free(commands);
+    free(command_orders);
+    free(merged_commands);
     return RIN_VULKAN_PRODUCT_UNSUPPORTED;
 }
 
@@ -4743,6 +5118,21 @@ static uint64_t reserve_process_compute_bind_group_token(void) {
                                        &expected, next + 1u, 0,
                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
             return (RIN_VK_PROCESS_COMPUTE_BIND_GROUP_TAG << 48u) | next;
+        next = expected;
+    }
+}
+
+static uint64_t reserve_process_query_token(void) {
+    uint64_t next = __atomic_load_n(&g_next_process_query_token,
+                                    __ATOMIC_RELAXED);
+    for (;;) {
+        uint64_t expected;
+        if (next == 0u || next > UINT64_C(0x0000FFFFFFFFFFFF)) return 0u;
+        expected = next;
+        if (__atomic_compare_exchange_n(&g_next_process_query_token,
+                                       &expected, next + 1u, 0,
+                                       __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+            return (RIN_VK_PROCESS_QUERY_TOKEN_TAG << 48u) | next;
         next = expected;
     }
 }
@@ -4946,6 +5336,7 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
         RIN_VULKAN_PRODUCT_MAX_SUBMISSION_WAITS];
     uint32_t wait_count = 0u;
     uint32_t wait_mask = 0u;
+    uint32_t query_command_count;
     uint64_t command_cookie;
     int use_process_commands_v6 = 0;
     int use_v2 = 0;
@@ -4974,6 +5365,13 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
         ? product_v6_for_base(product_v5_for_base(
               product_v4_for_base(product_v3)))
         : NULL;
+    query_command_count = submission_query_command_count(slot);
+    if (query_command_count == UINT32_MAX ||
+        (query_command_count != 0u &&
+         !routed_process_commands_v6_available(slot))) {
+        release_product();
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    }
     if (slot->compute_packet && slot->command_buffer_count == 1u &&
         slot->command_buffers[0])
         process_compute_pipeline = pipeline_slot(
@@ -4981,8 +5379,10 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
             slot->command_buffers[0]->dispatch_compute_pipeline);
     use_process_commands_v6 = product_v6 && !slot->command_stream_packet &&
         !slot->graphics_packet &&
-        ((slot->routed_packet.op_count != 0u && !slot->compute_packet) ||
-         (slot->compute_packet && process_compute_pipeline &&
+        ((!slot->compute_packet &&
+          routed_process_commands_v6_available(slot)) ||
+         (query_command_count == 0u && slot->compute_packet &&
+          process_compute_pipeline &&
           process_compute_pipeline->process_compute_pipeline_token != 0u));
     if (!submission_waits_satisfied(slot)) {
         if (!use_process_commands_v6) {
@@ -5514,6 +5914,71 @@ static void clear_query_pool_slot(RinVkQueryPoolSlot* slot) {
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
 }
 
+static int destroy_query_pool_process_objects(RinVkQueryPoolSlot* pool) {
+    RinVulkanProductPlatformV9* platform;
+    uint32_t index;
+    int all_destroyed = 1;
+    int has_process_query = 0;
+    if (!pool) return 0;
+    for (index = 0u; index < pool->query_count; ++index)
+        if (pool->queries[index].process_query_active != 0u)
+            has_process_query = 1;
+    if (!has_process_query) return 1;
+    platform = acquire_process_query_platform();
+    if (!platform) return 0;
+    for (index = 0u; index < pool->query_count; ++index) {
+        RinVkQueryValue* query = &pool->queries[index];
+        int result;
+        if (query->process_query_active == 0u) continue;
+        if (query->process_query_active != 1u ||
+            query->process_query_token == 0u) {
+            all_destroyed = 0;
+            continue;
+        }
+        result = platform->destroy_process_query(
+            platform->context, query->process_query_token);
+        if (result == RIN_VULKAN_PRODUCT_OK) {
+            query->process_query_active = 0u;
+            query->process_query_token = 0u;
+        } else {
+            all_destroyed = 0;
+        }
+    }
+    release_product();
+    return all_destroyed;
+}
+
+static int cleanup_device_process_query_pools(
+        struct RinVkDevice_T* device) {
+    uint32_t index;
+    if (!device) return 0;
+    sync_lock();
+    for (index = 0u; index < RIN_VK_MAX_QUERY_POOLS; ++index) {
+        RinVkQueryPoolSlot* pool = &g_query_pools[index];
+        uint32_t state = __atomic_load_n(&pool->state, __ATOMIC_ACQUIRE);
+        uint32_t query_index;
+        if ((state != 1u && state != 2u) || pool->owner != device) continue;
+        for (query_index = 0u; query_index < pool->query_count;
+             ++query_index) {
+            if (pool->queries[query_index].pending != 0u ||
+                pool->queries[query_index].active != 0u) {
+                sync_unlock();
+                return 0;
+            }
+        }
+        __atomic_store_n(&pool->state, 2u, __ATOMIC_RELEASE);
+        if (!destroy_query_pool_process_objects(pool)) {
+            if (state == 1u)
+                __atomic_store_n(&pool->state, 1u, __ATOMIC_RELEASE);
+            sync_unlock();
+            return 0;
+        }
+        clear_query_pool_slot(pool);
+    }
+    sync_unlock();
+    return 1;
+}
+
 static void clear_event_slot(RinVkEventSlot* slot) {
     if (!slot) return;
     slot->owner = NULL;
@@ -5826,13 +6291,9 @@ static void complete_submission_query_events(
             if (!pool || command->query >= pool->query_count) continue;
             query = &pool->queries[command->query];
             if (command->operation == RIN_GPU_VULKAN_QUERY_COMMAND_RESET) {
-                memset(query, 0, sizeof(*query));
-            } else if (command->operation ==
-                       RIN_GPU_VULKAN_QUERY_COMMAND_TIMESTAMP) {
-                if (query->active == 0u) {
-                    query->values[0] = submission->sequence;
-                    query->availability = 1u;
-                }
+                memset(query->values, 0, sizeof(query->values));
+                query->availability = 0u;
+                query->active = 0u;
             } else if (command->operation ==
                        RIN_GPU_VULKAN_QUERY_COMMAND_BEGIN) {
                 query->active = 1u;
@@ -5926,6 +6387,7 @@ static int validate_submission_query_events(
             RinVkQueryValue* query;
             uint32_t query_index;
             if (!pool || command->query >= pool->query_count ||
+                command->reserved != 0u || command->reserved2 != 0u ||
                 (command->flags != 0u &&
                  command->flags != RIN_VK_QUERY_CONTROL_PRECISE_BIT))
                 return 0;
@@ -5946,8 +6408,12 @@ static int validate_submission_query_events(
             } else if (command->operation ==
                        RIN_GPU_VULKAN_QUERY_COMMAND_TIMESTAMP) {
                 if (pool->query_type != RIN_VK_QUERY_TYPE_TIMESTAMP ||
-                    query_active[query_index] != 0u || command->flags != 0u)
+                    query_active[query_index] != 0u || command->flags != 0u ||
+                    command->stage_mask !=
+                        RIN_VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT)
                     return 0;
+            } else if (command->stage_mask != 0u) {
+                return 0;
             } else if (command->operation ==
                        RIN_GPU_VULKAN_QUERY_COMMAND_BEGIN) {
                 if (pool->query_type != RIN_VK_QUERY_TYPE_OCCLUSION ||
@@ -7219,14 +7685,71 @@ int rin_gpu_vulkan_icd_unbind_product_platform_v8(
     if (platform->struct_size != sizeof(*platform) ||
         platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V8_VERSION ||
         !platform->base ||
+        __atomic_load_n(&g_product_binding_v9, __ATOMIC_ACQUIRE) != 0u ||
         __atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
         resource_slots_active() || submission_slots_active() ||
-        pipeline_slots_active()) {
+        pipeline_slots_active() || query_pool_slots_active()) {
         __atomic_store_n(&g_product_binding_v8, (uintptr_t)platform,
                          __ATOMIC_RELEASE);
         return RIN_GPU_VULKAN_BUSY;
     }
     __atomic_store_n(&g_product_binding_v8, 0u, __ATOMIC_RELEASE);
+    return RIN_GPU_VULKAN_OK;
+}
+
+int rin_gpu_vulkan_icd_bind_product_platform_v9(
+        RinVulkanProductPlatformV9* platform) {
+    uintptr_t expected = 0u;
+    uintptr_t v8_binding;
+    if (!platform || (uintptr_t)platform == RIN_VK_ICD_BINDING_TRANSITION ||
+        platform->struct_size != sizeof(*platform) ||
+        platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V9_VERSION ||
+        !platform->base || !platform->context ||
+        !platform->create_process_query ||
+        !platform->destroy_process_query ||
+        !platform->get_process_query_result ||
+        !wsi_zero_words(platform->reserved, 2u))
+        return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    if (!__atomic_compare_exchange_n(&g_product_binding_v9, &expected,
+                                    RIN_VK_ICD_BINDING_TRANSITION, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        return RIN_GPU_VULKAN_BUSY;
+    v8_binding = __atomic_load_n(&g_product_binding_v8, __ATOMIC_ACQUIRE);
+    if (v8_binding == 0u ||
+        v8_binding == RIN_VK_ICD_BINDING_TRANSITION ||
+        v8_binding != (uintptr_t)platform->base ||
+        !platform->base->base ||
+        __atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
+        query_pool_slots_active()) {
+        __atomic_store_n(&g_product_binding_v9, 0u, __ATOMIC_RELEASE);
+        return RIN_GPU_VULKAN_BUSY;
+    }
+    __atomic_store_n(&g_product_binding_v9, (uintptr_t)platform,
+                     __ATOMIC_RELEASE);
+    return RIN_GPU_VULKAN_OK;
+}
+
+int rin_gpu_vulkan_icd_unbind_product_platform_v9(
+        RinVulkanProductPlatformV9* platform) {
+    uintptr_t expected;
+    if (!platform) return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    expected = (uintptr_t)platform;
+    if (!__atomic_compare_exchange_n(
+            &g_product_binding_v9, &expected,
+            RIN_VK_ICD_BINDING_TRANSITION, 0, __ATOMIC_ACQ_REL,
+            __ATOMIC_RELAXED))
+        return expected == 0u ? RIN_GPU_VULKAN_NOT_INITIALIZED
+                              : RIN_GPU_VULKAN_BUSY;
+    if (platform->struct_size != sizeof(*platform) ||
+        platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V9_VERSION ||
+        !platform->base ||
+        __atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
+        query_pool_slots_active()) {
+        __atomic_store_n(&g_product_binding_v9, (uintptr_t)platform,
+                         __ATOMIC_RELEASE);
+        return RIN_GPU_VULKAN_BUSY;
+    }
+    __atomic_store_n(&g_product_binding_v9, 0u, __ATOMIC_RELEASE);
     return RIN_GPU_VULKAN_OK;
 }
 
@@ -11545,6 +12068,10 @@ void RIN_VKAPI_CALL vkDestroyDevice(RinVkDevice device,
         __atomic_store_n(&slot->state, 1u, __ATOMIC_RELEASE);
         return;
     }
+    if (!cleanup_device_process_query_pools(slot)) {
+        __atomic_store_n(&slot->state, 1u, __ATOMIC_RELEASE);
+        return;
+    }
     if (!cleanup_device_resources(slot)) {
         __atomic_store_n(&slot->state, 1u, __ATOMIC_RELEASE);
         return;
@@ -13316,12 +13843,58 @@ static uint32_t query_value_count(const RinVkQueryPoolSlot* pool) {
     return pool && pool->query_type == RIN_VK_QUERY_TYPE_TIMESTAMP ? 1u : 0u;
 }
 
+static RinVkResult refresh_process_query_range(RinVkQueryPoolSlot* pool,
+                                               uint32_t first_query,
+                                               uint32_t query_count) {
+    RinVulkanProductPlatformV9* platform;
+    uint32_t index;
+    if (!pool || first_query > pool->query_count ||
+        query_count > pool->query_count - first_query)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    platform = acquire_process_query_platform();
+    if (!platform) return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    for (index = 0u; index < query_count; ++index) {
+        RinVkQueryValue* query = &pool->queries[first_query + index];
+        RinVulkanProductProcessQueryResultV9 result;
+        int status;
+        if (query->process_query_active != 1u ||
+            query->process_query_token == 0u) {
+            release_product();
+            return RIN_VK_ERROR_DEVICE_LOST;
+        }
+        memset(&result, 0, sizeof(result));
+        result.struct_size = sizeof(result);
+        result.version = RIN_VULKAN_PRODUCT_PROCESS_QUERY_RESULT_V9_VERSION;
+        status = platform->get_process_query_result(
+            platform->context, query->process_query_token, &result);
+        if (status != RIN_VULKAN_PRODUCT_OK) {
+            release_product();
+            return map_product_result(status);
+        }
+        if (result.struct_size != sizeof(result) ||
+            result.version !=
+                RIN_VULKAN_PRODUCT_PROCESS_QUERY_RESULT_V9_VERSION ||
+            result.query_type != RIN_VULKAN_PRODUCT_QUERY_TYPE_TIMESTAMP_V9 ||
+            result.available > 1u || result.reserved0 != 0u ||
+            result.reserved1 != 0u) {
+            release_product();
+            return RIN_VK_ERROR_DEVICE_LOST;
+        }
+        query->availability = result.available;
+        query->values[0] = result.available != 0u ? result.values[0] : 0u;
+    }
+    release_product();
+    return RIN_VK_SUCCESS;
+}
+
 RinVkResult RIN_VKAPI_CALL vkCreateQueryPool(
         RinVkDevice device, const RinVkQueryPoolCreateInfo* create_info,
         const void* allocator, RinVkQueryPool* query_pool_out) {
     struct RinVkDevice_T* owner = device_slot(device);
     RinVkQueryPoolSlot* slot;
+    RinVulkanProductPlatformV9* platform;
     uint32_t index;
+    int status = RIN_VULKAN_PRODUCT_OK;
     (void)allocator;
     if (!query_pool_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
     *query_pool_out = 0u;
@@ -13335,11 +13908,54 @@ RinVkResult RIN_VKAPI_CALL vkCreateQueryPool(
     if (create_info->queryType != RIN_VK_QUERY_TYPE_TIMESTAMP ||
         create_info->pipelineStatistics != 0u)
         return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    platform = acquire_process_query_platform();
+    if (!platform) return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
     slot = reserve_query_pool_slot(owner, &index);
-    if (!slot) return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+    if (!slot) {
+        release_product();
+        return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
     slot->query_type = create_info->queryType;
     slot->query_count = create_info->queryCount;
     slot->pipeline_statistics = create_info->pipelineStatistics;
+    for (index = 0u; index < slot->query_count; ++index) {
+        RinVkQueryValue* query = &slot->queries[index];
+        query->process_query_token = reserve_process_query_token();
+        if (query->process_query_token == 0u) {
+            status = RIN_VULKAN_PRODUCT_LIMIT;
+            break;
+        }
+        status = platform->create_process_query(
+            platform->context, query->process_query_token,
+            RIN_VULKAN_PRODUCT_QUERY_TYPE_TIMESTAMP_V9);
+        if (status != RIN_VULKAN_PRODUCT_OK) {
+            query->process_query_token = 0u;
+            break;
+        }
+        query->process_query_active = 1u;
+    }
+    if (status != RIN_VULKAN_PRODUCT_OK) {
+        int all_destroyed = 1;
+        for (index = 0u; index < slot->query_count; ++index) {
+            RinVkQueryValue* query = &slot->queries[index];
+            if (query->process_query_active == 0u) continue;
+            if (platform->destroy_process_query(
+                    platform->context, query->process_query_token) ==
+                RIN_VULKAN_PRODUCT_OK) {
+                query->process_query_active = 0u;
+                query->process_query_token = 0u;
+            } else {
+                all_destroyed = 0;
+            }
+        }
+        release_product();
+        if (all_destroyed)
+            clear_query_pool_slot(slot);
+        else
+            __atomic_store_n(&slot->state, 2u, __ATOMIC_RELEASE);
+        return map_product_result(status);
+    }
+    release_product();
     __atomic_store_n(&slot->state, 1u, __ATOMIC_RELEASE);
     *query_pool_out = resource_handle(RIN_VK_QUERY_POOL_TAG, index,
                                        slot->generation);
@@ -13357,6 +13973,11 @@ void RIN_VKAPI_CALL vkDestroyQueryPool(RinVkDevice device,
         if (slot->queries[index].pending != 0u ||
             slot->queries[index].active != 0u)
             return;
+    __atomic_store_n(&slot->state, 2u, __ATOMIC_RELEASE);
+    if (!destroy_query_pool_process_objects(slot)) {
+        __atomic_store_n(&slot->state, 1u, __ATOMIC_RELEASE);
+        return;
+    }
     clear_query_pool_slot(slot);
 }
 
@@ -13385,6 +14006,11 @@ RinVkResult RIN_VKAPI_CALL vkGetQueryPoolResults(
             (SIZE_MAX - per_query) / stride ||
         per_query + (uint64_t)(query_count - 1u) * stride > data_size)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    {
+        RinVkResult refreshed = refresh_process_query_range(
+            pool, first_query, query_count);
+        if (refreshed != RIN_VK_SUCCESS) return refreshed;
+    }
     for (index = 0u; index < query_count; ++index) {
         if (pool->queries[first_query + index].availability == 0u)
             unavailable = 1u;
@@ -13394,6 +14020,11 @@ RinVkResult RIN_VKAPI_CALL vkGetQueryPoolResults(
         RinVkResult maintained = rin_gpu_vulkan_icd_maintain(device);
         if (maintained != RIN_VK_SUCCESS && maintained != RIN_VK_NOT_READY)
             return maintained;
+        {
+            RinVkResult refreshed = refresh_process_query_range(
+                pool, first_query, query_count);
+            if (refreshed != RIN_VK_SUCCESS) return refreshed;
+        }
         unavailable = 0u;
         for (index = 0u; index < query_count; ++index)
             if (pool->queries[first_query + index].availability == 0u)
@@ -13504,9 +14135,10 @@ void RIN_VKAPI_CALL vkCmdWriteTimestamp(
         !(pool = query_pool_slot((RinVkDevice)owner, query_pool)) ||
         query >= pool->query_count ||
         pool->query_type != RIN_VK_QUERY_TYPE_TIMESTAMP ||
-        rin_gpu_vulkan_command_buffer_record_query(
+        rin_gpu_vulkan_command_buffer_record_query_at_stage(
             &g_command_runtime, core, query_pool, query, 0u,
-            RIN_GPU_VULKAN_QUERY_COMMAND_TIMESTAMP) != RIN_GPU_VULKAN_COMMAND_OK)
+            RIN_GPU_VULKAN_QUERY_COMMAND_TIMESTAMP, stage) !=
+            RIN_GPU_VULKAN_COMMAND_OK)
         record_query_failure(core);
 }
 
@@ -13566,9 +14198,10 @@ void RIN_VKAPI_CALL vkCmdWriteTimestamp2(
         !(pool = query_pool_slot((RinVkDevice)owner, query_pool)) ||
         query >= pool->query_count ||
         pool->query_type != RIN_VK_QUERY_TYPE_TIMESTAMP ||
-        rin_gpu_vulkan_command_buffer_record_query(
+        rin_gpu_vulkan_command_buffer_record_query_at_stage(
             &g_command_runtime, core, query_pool, query, 0u,
-            RIN_GPU_VULKAN_QUERY_COMMAND_TIMESTAMP) != RIN_GPU_VULKAN_COMMAND_OK)
+            RIN_GPU_VULKAN_QUERY_COMMAND_TIMESTAMP, stage) !=
+            RIN_GPU_VULKAN_COMMAND_OK)
         record_query_failure(core);
 }
 

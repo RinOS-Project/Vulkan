@@ -419,6 +419,9 @@ typedef struct RinGpuVulkanQueryCommandV1 {
     uint32_t flags;
     uint32_t operation;
     uint32_t reserved;
+    uint64_t stage_mask;
+    uint32_t command_order;
+    uint32_t reserved2;
 } RinGpuVulkanQueryCommandV1;
 
 typedef struct RinGpuVulkanEventCommandV1 {
@@ -441,11 +444,14 @@ struct RinGpuVulkanCommandBufferV1 {
     uint32_t copy_count;
     RinGpuVulkanBufferCopyCommandV1
         copies[RIN_GPU_VULKAN_COMMAND_MAX_COPIES];
+    uint32_t copy_order[RIN_GPU_VULKAN_COMMAND_MAX_COPIES];
     uint32_t transfer_op_count;
     RinGpuVulkanTransferOpV2
         transfer_ops[RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS];
+    uint32_t transfer_op_order[RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS];
     uint32_t transfer_op_compute_phase[
         RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS];
+    uint32_t command_order_next;
     uint32_t descriptor_bind_recorded;
     uint32_t descriptor_bind_first_set;
     uint32_t descriptor_bind_set_count;
@@ -559,6 +565,11 @@ int rin_gpu_vulkan_command_buffer_record_query(
     RinGpuVulkanCommandRuntimeV1* runtime,
     RinGpuVulkanCommandBufferV1* buffer, uint64_t query_pool,
     uint32_t query, uint32_t flags, uint32_t operation);
+int rin_gpu_vulkan_command_buffer_record_query_at_stage(
+    RinGpuVulkanCommandRuntimeV1* runtime,
+    RinGpuVulkanCommandBufferV1* buffer, uint64_t query_pool,
+    uint32_t query, uint32_t flags, uint32_t operation,
+    uint64_t stage_mask);
 int rin_gpu_vulkan_command_buffer_record_event(
     RinGpuVulkanCommandRuntimeV1* runtime,
     RinGpuVulkanCommandBufferV1* buffer, uint64_t event,
