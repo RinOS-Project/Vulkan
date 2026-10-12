@@ -56,14 +56,20 @@ endif()
 # and host shared-library targets. Applications opt in when they have an
 # authenticated RinOS SDK process context.
 add_library(RinVulkanRinOSProcessBackend STATIC
-    src/rinos_process_submit_backend_v1.c)
+    src/rinos_process_submit_backend_v1.c
+    src/rinos_catalog_v1.c)
 add_library(RinVulkan::RinOSProcessBackend ALIAS
     RinVulkanRinOSProcessBackend)
 target_compile_features(RinVulkanRinOSProcessBackend PUBLIC c_std_11)
 target_include_directories(RinVulkanRinOSProcessBackend
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${RINOS_SDK_INCLUDE_DIR})
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${RINOS_SDK_INCLUDE_DIR}
+           ${RINGPU_DIR}/include ${RINGPU_DIR}/../rinresource/include)
 target_link_libraries(RinVulkanRinOSProcessBackend
     PUBLIC RinVulkan::RinVulkan)
+if(TARGET RinGPU::RinGPUIpc)
+    target_link_libraries(RinVulkanRinOSProcessBackend
+        PUBLIC RinGPU::RinGPUIpc)
+endif()
 if(MSVC)
     target_compile_options(RinVulkanRinOSProcessBackend PRIVATE /W4)
 else()
@@ -219,6 +225,24 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME rinvulkan-rinos-process-submit-backend
         COMMAND rinvulkan-rinos-process-submit-backend-test)
+    add_executable(rinvulkan-rinos-catalog-test
+        tests/rinvulkan_rinos_catalog_test.c
+        src/rinos_catalog_v1.c)
+    target_compile_features(rinvulkan-rinos-catalog-test PRIVATE c_std_11)
+    target_include_directories(rinvulkan-rinos-catalog-test PRIVATE
+        ${RINOS_SDK_INCLUDE_DIR}
+        ${RINGPU_DIR}/include
+        ${RINGPU_DIR}/../rinresource/include)
+    target_link_libraries(rinvulkan-rinos-catalog-test PRIVATE
+        RinVulkan::RinVulkan)
+    if(MSVC)
+        target_compile_options(rinvulkan-rinos-catalog-test PRIVATE /W4)
+    else()
+        target_compile_options(rinvulkan-rinos-catalog-test
+            PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+    add_test(NAME rinvulkan-rinos-catalog
+        COMMAND rinvulkan-rinos-catalog-test)
     add_executable(rinvulkan-buffer-ownership-test
         tests/rinvulkan_buffer_ownership_test.c
         src/buffer_ownership.c)

@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: MIT */
 /* One-frame RinOS application example for the ordinary Compositor WSI path.
- * The platform must already have admitted and bound its real Vulkan runtime;
- * this example never initializes the software host platform as a fallback. */
+ * RinOS bootstrap imports only the admitted physical profile and queue routes;
+ * product memory/submission/WSI bindings remain separate requirements. This
+ * example never initializes the software host platform as a fallback. */
 #if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -11,7 +12,55 @@
 #include "rinos_native_window_completion.h"
 
 #if defined(__rinos__)
+#include <rin/base.h>
+#include <rinvulkan/rinos_catalog_v1.h>
 #include "rinos_sdk_target_backend_v1.h"
+#include <stdio.h>
+#include <string.h>
+
+static RinVulkanRinOSCatalogV1 g_rinos_vulkan_catalog;
+static RinGpuVulkanRuntimeV1 g_rinos_vulkan_runtime;
+static uint32_t g_rinos_vulkan_runtime_initialized;
+static uint32_t g_rinos_vulkan_runtime_bound;
+
+static int bind_admitted_vulkan_catalog(void) {
+    uint64_t handle_secret = 0u;
+    RinSliceV1 random_bytes;
+    RinResult sdk_result;
+    int result;
+
+    random_bytes.address = (uint64_t)(uintptr_t)&handle_secret;
+    random_bytes.size = sizeof(handle_secret);
+    sdk_result = rin_random_fill_v1(random_bytes);
+    if (sdk_result != RIN_SUCCESS || handle_secret == 0u) {
+        fprintf(stderr, "RinOS secure runtime secret unavailable: %d\n",
+                (int)sdk_result);
+        return 0;
+    }
+    result = rin_vulkan_rinos_catalog_connect_v1(&g_rinos_vulkan_catalog);
+    if (result != RIN_GPU_VULKAN_OK) {
+        fprintf(stderr, "admitted Vulkan catalog query failed: %d\n", result);
+        memset(&handle_secret, 0, sizeof(handle_secret));
+        return 0;
+    }
+    result = rin_gpu_vulkan_runtime_init_from_catalog(
+        &g_rinos_vulkan_runtime, rin_vulkan_rinos_catalog_enumerate_v1,
+        &g_rinos_vulkan_catalog, handle_secret);
+    memset(&handle_secret, 0, sizeof(handle_secret));
+    if (result != RIN_GPU_VULKAN_OK) {
+        fprintf(stderr, "RinVk runtime catalog initialization failed: %d\n",
+                result);
+        return 0;
+    }
+    g_rinos_vulkan_runtime_initialized = 1u;
+    result = rin_gpu_vulkan_icd_bind_runtime(&g_rinos_vulkan_runtime);
+    if (result != RIN_GPU_VULKAN_OK) {
+        fprintf(stderr, "RinVk ICD runtime binding failed: %d\n", result);
+        return 0;
+    }
+    g_rinos_vulkan_runtime_bound = 1u;
+    return 1;
+}
 #endif
 
 #include <stdint.h>
@@ -692,6 +741,7 @@ static int rinos_native_window_surface_main(void) {
             goto cleanup;
         }
     }
+    if (!bind_admitted_vulkan_catalog()) goto cleanup;
 #endif
 
     window = wnd_create("RinVulkan native-window surface", 64, 64, 960, 540);
@@ -850,6 +900,40 @@ cleanup:
     free(physical_devices);
     if (surface != 0u) vkDestroySurfaceKHR(instance, surface, NULL);
     if (instance) vkDestroyInstance(instance, NULL);
+#if defined(__rinos__)
+    if (g_rinos_vulkan_runtime_bound != 0u) {
+        runtime_result = rin_gpu_vulkan_icd_unbind_runtime(
+            &g_rinos_vulkan_runtime);
+        if (runtime_result != RIN_GPU_VULKAN_OK) {
+            fprintf(stderr, "RinVk ICD runtime unbind failed: %d\n",
+                    runtime_result);
+            exit_status = 1;
+        } else {
+            g_rinos_vulkan_runtime_bound = 0u;
+        }
+    }
+    if (g_rinos_vulkan_runtime_initialized != 0u &&
+        g_rinos_vulkan_runtime_bound == 0u) {
+        runtime_result = rin_gpu_vulkan_runtime_shutdown(
+            &g_rinos_vulkan_runtime);
+        if (runtime_result != RIN_GPU_VULKAN_OK) {
+            fprintf(stderr, "RinVk runtime shutdown failed: %d\n",
+                    runtime_result);
+            exit_status = 1;
+        } else {
+            g_rinos_vulkan_runtime_initialized = 0u;
+        }
+    }
+    if (g_rinos_vulkan_catalog.struct_size != 0u) {
+        runtime_result = rin_vulkan_rinos_catalog_disconnect_v1(
+            &g_rinos_vulkan_catalog);
+        if (runtime_result != RIN_GPU_VULKAN_OK) {
+            fprintf(stderr, "Vulkan catalog channel close failed: %d\n",
+                    runtime_result);
+            exit_status = 1;
+        }
+    }
+#endif
     if (window != RIN_WINDOW_HANDLE_INVALID) {
         if (g_native_window_completion_registered != 0u) {
             runtime_result = wnd_set_compositor_completion_callback(

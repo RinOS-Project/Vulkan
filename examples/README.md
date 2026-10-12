@@ -19,11 +19,15 @@ damage/commit response confirms service acceptance of that transaction only.
 The ICD's ordinary path copies application swapchain images into the Compositor
 callback; those images are not required to be direct-scanout allocations.
 Final-output scanout remains separate. On RinOS, the example binds the SDK
-target backend to the real `RIN_SYS_SDK_CALL` syscall before making Runtime
-calls. This provides the process's SDK syscall transport; it does not attach
-or initialize the RinVk runtime. The system must still have an admitted, bound
-Vulkan runtime. The example does not initialize the host software platform or
-silently fall back when the physical runtime is unavailable.
+target backend to the real `RIN_SYS_SDK_CALL` syscall, queries the authenticated
+`ringpu-capability` catalog, and binds admitted physical profiles into the
+process-local RinVk runtime before `vkCreateInstance`. The queue-route adapter
+can translate the actual device queue-create order into V4
+logical-to-physical mappings. This is catalog/bootstrap integration only: it
+does not yet compose the V1–V8 product memory, submission, and WSI platform
+owners needed to accept a production device and frame. It does not initialize
+the host software platform or silently fall back when the physical runtime is
+unavailable.
 
 For the RinOS x86_64 debug user-app artifact, build the focused Meson target
 from the repository root:

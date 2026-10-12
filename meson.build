@@ -33,14 +33,21 @@ rinvulkan_dep = declare_dependency(
 # from the generic Vulkan ICD/shared library.
 rinvulkan_rinos_process_backend = static_library(
   'rinvulkan-rinos-process-backend',
-  'src/rinos_process_submit_backend_v1.c',
-  include_directories: [rinvulkan_inc, rin_sdk_inc],
+  [
+    'src/rinos_process_submit_backend_v1.c',
+    'src/rinos_catalog_v1.c',
+  ],
+  include_directories: [rinvulkan_inc, rin_sdk_inc,
+                         include_directories('../RinGPU/include',
+                                             '../rinresource/include')],
   dependencies: ringpu_dep,
   install: true,
 )
 rinvulkan_rinos_process_backend_dep = declare_dependency(
   link_with: rinvulkan_rinos_process_backend,
-  include_directories: [rinvulkan_inc, rin_sdk_inc],
+  include_directories: [rinvulkan_inc, rin_sdk_inc,
+                        include_directories('../RinGPU/include',
+                                            '../rinresource/include')],
   dependencies: rinvulkan_dep,
 )
 
@@ -51,6 +58,19 @@ rinvulkan_rinos_process_backend_test = executable(
 )
 test('rinvulkan-rinos-process-submit-backend',
      rinvulkan_rinos_process_backend_test)
+
+rinvulkan_rinos_catalog_test = executable(
+  'rinvulkan-rinos-catalog-test',
+  [
+    'tests/rinvulkan_rinos_catalog_test.c',
+    'src/rinos_catalog_v1.c',
+  ],
+  include_directories: [rinvulkan_inc, rin_sdk_inc,
+                        include_directories('../RinGPU/include',
+                                            '../rinresource/include')],
+  dependencies: rinvulkan_dep,
+)
+test('rinvulkan-rinos-catalog', rinvulkan_rinos_catalog_test)
 
 rinvulkan_native_window_process_submit_test = executable(
   'rinvulkan-native-window-process-submit-test',
