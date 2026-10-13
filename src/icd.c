@@ -1585,7 +1585,7 @@ static RinVulkanWsiPlatformV6* acquire_wsi_v6(void) {
 }
 
 static int wsi_display_surface_available(void) {
-    RinVulkanWsiPlatformV4* platform = acquire_wsi_v4();
+    RinVulkanWsiPlatformV6* platform = acquire_wsi_v6();
     if (!platform) return 0;
     release_wsi();
     return 1;
@@ -11391,7 +11391,6 @@ RinVkResult RIN_VKAPI_CALL vkQueuePresentKHR(
         RinVkImageSlot* image;
         RinVulkanWsiPresentRequestV1 request;
         RinVulkanWsiPresentRequestV2 request_v2;
-        RinVulkanWsiPlatformV4* platform;
         RinVulkanWsiPlatformV6* platform_v6;
         const uint32_t image_index = present_info->pImageIndices[index];
         uint64_t platform_token = 0u;
@@ -11468,7 +11467,13 @@ RinVkResult RIN_VKAPI_CALL vkQueuePresentKHR(
         request.present_mode = swapchain->present_mode;
 
         platform_v6 = acquire_wsi_v6();
-        if (platform_v6) {
+        if (!platform_v6) {
+            memset(pending, 0, sizeof(*pending));
+            result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+            device_wsi_unlock(device);
+            goto present_result;
+        }
+        {
             uint64_t row_pitch;
             if (image->storage_layout.struct_size !=
                     sizeof(image->storage_layout) ||
@@ -11520,17 +11525,6 @@ RinVkResult RIN_VKAPI_CALL vkQueuePresentKHR(
             platform_result = platform_v6->present_v2(
                 platform_v6->present_v2_context, &request_v2,
                 &platform_token);
-            release_wsi();
-        } else {
-            platform = acquire_wsi_v4();
-            if (!platform) {
-                memset(pending, 0, sizeof(*pending));
-                result = RIN_VK_ERROR_INITIALIZATION_FAILED;
-                device_wsi_unlock(device);
-                goto present_result;
-            }
-            platform_result = platform->present(platform->context, &request,
-                                                &platform_token);
             release_wsi();
         }
         if (platform_result != RIN_VULKAN_WSI_PLATFORM_OK ||

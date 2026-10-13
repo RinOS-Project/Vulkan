@@ -712,6 +712,7 @@ int main(void) {
     RinVulkanWsiPlatformV2 wsi;
     RinVulkanWsiPlatformV3 wsi_v3;
     RinVulkanWsiPlatformV4 wsi_v4;
+    RinVulkanWsiPlatformV5 wsi_v5;
     RinVulkanWsiPlatformV6 wsi_v6;
     TestWsiProvider provider;
     RinVkApplicationInfo application;
@@ -770,6 +771,7 @@ int main(void) {
     uint32_t runtime_bound = 0u;
     uint32_t software_initialized = 0u;
     uint32_t product_bound = 0u;
+    uint32_t wsi_v5_bound = 0u;
     uint32_t wsi_bound = 0u;
     int exit_code = 1;
 
@@ -829,6 +831,12 @@ int main(void) {
     wsi_v4.struct_size = sizeof(wsi_v4);
     wsi_v4.version = RIN_VULKAN_WSI_PLATFORM_V4_VERSION;
     wsi_v4.query_surface_properties = query_surface_properties;
+    memset(&wsi_v5, 0, sizeof(wsi_v5));
+    wsi_v5.base = wsi_v4;
+    wsi_v5.base.struct_size = sizeof(wsi_v5);
+    wsi_v5.base.version = RIN_VULKAN_WSI_PLATFORM_V5_VERSION;
+    wsi_v5.resolve_device_generation = resolve_device_generation;
+    wsi_v5.generation_context = &provider;
     memset(&wsi_v6, 0, sizeof(wsi_v6));
     wsi_v6.base.base = wsi_v4;
     wsi_v6.base.base.struct_size = sizeof(wsi_v6);
@@ -871,6 +879,25 @@ int main(void) {
     CHECK(rin_gpu_vulkan_icd_bind_wsi_platform_v4(&wsi_v4) ==
           RIN_GPU_VULKAN_INVALID_ARGUMENT);
     wsi_v4.query_surface_properties = query_surface_properties;
+
+    /* V5 has no image-layout present callback. Do not expose direct display
+     * until the V6 contract can carry layout through the validator. */
+    CHECK(rin_gpu_vulkan_icd_bind_wsi_platform_v5(&wsi_v5) ==
+          RIN_GPU_VULKAN_OK);
+    wsi_v5_bound = 1u;
+    count = 4u;
+    CHECK(vkEnumerateInstanceExtensionProperties(NULL, &count, extensions) ==
+          RIN_VK_SUCCESS);
+    CHECK(count == 3u &&
+          strcmp(extensions[0].extensionName,
+                 RIN_VK_EXT_DEBUG_UTILS_EXTENSION) == 0 &&
+          strcmp(extensions[1].extensionName,
+                 RIN_VK_KHR_SURFACE_EXTENSION) == 0 &&
+          strcmp(extensions[2].extensionName,
+                 RIN_VK_RINOS_NATIVE_WINDOW_SURFACE_EXTENSION) == 0);
+    CHECK(rin_gpu_vulkan_icd_unbind_wsi_platform_v5(&wsi_v5) ==
+          RIN_GPU_VULKAN_OK);
+    wsi_v5_bound = 0u;
 
     count = 4u;
     CHECK(vkEnumerateInstanceExtensionProperties(NULL, &count, extensions) ==
@@ -1995,6 +2022,10 @@ cleanup:
     if (instance) vkDestroyInstance(instance, NULL);
     if (wsi_bound &&
         rin_gpu_vulkan_icd_unbind_wsi_platform_v6(&wsi_v6) !=
+            RIN_GPU_VULKAN_OK)
+        exit_code = 1;
+    if (wsi_v5_bound &&
+        rin_gpu_vulkan_icd_unbind_wsi_platform_v5(&wsi_v5) !=
             RIN_GPU_VULKAN_OK)
         exit_code = 1;
     if (product_bound &&
