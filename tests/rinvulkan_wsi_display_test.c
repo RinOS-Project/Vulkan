@@ -34,7 +34,9 @@ typedef struct TestWsiProvider {
     uint32_t cancel_call_count;
     uint32_t complete_presents;
     uint64_t next_present_token;
+    RinVulkanWsiPresentFn present_handler;
     RinVulkanWsiPresentRequestV1 last_present;
+    RinVulkanWsiPresentRequestV2 last_present_v2;
     TestPendingPresent pending_presents[TEST_PENDING_PRESENT_CAPACITY];
     uint32_t surface_support;
     uint32_t surface_support_calls;
@@ -425,6 +427,78 @@ static int present_retained(
     return RIN_VULKAN_WSI_PLATFORM_OK;
 }
 
+static int resolve_device_generation(
+    void* context, const RinVulkanWsiPhysicalDeviceIdentityV1* identity,
+    uint64_t* physical_device_generation_out) {
+    const TestWsiProvider* provider = (const TestWsiProvider*)context;
+    if (!provider || !identity || !physical_device_generation_out ||
+        identity->struct_size != sizeof(*identity) ||
+        identity->version != RIN_VULKAN_WSI_PHYSICAL_DEVICE_IDENTITY_V1_VERSION ||
+        identity->vendor_id != 0x1af4u || identity->device_id != 0x1050u ||
+        identity->product_device_epoch != provider->device_generation ||
+        identity->device_uuid[0] != 0x31u || identity->reserved[0] != 0u ||
+        identity->reserved[1] != 0u)
+        return RIN_VULKAN_WSI_PLATFORM_UNSUPPORTED;
+    *physical_device_generation_out = provider->device_generation;
+    return RIN_VULKAN_WSI_PLATFORM_OK;
+}
+
+static int present_retained_v2(
+    void* context, const RinVulkanWsiPresentRequestV2* request,
+    uint64_t* present_token_out) {
+    TestWsiProvider* provider = (TestWsiProvider*)context;
+    RinVulkanWsiPresentRequestV1 legacy_request;
+    uint64_t row_bytes;
+    if (!provider || !request || !present_token_out ||
+        request->struct_size != sizeof(*request) ||
+        request->version != RIN_VULKAN_WSI_PRESENT_REQUEST_V2_VERSION ||
+        request->image_layout.struct_size !=
+            sizeof(request->image_layout) ||
+        request->image_layout.version !=
+            RIN_VULKAN_WSI_IMAGE_LAYOUT_V1_VERSION ||
+        request->image_layout.kind !=
+            RIN_VULKAN_WSI_IMAGE_LAYOUT_KIND_LINEAR ||
+        request->image_layout.plane_count != 1u ||
+        request->image_layout.modifier != 0u ||
+        request->width == 0u || request->height == 0u ||
+        request->image_layout.planes[0].offset_bytes != 0u ||
+        request->image_layout.reserved[0] != 0u ||
+        request->image_layout.reserved[1] != 0u ||
+        request->reserved[0] != 0u || request->reserved[1] != 0u)
+        return RIN_VULKAN_WSI_PLATFORM_INVALID_ARGUMENT;
+    row_bytes = (uint64_t)request->width * 4u;
+    if (request->image_layout.planes[0].row_pitch_bytes != row_bytes ||
+        request->height > UINT64_MAX / row_bytes ||
+        request->image_layout.planes[0].size_bytes !=
+            row_bytes * request->height ||
+        request->image_layout.planes[0].size_bytes !=
+            request->allocation_size)
+        return RIN_VULKAN_WSI_PLATFORM_INVALID_ARGUMENT;
+    provider->last_present_v2 = *request;
+    memset(&legacy_request, 0, sizeof(legacy_request));
+    legacy_request.struct_size = sizeof(legacy_request);
+    legacy_request.version = RIN_VULKAN_WSI_PLATFORM_VERSION;
+    legacy_request.display_cookie = request->display_cookie;
+    legacy_request.mode_cookie = request->mode_cookie;
+    legacy_request.allocation_handle = request->allocation_handle;
+    legacy_request.allocation_offset = request->allocation_offset;
+    legacy_request.allocation_size = request->allocation_size;
+    legacy_request.output_generation = request->output_generation;
+    legacy_request.device_generation = request->device_generation;
+    legacy_request.frame_id = request->frame_id;
+    legacy_request.image_index = request->image_index;
+    legacy_request.width = request->width;
+    legacy_request.height = request->height;
+    legacy_request.format = request->format;
+    legacy_request.present_mode = request->present_mode;
+    legacy_request.flags = request->flags;
+    return provider->present_handler
+               ? provider->present_handler(context, &legacy_request,
+                                           present_token_out)
+               : present_retained(context, &legacy_request,
+                                  present_token_out);
+}
+
 static int present_retained_then_lost(
     void* context, const RinVulkanWsiPresentRequestV1* request,
     uint64_t* present_token_out) {
@@ -638,6 +712,7 @@ int main(void) {
     RinVulkanWsiPlatformV2 wsi;
     RinVulkanWsiPlatformV3 wsi_v3;
     RinVulkanWsiPlatformV4 wsi_v4;
+    RinVulkanWsiPlatformV6 wsi_v6;
     TestWsiProvider provider;
     RinVkApplicationInfo application;
     RinVkDebugUtilsMessengerCreateInfoEXT loader_debug_create_info;
@@ -723,6 +798,7 @@ int main(void) {
     product_bound = 1u;
 
     make_display_provider(&provider);
+    provider.present_handler = present_unsupported;
     memset(&wsi, 0, sizeof(wsi));
     wsi.struct_size = sizeof(wsi);
     wsi.version = RIN_VULKAN_WSI_PLATFORM_V2_VERSION;
@@ -753,6 +829,14 @@ int main(void) {
     wsi_v4.struct_size = sizeof(wsi_v4);
     wsi_v4.version = RIN_VULKAN_WSI_PLATFORM_V4_VERSION;
     wsi_v4.query_surface_properties = query_surface_properties;
+    memset(&wsi_v6, 0, sizeof(wsi_v6));
+    wsi_v6.base.base = wsi_v4;
+    wsi_v6.base.base.struct_size = sizeof(wsi_v6);
+    wsi_v6.base.base.version = RIN_VULKAN_WSI_PLATFORM_V6_VERSION;
+    wsi_v6.base.resolve_device_generation = resolve_device_generation;
+    wsi_v6.base.generation_context = &provider;
+    wsi_v6.present_v2 = present_retained_v2;
+    wsi_v6.present_v2_context = &provider;
     provider.expected_queue_flags = RIN_GPU_VK_QUEUE_GRAPHICS |
                                    RIN_GPU_VK_QUEUE_COMPUTE |
                                    RIN_GPU_VK_QUEUE_TRANSFER;
@@ -890,10 +974,10 @@ int main(void) {
     count = 0u;
     CHECK(vkGetPhysicalDeviceDisplayPropertiesKHR(physical, &count, NULL) ==
           RIN_VK_ERROR_EXTENSION_NOT_PRESENT);
-    CHECK(rin_gpu_vulkan_icd_bind_wsi_platform_v4(&wsi_v4) ==
+    CHECK(rin_gpu_vulkan_icd_bind_wsi_platform_v6(&wsi_v6) ==
           RIN_GPU_VULKAN_OK);
     wsi_bound = 1u;
-    CHECK(rin_gpu_vulkan_icd_unbind_wsi_platform_v4(&wsi_v4) ==
+    CHECK(rin_gpu_vulkan_icd_unbind_wsi_platform_v6(&wsi_v6) ==
           RIN_GPU_VULKAN_BUSY);
     CHECK(vkGetInstanceProcAddr(
               instance, "vkGetPhysicalDeviceDisplayPropertiesKHR") == NULL);
@@ -1675,9 +1759,9 @@ int main(void) {
                 vkDestroySwapchainKHR(device, swapchain, NULL);
                 swapchain = 0u;
 
-                wsi_v4.present = present_retained_then_lost;
-                wsi_v4.poll_present = poll_present_retained;
-                wsi_v4.cancel_present = cancel_present_retained;
+                provider.present_handler = present_retained_then_lost;
+                wsi_v6.base.base.poll_present = poll_present_retained;
+                wsi_v6.base.base.cancel_present = cancel_present_retained;
                 CHECK(vkCreateSwapchainKHR(device, &swapchain_create_info,
                                           NULL, &swapchain) == RIN_VK_SUCCESS);
                 CHECK(vkAcquireNextImageKHR(device, swapchain, 0u, semaphore,
@@ -1696,7 +1780,9 @@ int main(void) {
                 CHECK(provider.cancel_call_count == 1u);
                 retained_present_base = provider.present_call_count;
                 cancel_base = provider.cancel_call_count;
-                wsi_v4.present = present_retained;
+                provider.present_handler = present_retained;
+                wsi_v6.base.base.poll_present = poll_present_retained;
+                wsi_v6.base.base.cancel_present = cancel_present_retained;
 
                 CHECK(vkCreateSwapchainKHR(device, &swapchain_create_info,
                                           NULL, &swapchain) == RIN_VK_SUCCESS);
@@ -1730,7 +1816,15 @@ int main(void) {
                       provider.last_present.output_generation ==
                           provider.output_generation &&
                       provider.last_present.device_generation ==
-                          provider.device_generation);
+                          provider.device_generation &&
+                      provider.last_present_v2.version ==
+                          RIN_VULKAN_WSI_PRESENT_REQUEST_V2_VERSION &&
+                      provider.last_present_v2.image_layout.kind ==
+                          RIN_VULKAN_WSI_IMAGE_LAYOUT_KIND_LINEAR &&
+                      provider.last_present_v2.image_layout.planes[0].row_pitch_bytes ==
+                          UINT64_C(1280) * 4u &&
+                      provider.last_present_v2.image_layout.planes[0].size_bytes ==
+                          UINT64_C(1280) * 720u * 4u);
 
                 /* A pending FIFO present must not prevent acquisition of a
                  * different, still-available swapchain image. */
@@ -1900,7 +1994,7 @@ cleanup:
     if (foreign_instance) vkDestroyInstance(foreign_instance, NULL);
     if (instance) vkDestroyInstance(instance, NULL);
     if (wsi_bound &&
-        rin_gpu_vulkan_icd_unbind_wsi_platform_v4(&wsi_v4) !=
+        rin_gpu_vulkan_icd_unbind_wsi_platform_v6(&wsi_v6) !=
             RIN_GPU_VULKAN_OK)
         exit_code = 1;
     if (product_bound &&

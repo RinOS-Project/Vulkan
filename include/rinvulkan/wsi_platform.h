@@ -10,7 +10,13 @@
 #define RIN_VULKAN_WSI_PLATFORM_V3_VERSION 3u
 #define RIN_VULKAN_WSI_PLATFORM_V4_VERSION 4u
 #define RIN_VULKAN_WSI_PLATFORM_V5_VERSION 5u
+#define RIN_VULKAN_WSI_PLATFORM_V6_VERSION 6u
+#define RIN_VULKAN_WSI_PRESENT_REQUEST_V2_VERSION 2u
 #define RIN_VULKAN_WSI_PHYSICAL_DEVICE_IDENTITY_V1_VERSION 1u
+#define RIN_VULKAN_WSI_IMAGE_LAYOUT_V1_VERSION 1u
+#define RIN_VULKAN_WSI_IMAGE_LAYOUT_MAX_PLANES 4u
+#define RIN_VULKAN_WSI_IMAGE_LAYOUT_KIND_UNKNOWN 0u
+#define RIN_VULKAN_WSI_IMAGE_LAYOUT_KIND_LINEAR 1u
 #define RIN_VULKAN_WSI_MAX_DISPLAYS 16u
 #define RIN_VULKAN_WSI_MAX_MODES 64u
 #define RIN_VULKAN_WSI_MAX_PLANES 16u
@@ -88,6 +94,49 @@ typedef struct RinVulkanWsiPresentRequestV1 {
     uint64_t reserved[2];
 } RinVulkanWsiPresentRequestV1;
 
+/* V2 carries the storage layout selected by the ICD for the exact image
+ * allocation. A zero modifier means no implementation-defined modifier is
+ * applied; it does not mean that an unknown layout may be treated as linear.
+ * Plane offsets and pitches are allocation-relative and each plane's byte
+ * extent must fit within allocation_size. */
+typedef struct RinVulkanWsiImagePlaneLayoutV1 {
+    uint64_t offset_bytes;
+    uint64_t row_pitch_bytes;
+    uint64_t size_bytes;
+} RinVulkanWsiImagePlaneLayoutV1;
+
+typedef struct RinVulkanWsiImageLayoutV1 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint32_t kind;
+    uint32_t plane_count;
+    uint64_t modifier;
+    RinVulkanWsiImagePlaneLayoutV1 planes[
+        RIN_VULKAN_WSI_IMAGE_LAYOUT_MAX_PLANES];
+    uint64_t reserved[2];
+} RinVulkanWsiImageLayoutV1;
+
+typedef struct RinVulkanWsiPresentRequestV2 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint64_t display_cookie;
+    uint64_t mode_cookie;
+    uint64_t allocation_handle;
+    uint64_t allocation_offset;
+    uint64_t allocation_size;
+    uint64_t output_generation;
+    uint64_t device_generation;
+    uint64_t frame_id;
+    uint32_t image_index;
+    uint32_t width;
+    uint32_t height;
+    uint32_t format;
+    uint32_t present_mode;
+    uint32_t flags;
+    RinVulkanWsiImageLayoutV1 image_layout;
+    uint64_t reserved[2];
+} RinVulkanWsiPresentRequestV2;
+
 typedef struct RinVulkanWsiPresentStatusV1 {
     uint32_t struct_size;
     uint32_t version;
@@ -145,6 +194,9 @@ typedef int (*RinVulkanWsiQueryModesFn)(
  * until poll_present reports COMPLETE or cancel_present retires its token. */
 typedef int (*RinVulkanWsiPresentFn)(
     void* context, const RinVulkanWsiPresentRequestV1* request,
+    uint64_t* present_token_out);
+typedef int (*RinVulkanWsiPresentFnV2)(
+    void* context, const RinVulkanWsiPresentRequestV2* request,
     uint64_t* present_token_out);
 typedef int (*RinVulkanWsiPollPresentFn)(
     void* context, uint64_t display_cookie, uint64_t present_token,
@@ -312,6 +364,16 @@ typedef struct RinVulkanWsiPlatformV5 {
     uint64_t reserved_v5[2];
 } RinVulkanWsiPlatformV5;
 
+/* V6 preserves V5 query, generation, poll and cancel ABIs. Direct display
+ * present uses the explicit-layout callback; a V6 consumer must not route a
+ * V2 request through the V1 callback and discard its image layout. */
+typedef struct RinVulkanWsiPlatformV6 {
+    RinVulkanWsiPlatformV5 base;
+    RinVulkanWsiPresentFnV2 present_v2;
+    void* present_v2_context;
+    uint64_t reserved_v6[2];
+} RinVulkanWsiPlatformV6;
+
 #if defined(__cplusplus)
 static_assert(sizeof(RinVulkanWsiDisplayPlaneV2) == 64u,
               "Vulkan WSI plane ABI drift");
@@ -323,6 +385,12 @@ static_assert(sizeof(RinVulkanWsiModeV1) == 64u,
               "Vulkan WSI mode ABI drift");
 static_assert(sizeof(RinVulkanWsiPresentRequestV1) == 112u,
               "Vulkan WSI present request ABI drift");
+static_assert(sizeof(RinVulkanWsiImagePlaneLayoutV1) == 24u,
+              "Vulkan WSI image-plane layout ABI drift");
+static_assert(sizeof(RinVulkanWsiImageLayoutV1) == 136u,
+              "Vulkan WSI image layout ABI drift");
+static_assert(sizeof(RinVulkanWsiPresentRequestV2) == 248u,
+              "Vulkan WSI V2 present request ABI drift");
 static_assert(sizeof(RinVulkanWsiPresentStatusV1) == 48u,
               "Vulkan WSI present status ABI drift");
 static_assert(sizeof(RinVulkanWsiPlatformV1) ==
@@ -358,6 +426,12 @@ static_assert(offsetof(RinVulkanWsiPlatformV5, resolve_device_generation) ==
 static_assert(sizeof(RinVulkanWsiPlatformV5) ==
                   (sizeof(void*) == 8u ? 256u : 204u),
               "Vulkan WSI platform V5 ABI drift");
+static_assert(offsetof(RinVulkanWsiPlatformV6, present_v2) ==
+                  sizeof(RinVulkanWsiPlatformV5),
+              "Vulkan WSI V6 callback prefix drift");
+static_assert(sizeof(RinVulkanWsiPlatformV6) ==
+                  (sizeof(void*) == 8u ? 288u : 232u),
+              "Vulkan WSI platform V6 ABI drift");
 #else
 _Static_assert(sizeof(RinVulkanWsiDisplayPlaneV2) == 64u,
                "Vulkan WSI plane ABI drift");
@@ -369,6 +443,12 @@ _Static_assert(sizeof(RinVulkanWsiModeV1) == 64u,
                "Vulkan WSI mode ABI drift");
 _Static_assert(sizeof(RinVulkanWsiPresentRequestV1) == 112u,
                "Vulkan WSI present request ABI drift");
+_Static_assert(sizeof(RinVulkanWsiImagePlaneLayoutV1) == 24u,
+               "Vulkan WSI image-plane layout ABI drift");
+_Static_assert(sizeof(RinVulkanWsiImageLayoutV1) == 136u,
+               "Vulkan WSI image layout ABI drift");
+_Static_assert(sizeof(RinVulkanWsiPresentRequestV2) == 248u,
+               "Vulkan WSI V2 present request ABI drift");
 _Static_assert(sizeof(RinVulkanWsiPresentStatusV1) == 48u,
                "Vulkan WSI present status ABI drift");
 _Static_assert(sizeof(RinVulkanWsiPlatformV1) ==
@@ -404,6 +484,12 @@ _Static_assert(offsetof(RinVulkanWsiPlatformV5, resolve_device_generation) ==
 _Static_assert(sizeof(RinVulkanWsiPlatformV5) ==
                    (sizeof(void*) == 8u ? 256u : 204u),
                "Vulkan WSI platform V5 ABI drift");
+_Static_assert(offsetof(RinVulkanWsiPlatformV6, present_v2) ==
+                   sizeof(RinVulkanWsiPlatformV5),
+               "Vulkan WSI V6 callback prefix drift");
+_Static_assert(sizeof(RinVulkanWsiPlatformV6) ==
+                   (sizeof(void*) == 8u ? 288u : 232u),
+               "Vulkan WSI platform V6 ABI drift");
 #endif
 
 #endif /* RINVULKAN_PUBLIC_WSI_PLATFORM_H */

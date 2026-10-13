@@ -261,6 +261,7 @@ typedef struct RinVkImageSlot {
     uint32_t height;
     uint32_t samples;
     uint32_t current_layout;
+    RinVulkanWsiImageLayoutV1 storage_layout;
     RinVkImageOwnershipState ownership;
 } RinVkImageSlot;
 
@@ -1531,7 +1532,9 @@ static RinVulkanWsiPlatformV2* acquire_wsi_v2(void) {
         (platform->version == RIN_VULKAN_WSI_PLATFORM_V4_VERSION &&
          platform->struct_size == sizeof(RinVulkanWsiPlatformV4)) ||
         (platform->version == RIN_VULKAN_WSI_PLATFORM_V5_VERSION &&
-         platform->struct_size == sizeof(RinVulkanWsiPlatformV5)))
+         platform->struct_size == sizeof(RinVulkanWsiPlatformV5)) ||
+        (platform->version == RIN_VULKAN_WSI_PLATFORM_V6_VERSION &&
+         platform->struct_size == sizeof(RinVulkanWsiPlatformV6)))
         return (RinVulkanWsiPlatformV2*)platform;
     release_wsi();
     return NULL;
@@ -1545,7 +1548,9 @@ static RinVulkanWsiPlatformV3* acquire_wsi_v3(void) {
         (platform->version == RIN_VULKAN_WSI_PLATFORM_V4_VERSION &&
          platform->struct_size == sizeof(RinVulkanWsiPlatformV4)) ||
         (platform->version == RIN_VULKAN_WSI_PLATFORM_V5_VERSION &&
-         platform->struct_size == sizeof(RinVulkanWsiPlatformV5)))
+         platform->struct_size == sizeof(RinVulkanWsiPlatformV5)) ||
+        (platform->version == RIN_VULKAN_WSI_PLATFORM_V6_VERSION &&
+         platform->struct_size == sizeof(RinVulkanWsiPlatformV6)))
         return (RinVulkanWsiPlatformV3*)platform;
     release_wsi();
     return NULL;
@@ -1557,11 +1562,23 @@ static RinVulkanWsiPlatformV4* acquire_wsi_v4(void) {
     if (!((platform->version == RIN_VULKAN_WSI_PLATFORM_V4_VERSION &&
            platform->struct_size == sizeof(RinVulkanWsiPlatformV4)) ||
           (platform->version == RIN_VULKAN_WSI_PLATFORM_V5_VERSION &&
-           platform->struct_size == sizeof(RinVulkanWsiPlatformV5)))) {
+           platform->struct_size == sizeof(RinVulkanWsiPlatformV5)) ||
+          (platform->version == RIN_VULKAN_WSI_PLATFORM_V6_VERSION &&
+           platform->struct_size == sizeof(RinVulkanWsiPlatformV6)))) {
         release_wsi();
         return NULL;
     }
     return (RinVulkanWsiPlatformV4*)platform;
+}
+
+static RinVulkanWsiPlatformV6* acquire_wsi_v6(void) {
+    RinVulkanWsiPlatformV1* platform = acquire_wsi();
+    if (!platform) return NULL;
+    if (platform->version == RIN_VULKAN_WSI_PLATFORM_V6_VERSION &&
+        platform->struct_size == sizeof(RinVulkanWsiPlatformV6))
+        return (RinVulkanWsiPlatformV6*)platform;
+    release_wsi();
+    return NULL;
 }
 
 static int wsi_display_surface_available(void) {
@@ -2212,9 +2229,14 @@ static RinVkResult wsi_resolve_device_generation(
     *generation_out = 0u;
     bound = acquire_wsi();
     if (!bound) return RIN_VK_ERROR_EXTENSION_NOT_PRESENT;
-    if (bound->version == RIN_VULKAN_WSI_PLATFORM_V5_VERSION &&
-        bound->struct_size == sizeof(RinVulkanWsiPlatformV5)) {
-        RinVulkanWsiPlatformV5* platform = (RinVulkanWsiPlatformV5*)bound;
+    if ((bound->version == RIN_VULKAN_WSI_PLATFORM_V5_VERSION &&
+         bound->struct_size == sizeof(RinVulkanWsiPlatformV5)) ||
+        (bound->version == RIN_VULKAN_WSI_PLATFORM_V6_VERSION &&
+         bound->struct_size == sizeof(RinVulkanWsiPlatformV6))) {
+        RinVulkanWsiPlatformV5* platform =
+            bound->version == RIN_VULKAN_WSI_PLATFORM_V6_VERSION
+                ? &((RinVulkanWsiPlatformV6*)bound)->base
+                : (RinVulkanWsiPlatformV5*)bound;
         memset(&identity, 0, sizeof(identity));
         identity.struct_size = sizeof(identity);
         identity.version =
@@ -7902,6 +7924,45 @@ int rin_gpu_vulkan_icd_bind_wsi_platform_v5(
     return RIN_GPU_VULKAN_OK;
 }
 
+int rin_gpu_vulkan_icd_bind_wsi_platform_v6(
+    RinVulkanWsiPlatformV6* platform) {
+    uintptr_t expected = 0u;
+    RinVulkanWsiPlatformV5* base;
+    if (!platform || (uintptr_t)platform == RIN_VK_ICD_BINDING_TRANSITION)
+        return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    base = &platform->base;
+    if (__atomic_load_n(&g_runtime_binding, __ATOMIC_ACQUIRE) == 0u ||
+        __atomic_load_n(&g_runtime_binding, __ATOMIC_ACQUIRE) ==
+            RIN_VK_ICD_BINDING_TRANSITION ||
+        __atomic_load_n(&g_product_binding, __ATOMIC_ACQUIRE) == 0u ||
+        __atomic_load_n(&g_product_binding, __ATOMIC_ACQUIRE) ==
+            RIN_VK_ICD_BINDING_TRANSITION ||
+        base->base.struct_size != sizeof(*platform) ||
+        base->base.version != RIN_VULKAN_WSI_PLATFORM_V6_VERSION ||
+        !base->base.context || !base->base.query_displays ||
+        !base->base.query_modes || !base->base.present ||
+        !base->base.poll_present || !base->base.cancel_present ||
+        !base->base.query_planes ||
+        !base->base.query_plane_supported_displays ||
+        !base->base.query_plane_capabilities ||
+        !base->base.query_surface_support ||
+        !base->base.query_surface_properties ||
+        !wsi_zero_words(base->base.reserved, 4u) ||
+        !wsi_zero_words(base->base.reserved_v2, 4u) ||
+        !wsi_zero_words(base->base.reserved_v3, 4u) ||
+        !wsi_zero_words(base->base.reserved_v4, 4u) ||
+        !base->resolve_device_generation || !base->generation_context ||
+        !wsi_zero_words(base->reserved_v5, 2u) ||
+        !platform->present_v2 || !platform->present_v2_context ||
+        !wsi_zero_words(platform->reserved_v6, 2u))
+        return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    if (!__atomic_compare_exchange_n(&g_wsi_binding, &expected,
+                                     (uintptr_t)platform, 0,
+                                     __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+        return RIN_GPU_VULKAN_BUSY;
+    return RIN_GPU_VULKAN_OK;
+}
+
 static int unbind_wsi_platform(void* platform) {
     uintptr_t expected;
     uint32_t index;
@@ -7970,6 +8031,11 @@ int rin_gpu_vulkan_icd_unbind_wsi_platform_v4(
 
 int rin_gpu_vulkan_icd_unbind_wsi_platform_v5(
     RinVulkanWsiPlatformV5* platform) {
+    return unbind_wsi_platform(platform);
+}
+
+int rin_gpu_vulkan_icd_unbind_wsi_platform_v6(
+    RinVulkanWsiPlatformV6* platform) {
     return unbind_wsi_platform(platform);
 }
 
@@ -11311,7 +11377,9 @@ RinVkResult RIN_VKAPI_CALL vkQueuePresentKHR(
         RinVkPendingPresent* pending;
         RinVkImageSlot* image;
         RinVulkanWsiPresentRequestV1 request;
+        RinVulkanWsiPresentRequestV2 request_v2;
         RinVulkanWsiPlatformV4* platform;
+        RinVulkanWsiPlatformV6* platform_v6;
         const uint32_t image_index = present_info->pImageIndices[index];
         uint64_t platform_token = 0u;
         int platform_result;
@@ -11386,16 +11454,72 @@ RinVkResult RIN_VKAPI_CALL vkQueuePresentKHR(
         request.format = (uint32_t)swapchain->image_format;
         request.present_mode = swapchain->present_mode;
 
-        platform = acquire_wsi_v4();
-        if (!platform) {
-            memset(pending, 0, sizeof(*pending));
-            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
-            device_wsi_unlock(device);
-            goto present_result;
+        platform_v6 = acquire_wsi_v6();
+        if (platform_v6) {
+            uint64_t row_pitch;
+            if (image->storage_layout.struct_size !=
+                    sizeof(image->storage_layout) ||
+                image->storage_layout.version !=
+                    RIN_VULKAN_WSI_IMAGE_LAYOUT_V1_VERSION ||
+                image->storage_layout.kind !=
+                    RIN_VULKAN_WSI_IMAGE_LAYOUT_KIND_LINEAR ||
+                image->storage_layout.plane_count != 1u ||
+                image->storage_layout.modifier != 0u ||
+                image->storage_layout.planes[0].offset_bytes != 0u) {
+                release_wsi();
+                memset(pending, 0, sizeof(*pending));
+                result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+                device_wsi_unlock(device);
+                goto present_result;
+            }
+            row_pitch = (uint64_t)image->width * 4u;
+            if (image->storage_layout.planes[0].row_pitch_bytes !=
+                    row_pitch ||
+                image->storage_layout.planes[0].size_bytes !=
+                    image->memory_size ||
+                image->height > UINT64_MAX / row_pitch ||
+                row_pitch * image->height != image->memory_size) {
+                release_wsi();
+                memset(pending, 0, sizeof(*pending));
+                result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+                device_wsi_unlock(device);
+                goto present_result;
+            }
+            memset(&request_v2, 0, sizeof(request_v2));
+            request_v2.struct_size = sizeof(request_v2);
+            request_v2.version =
+                RIN_VULKAN_WSI_PRESENT_REQUEST_V2_VERSION;
+            request_v2.display_cookie = request.display_cookie;
+            request_v2.mode_cookie = request.mode_cookie;
+            request_v2.allocation_handle = request.allocation_handle;
+            request_v2.allocation_offset = request.allocation_offset;
+            request_v2.allocation_size = request.allocation_size;
+            request_v2.output_generation = request.output_generation;
+            request_v2.device_generation = request.device_generation;
+            request_v2.frame_id = request.frame_id;
+            request_v2.image_index = request.image_index;
+            request_v2.width = request.width;
+            request_v2.height = request.height;
+            request_v2.format = request.format;
+            request_v2.present_mode = request.present_mode;
+            request_v2.flags = request.flags;
+            request_v2.image_layout = image->storage_layout;
+            platform_result = platform_v6->present_v2(
+                platform_v6->present_v2_context, &request_v2,
+                &platform_token);
+            release_wsi();
+        } else {
+            platform = acquire_wsi_v4();
+            if (!platform) {
+                memset(pending, 0, sizeof(*pending));
+                result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+                device_wsi_unlock(device);
+                goto present_result;
+            }
+            platform_result = platform->present(platform->context, &request,
+                                                &platform_token);
+            release_wsi();
         }
-        platform_result = platform->present(platform->context, &request,
-                                            &platform_token);
-        release_wsi();
         if (platform_result != RIN_VULKAN_WSI_PLATFORM_OK ||
             platform_token == 0u) {
             if (platform_token != 0u ||
@@ -17949,6 +18073,24 @@ RinVkResult RIN_VKAPI_CALL vkCreateImage(
     image->height = request.extent.height;
     image->samples = request.samples;
     image->current_layout = RIN_VK_IMAGE_LAYOUT_UNDEFINED;
+    memset(&image->storage_layout, 0, sizeof(image->storage_layout));
+    image->storage_layout.struct_size = sizeof(image->storage_layout);
+    image->storage_layout.version =
+        RIN_VULKAN_WSI_IMAGE_LAYOUT_V1_VERSION;
+    image->storage_layout.kind = RIN_VULKAN_WSI_IMAGE_LAYOUT_KIND_UNKNOWN;
+    if (request.format == RIN_VK_FORMAT_R8G8B8A8_UNORM &&
+        request.samples == RIN_VK_SAMPLE_COUNT_1_BIT) {
+        const uint64_t row_pitch = (uint64_t)request.extent.width * 4u;
+        if (request.extent.height <= UINT64_MAX / row_pitch &&
+            row_pitch * request.extent.height == memory_size) {
+            image->storage_layout.kind =
+                RIN_VULKAN_WSI_IMAGE_LAYOUT_KIND_LINEAR;
+            image->storage_layout.plane_count = 1u;
+            image->storage_layout.planes[0].offset_bytes = 0u;
+            image->storage_layout.planes[0].row_pitch_bytes = row_pitch;
+            image->storage_layout.planes[0].size_bytes = memory_size;
+        }
+    }
     memset(&image->ownership, 0, sizeof(image->ownership));
     image->ownership.owner_queue_family = RIN_VK_QUEUE_FAMILY_IGNORED;
     __atomic_store_n(&image->state, 1u, __ATOMIC_RELEASE);

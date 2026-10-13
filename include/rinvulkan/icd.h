@@ -2254,6 +2254,10 @@ int rin_gpu_vulkan_icd_bind_wsi_platform_v5(
     RinVulkanWsiPlatformV5* platform);
 int rin_gpu_vulkan_icd_unbind_wsi_platform_v5(
     RinVulkanWsiPlatformV5* platform);
+int rin_gpu_vulkan_icd_bind_wsi_platform_v6(
+    RinVulkanWsiPlatformV6* platform);
+int rin_gpu_vulkan_icd_unbind_wsi_platform_v6(
+    RinVulkanWsiPlatformV6* platform);
 /* Product completion is driven by the RinGPU service loop, not by a forged
  * synchronous Vulkan wait.  It retires only work reported complete by the
  * product runtime and leaves still-pending command buffers leased. */
