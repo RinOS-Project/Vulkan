@@ -127,6 +127,9 @@ static int wsi_zero_words(const uint64_t* values, uint32_t count);
 static int finite_graphics_float(float value);
 static int image_layout_transfer_source_valid(uint32_t layout);
 static int image_layout_transfer_destination_valid(uint32_t layout);
+static RinVkResult create_image_with_storage_policy(
+    RinVkDevice device, const RinVkImageCreateInfo* create_info,
+    uint32_t allow_internal_linear, RinVkImage* image_out);
 static int get_physical_profile(
     RinVkPhysicalDevice physical_device,
     RinGpuVulkanPhysicalDeviceV2* profile);
@@ -5750,6 +5753,7 @@ static void clear_image_slot(RinVkImageSlot* slot) {
     slot->memory_offset = 0u;
     slot->width = 0u;
     slot->height = 0u;
+    memset(&slot->storage_layout, 0, sizeof(slot->storage_layout));
     slot->current_layout = RIN_VK_IMAGE_LAYOUT_UNDEFINED;
     memset(&slot->ownership, 0, sizeof(slot->ownership));
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
@@ -10741,10 +10745,14 @@ static RinVkResult swapchain_create_image(
     image_info.mipLevels = 1u;
     image_info.arrayLayers = 1u;
     image_info.samples = RIN_VK_SAMPLE_COUNT_1_BIT;
-    image_info.tiling = RIN_VK_IMAGE_TILING_OPTIMAL;
+    image_info.tiling = swapchain->presentation_display_id != 0u
+                            ? RIN_VK_IMAGE_TILING_LINEAR
+                            : RIN_VK_IMAGE_TILING_OPTIMAL;
     image_info.usage = swapchain->image_usage;
     image_info.sharingMode = RIN_VK_SHARING_MODE_EXCLUSIVE;
-    result = vkCreateImage((RinVkDevice)device, &image_info, NULL, &image);
+    result = create_image_with_storage_policy(
+        (RinVkDevice)device, &image_info,
+        swapchain->presentation_display_id != 0u, &image);
     if (result != RIN_VK_SUCCESS) return result;
     swapchain->images[image_index] = image;
     ++swapchain->image_count;
@@ -18029,15 +18037,14 @@ RinVkResult RIN_VKAPI_CALL vkBindBufferMemory(
     return RIN_VK_SUCCESS;
 }
 
-RinVkResult RIN_VKAPI_CALL vkCreateImage(
+static RinVkResult create_image_with_storage_policy(
         RinVkDevice device, const RinVkImageCreateInfo* create_info,
-        const void* allocator, RinVkImage* image_out) {
+        uint32_t allow_internal_linear, RinVkImage* image_out) {
     struct RinVkDevice_T* owner = device_slot(device);
     RinVkImageCreateInfo request;
     RinVkImageSlot* image;
     uint64_t memory_size;
     uint32_t index;
-    (void)allocator;
 
     if (!image_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
     *image_out = 0u;
@@ -18051,7 +18058,12 @@ RinVkResult RIN_VKAPI_CALL vkCreateImage(
          (request.samples != RIN_VK_SAMPLE_COUNT_1_BIT &&
           request.samples != RIN_VK_SAMPLE_COUNT_2_BIT &&
           request.samples != RIN_VK_SAMPLE_COUNT_4_BIT) ||
-        request.tiling != RIN_VK_IMAGE_TILING_OPTIMAL ||
+        (request.tiling != RIN_VK_IMAGE_TILING_OPTIMAL &&
+         !(allow_internal_linear == 1u &&
+           request.tiling == RIN_VK_IMAGE_TILING_LINEAR &&
+           request.format == RIN_VK_FORMAT_R8G8B8A8_UNORM &&
+           request.samples == RIN_VK_SAMPLE_COUNT_1_BIT)) ||
+        allow_internal_linear > 1u ||
         request.usage == 0u ||
         (request.usage & ~RIN_VK_IMAGE_USAGE_KNOWN) != 0u ||
         request.sharingMode != RIN_VK_SHARING_MODE_EXCLUSIVE ||
@@ -18078,18 +18090,22 @@ RinVkResult RIN_VKAPI_CALL vkCreateImage(
     image->storage_layout.version =
         RIN_VULKAN_WSI_IMAGE_LAYOUT_V1_VERSION;
     image->storage_layout.kind = RIN_VULKAN_WSI_IMAGE_LAYOUT_KIND_UNKNOWN;
-    if (request.format == RIN_VK_FORMAT_R8G8B8A8_UNORM &&
-        request.samples == RIN_VK_SAMPLE_COUNT_1_BIT) {
+    if (request.tiling == RIN_VK_IMAGE_TILING_LINEAR) {
+        /* The direct-display WSI path explicitly selects RinVk's private
+         * tightly packed linear storage policy. Ordinary OPTIMAL images do
+         * not acquire a guessed layout from their allocation size. */
         const uint64_t row_pitch = (uint64_t)request.extent.width * 4u;
-        if (request.extent.height <= UINT64_MAX / row_pitch &&
-            row_pitch * request.extent.height == memory_size) {
-            image->storage_layout.kind =
-                RIN_VULKAN_WSI_IMAGE_LAYOUT_KIND_LINEAR;
-            image->storage_layout.plane_count = 1u;
-            image->storage_layout.planes[0].offset_bytes = 0u;
-            image->storage_layout.planes[0].row_pitch_bytes = row_pitch;
-            image->storage_layout.planes[0].size_bytes = memory_size;
+        if (request.extent.height > UINT64_MAX / row_pitch ||
+            row_pitch * request.extent.height != memory_size) {
+            clear_image_slot(image);
+            return RIN_VK_ERROR_INITIALIZATION_FAILED;
         }
+        image->storage_layout.kind =
+            RIN_VULKAN_WSI_IMAGE_LAYOUT_KIND_LINEAR;
+        image->storage_layout.plane_count = 1u;
+        image->storage_layout.planes[0].offset_bytes = 0u;
+        image->storage_layout.planes[0].row_pitch_bytes = row_pitch;
+        image->storage_layout.planes[0].size_bytes = memory_size;
     }
     memset(&image->ownership, 0, sizeof(image->ownership));
     image->ownership.owner_queue_family = RIN_VK_QUEUE_FAMILY_IGNORED;
@@ -18097,6 +18113,14 @@ RinVkResult RIN_VKAPI_CALL vkCreateImage(
     *image_out = resource_handle(RIN_VK_IMAGE_TAG, index,
                                   image->generation);
     return RIN_VK_SUCCESS;
+}
+
+RinVkResult RIN_VKAPI_CALL vkCreateImage(
+        RinVkDevice device, const RinVkImageCreateInfo* create_info,
+        const void* allocator, RinVkImage* image_out) {
+    (void)allocator;
+    return create_image_with_storage_policy(device, create_info, 0u,
+                                            image_out);
 }
 
 void RIN_VKAPI_CALL vkDestroyImage(RinVkDevice device, RinVkImage handle,
