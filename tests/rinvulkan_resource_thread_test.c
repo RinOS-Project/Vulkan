@@ -438,7 +438,7 @@ int main(void) {
     RinVkInstanceCreateInfo no_debug_instance_create;
     RinVkDebugUtilsMessengerCreateInfoEXT debug_messenger_create;
     RinVkDebugUtilsMessengerCallbackDataEXT debug_message;
-    RinVkExtensionProperties instance_extension;
+    RinVkExtensionProperties instance_extensions[4];
     RinVkDebugUtilsObjectNameInfoEXT debug_object_name;
     RinVkDebugUtilsObjectTagInfoEXT debug_object_tag;
     RinVkDebugUtilsLabelEXT debug_label;
@@ -500,6 +500,8 @@ int main(void) {
     float priorities[2] = {1.0f, 1.0f};
     uint32_t physical_count = 1u;
     uint32_t instance_extension_count = 0u;
+    uint32_t instance_extension_capacity = 0u;
+    uint32_t extension_index;
     uint32_t debug_tag_payload = UINT32_C(0x52696e47);
     int runtime_initialized = 0;
     int runtime_bound = 0;
@@ -510,6 +512,9 @@ int main(void) {
     const char* debug_utils_extension = RIN_VK_EXT_DEBUG_UTILS_EXTENSION;
     const char* enabled_instance_extensions[1];
     const char* unknown_instance_extension = "VK_EXT_rin_unknown";
+    int found_debug_utils_extension = 0;
+    int found_surface_extension = 0;
+    int found_native_window_extension = 0;
 
 #define CHECK(condition) do { \
     if (!(condition)) { \
@@ -559,14 +564,38 @@ int main(void) {
     application.apiVersion = RIN_GPU_VK_ICD_API_VERSION;
     CHECK(vkEnumerateInstanceExtensionProperties(
               NULL, &instance_extension_count, NULL) == RIN_VK_SUCCESS);
-    CHECK(instance_extension_count == 1u);
-    instance_extension_count = 1u;
+    CHECK(instance_extension_count >= 3u &&
+          instance_extension_count <=
+              (uint32_t)(sizeof(instance_extensions) /
+                         sizeof(instance_extensions[0])));
+    memset(instance_extensions, 0, sizeof(instance_extensions));
+    instance_extension_capacity =
+        (uint32_t)(sizeof(instance_extensions) /
+                   sizeof(instance_extensions[0]));
     CHECK(vkEnumerateInstanceExtensionProperties(
-              NULL, &instance_extension_count, &instance_extension) ==
+              NULL, &instance_extension_capacity, instance_extensions) ==
           RIN_VK_SUCCESS);
-    CHECK(strcmp(instance_extension.extensionName,
-                 RIN_VK_EXT_DEBUG_UTILS_EXTENSION) == 0 &&
-          instance_extension.specVersion == RIN_VK_DEBUG_UTILS_SPEC_VERSION);
+    CHECK(instance_extension_capacity == instance_extension_count);
+    for (extension_index = 0u; extension_index < instance_extension_count;
+         ++extension_index) {
+        const RinVkExtensionProperties* extension =
+            &instance_extensions[extension_index];
+        if (strcmp(extension->extensionName,
+                   RIN_VK_EXT_DEBUG_UTILS_EXTENSION) == 0 &&
+            extension->specVersion == RIN_VK_DEBUG_UTILS_SPEC_VERSION)
+            found_debug_utils_extension = 1;
+        if (strcmp(extension->extensionName, RIN_VK_KHR_SURFACE_EXTENSION) ==
+                0 &&
+            extension->specVersion == RIN_VK_KHR_SURFACE_SPEC_VERSION)
+            found_surface_extension = 1;
+        if (strcmp(extension->extensionName,
+                   RIN_VK_RINOS_NATIVE_WINDOW_SURFACE_EXTENSION) == 0 &&
+            extension->specVersion ==
+                RIN_VK_RINOS_NATIVE_WINDOW_SURFACE_SPEC_VERSION)
+            found_native_window_extension = 1;
+    }
+    CHECK(found_debug_utils_extension && found_surface_extension &&
+          found_native_window_extension);
     memset(&instance_create, 0, sizeof(instance_create));
     instance_create.sType = RIN_VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     instance_create.pApplicationInfo = &application;

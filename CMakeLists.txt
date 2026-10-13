@@ -251,7 +251,10 @@ if(BUILD_TESTING)
     target_compile_features(rinvulkan-buffer-ownership-test PRIVATE c_std_11)
     target_include_directories(rinvulkan-buffer-ownership-test PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${RINGPU_DIR}/include
+        ${RINGPU_DIR}/../rinresource/include
+        ${RINGPU_DIR}/../../RinOS-SDK/include)
     add_test(NAME rinvulkan-buffer-ownership
         COMMAND rinvulkan-buffer-ownership-test)
     add_executable(rinvulkan-sync2-scope-test

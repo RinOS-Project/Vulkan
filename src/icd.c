@@ -5414,6 +5414,10 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
          (query_command_count == 0u && slot->compute_packet &&
           process_compute_pipeline &&
           process_compute_pipeline->process_compute_pipeline_token != 0u));
+    memset(waits, 0, sizeof(waits));
+    memset(immutable_waits, 0, sizeof(immutable_waits));
+    memset(scoped_waits, 0, sizeof(scoped_waits));
+    memset(immutable_scoped_waits, 0, sizeof(immutable_scoped_waits));
     if (!submission_waits_satisfied(slot)) {
         if (!use_process_commands_v6) {
             if (product_v3 && build_native_wait_list(
@@ -5451,10 +5455,6 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
     memset(&submission_v3, 0, sizeof(submission_v3));
     memset(&process_receipt, 0, sizeof(process_receipt));
     memset(&process_status, 0, sizeof(process_status));
-    memset(waits, 0, sizeof(waits));
-    memset(immutable_waits, 0, sizeof(immutable_waits));
-    memset(scoped_waits, 0, sizeof(scoped_waits));
-    memset(immutable_scoped_waits, 0, sizeof(immutable_scoped_waits));
     if (!use_process_commands_v6 && !use_v2 && !use_v3 &&
         (!product->prepare_submission || !product->submit)) {
         if (product_v3 && product_v3->prepare_submission_v3 &&
