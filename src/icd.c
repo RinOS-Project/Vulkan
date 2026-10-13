@@ -5319,10 +5319,15 @@ static int submit_canonical_process_commands(
         if (result != RIN_VULKAN_PRODUCT_OK) return result;
         allocated_commands = 1u;
     }
+    /* V8 bind groups own the process-resource bindings named by a compute
+     * dispatch. Their retained dependency leases survive until the in-flight
+     * bind-group object is retired, so do not pass the same allocations again
+     * as an independent V6 submission-resource set. */
     result = platform->submit_process_commands(
         platform->context, slot->queue_id, commands, command_count,
-        slot->resource_count == 0u ? NULL : slot->resources,
-        slot->resource_count, receipt_out);
+        slot->compute_packet || slot->resource_count == 0u
+            ? NULL : slot->resources,
+        slot->compute_packet ? 0u : slot->resource_count, receipt_out);
     if (result != RIN_VULKAN_PRODUCT_OK &&
         slot->process_compute_bind_group_token != 0u) {
         const int cleanup_result =
