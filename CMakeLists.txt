@@ -283,7 +283,9 @@ if(BUILD_TESTING)
         target_compile_features(rinvulkan-loader-validation-test PRIVATE
             c_std_11)
         target_include_directories(rinvulkan-loader-validation-test PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/include)
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${RINGPU_DIR}/include
+            ${RINGPU_DIR}/../rinresource/include)
         target_link_libraries(rinvulkan-loader-validation-test PRIVATE
             Vulkan::Vulkan ${CMAKE_DL_LIBS})
         add_dependencies(rinvulkan-loader-validation-test RinVulkanICD)
