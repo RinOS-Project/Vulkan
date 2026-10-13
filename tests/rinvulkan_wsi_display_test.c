@@ -697,7 +697,7 @@ static RinVkResult transition_swapchain_image_to_present(
     result = vkWaitForFences(device, 1u, &completion_fence, 1u, UINT64_MAX);
 
 done:
-    if (command_pool != 0u)
+    if (command_pool != NULL)
         vkDestroyCommandPool(device, command_pool, NULL);
     if (completion_fence != 0u)
         vkDestroyFence(device, completion_fence, NULL);

@@ -2711,7 +2711,7 @@ static int test_process_compute_pipeline_dispatch(
         adapters->canonical_last_command.value.dispatch.group_count_z == 4u);
 
 cleanup:
-    if (pool != 0u) vkDestroyCommandPool(device, pool, NULL);
+    if (pool != NULL) vkDestroyCommandPool(device, pool, NULL);
     if (pipeline != 0u) {
         vkDestroyPipeline(device, pipeline, NULL);
         if (adapters->sdk_object_destroy_calls != sdk_destroy_before + 2u ||
@@ -3061,7 +3061,8 @@ cleanup:
         const RinVkResult idle_result = vkQueueWaitIdle(queue);
         if (idle_result != RIN_VK_SUCCESS) ok = -1;
     }
-    if (command_pool != 0u) vkDestroyCommandPool(device, command_pool, NULL);
+    if (command_pool != NULL)
+        vkDestroyCommandPool(device, command_pool, NULL);
     if (pipeline != 0u) vkDestroyPipeline(device, pipeline, NULL);
     if (shader != 0u) vkDestroyShaderModule(device, shader, NULL);
     if (pipeline_layout != 0u)
@@ -3307,8 +3308,10 @@ static RinVkResult test_process_submit_wait_completion(
     result = RIN_VK_SUCCESS;
 
 done:
-    if (producer.pool != 0u) vkDestroyCommandPool(device, producer.pool, NULL);
-    if (consumer.pool != 0u) vkDestroyCommandPool(device, consumer.pool, NULL);
+    if (producer.pool != NULL)
+        vkDestroyCommandPool(device, producer.pool, NULL);
+    if (consumer.pool != NULL)
+        vkDestroyCommandPool(device, consumer.pool, NULL);
     if (timeline_semaphore != 0u)
         vkDestroySemaphore(device, timeline_semaphore, NULL);
     if (semaphore != 0u) vkDestroySemaphore(device, semaphore, NULL);
@@ -3624,7 +3627,7 @@ done:
                                          ? destination_memory
                                          : source_memory);
     if (fence != 0u) vkDestroyFence(device, fence, NULL);
-    if (pool != 0u) vkDestroyCommandPool(device, pool, NULL);
+    if (pool != NULL) vkDestroyCommandPool(device, pool, NULL);
     if (source_buffer != 0u) vkDestroyBuffer(device, source_buffer, NULL);
     if (destination_buffer != 0u)
         vkDestroyBuffer(device, destination_buffer, NULL);
@@ -3921,7 +3924,7 @@ static RinVkResult record_buffer_image_roundtrip(
 done:
     if (mapped) vkUnmapMemory(device, mapped_memory);
     if (fence != 0u) vkDestroyFence(device, fence, NULL);
-    if (pool != 0u) vkDestroyCommandPool(device, pool, NULL);
+    if (pool != NULL) vkDestroyCommandPool(device, pool, NULL);
     if (upload_buffer != 0u) vkDestroyBuffer(device, upload_buffer, NULL);
     if (readback_buffer != 0u) vkDestroyBuffer(device, readback_buffer, NULL);
     if (image != 0u) vkDestroyImage(device, image, NULL);
@@ -4249,7 +4252,7 @@ static RinVkResult record_image_resolve_roundtrip(
 done:
     if (mapped) vkUnmapMemory(device, readback_memory);
     if (fence != 0u) vkDestroyFence(device, fence, NULL);
-    if (pool != 0u) vkDestroyCommandPool(device, pool, NULL);
+    if (pool != NULL) vkDestroyCommandPool(device, pool, NULL);
     if (readback_buffer != 0u)
         vkDestroyBuffer(device, readback_buffer, NULL);
     if (source != 0u) vkDestroyImage(device, source, NULL);
