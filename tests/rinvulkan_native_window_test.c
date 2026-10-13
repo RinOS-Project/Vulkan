@@ -51,6 +51,59 @@ typedef struct TestCompositorSurface {
 #endif
 } TestCompositorSurface;
 
+#if defined(RIN_VULKAN_NATIVE_WINDOW_COMPOSITOR_TEST)
+typedef struct TestNativeWindowAppSurface {
+    RinRuntimeGuiCompletionCallback completion_callback;
+    void* completion_context;
+    uint64_t compositor_generation;
+    uint32_t compositor_surface_id;
+    uint32_t compositor_buffer_slot;
+    uint32_t frame_import_calls;
+    uint32_t frame_import_attempts;
+    int32_t last_import_result;
+    uint32_t compositor_dispatch_calls;
+    uint32_t surface_ops_calls;
+    uint32_t window_create_calls;
+    uint32_t window_close_calls;
+} TestNativeWindowAppSurface;
+
+static TestNativeWindowAppSurface g_native_window_app_surface;
+
+static RinRuntimeGuiHandle test_native_window_app_wnd_create(
+    const char*, int, int, int, int);
+static void test_native_window_app_wnd_close(RinRuntimeGuiHandle);
+static int test_native_window_app_wnd_dispatch_compositor(uint32_t,
+                                                           uint32_t);
+static int test_native_window_app_wnd_get_gpu_surface_ops_v1(
+    RinRuntimeCompositorGpuSurfaceOpsV1*);
+static int test_native_window_app_wnd_get_size(RinRuntimeGuiHandle,
+                                               int*, int*);
+static int test_native_window_app_wnd_set_completion_callback(
+    RinRuntimeGuiHandle, RinRuntimeGuiCompletionCallback, void*);
+
+/* Compile the actual sample entrypoint against the ICD under test. Only the
+ * native window/Compositor boundary is fixture-backed; Vulkan calls remain
+ * the production public entrypoints linked into this test. */
+#define wnd_create test_native_window_app_wnd_create
+#define wnd_close test_native_window_app_wnd_close
+#define wnd_dispatch_compositor \
+    test_native_window_app_wnd_dispatch_compositor
+#define wnd_get_gpu_surface_ops_v1 \
+    test_native_window_app_wnd_get_gpu_surface_ops_v1
+#define wnd_get_size test_native_window_app_wnd_get_size
+#define wnd_set_compositor_completion_callback \
+    test_native_window_app_wnd_set_completion_callback
+#define RIN_VULKAN_NATIVE_WINDOW_EXAMPLE_NO_MAIN 1
+#include "../examples/rinos_native_window_surface.c"
+#undef RIN_VULKAN_NATIVE_WINDOW_EXAMPLE_NO_MAIN
+#undef wnd_set_compositor_completion_callback
+#undef wnd_get_size
+#undef wnd_get_gpu_surface_ops_v1
+#undef wnd_dispatch_compositor
+#undef wnd_close
+#undef wnd_create
+#endif
+
 typedef struct TestMemoryMapping {
     uint64_t allocation;
     uint64_t lease;
@@ -519,6 +572,159 @@ static int test_dispatch_fixture_frame_to_compositor(
         &surface->compositor_damage, sizeof(surface->compositor_damage),
         &surface->compositor_commit, sizeof(surface->compositor_commit),
         77u, surface->compositor_pixels[0], frame_bytes);
+}
+#endif
+
+#if defined(RIN_VULKAN_NATIVE_WINDOW_COMPOSITOR_TEST)
+static int test_native_window_app_surface_query(
+        void* context, RinRuntimeGuiHandle handle,
+        RinRuntimeCompositorGpuSurfaceV1* surface_out) {
+    TestNativeWindowAppSurface* surface =
+        (TestNativeWindowAppSurface*)context;
+    if (surface != &g_native_window_app_surface ||
+        handle != UINT64_C(0x7712) || !surface_out)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    memset(surface_out, 0, sizeof(*surface_out));
+    surface_out->struct_size = sizeof(*surface_out);
+    surface_out->version = RIN_RUNTIME_COMPOSITOR_GPU_SURFACE_V1_VERSION;
+    surface_out->width = 2u;
+    surface_out->height = 2u;
+    surface_out->supported_frame_formats =
+        RIN_RUNTIME_COMPOSITOR_GPU_SURFACE_FORMAT_RGBA8_BIT;
+    surface_out->surface_generation = 1u;
+    return RIN_RESULT_OK;
+}
+
+static int test_native_window_app_surface_import(
+        void* context, RinRuntimeGuiHandle handle,
+        uint64_t surface_generation,
+        const RinRuntimeCompositorGpuFrameV1* frame) {
+    TestNativeWindowAppSurface* surface =
+        (TestNativeWindowAppSurface*)context;
+    RinCompositorGpuReadbackLeasePresentV1 request;
+    uint32_t buffer_slot = UINT32_MAX;
+    int import_result;
+    if (surface == &g_native_window_app_surface)
+        ++surface->frame_import_attempts;
+    if (surface != &g_native_window_app_surface ||
+        handle != UINT64_C(0x7712) || surface_generation != 1u || !frame ||
+        frame->struct_size != sizeof(*frame) ||
+        frame->version != RIN_RUNTIME_COMPOSITOR_GPU_FRAME_V1_VERSION ||
+        frame->width != 2u || frame->height != 2u ||
+        frame->row_pitch != 8u || frame->bytes != 16u ||
+        frame->format != RIN_RUNTIME_COMPOSITOR_GPU_PIXEL_RGBA8 ||
+        !frame->pixels || frame->reserved[0] != 0u ||
+        frame->reserved[1] != 0u) {
+        if (surface == &g_native_window_app_surface)
+            surface->last_import_result = -1001;
+        return RIN_ERROR_INVALID_ARGUMENT;
+    }
+
+    memset(&request, 0, sizeof(request));
+    request.struct_size = sizeof(request);
+    request.version = RIN_COMPOSITOR_GPU_READBACK_LEASE_VERSION;
+    request.surface_id = surface->compositor_surface_id;
+    request.format = RIN_COMPOSITOR_GPU_READBACK_FORMAT_RGBA8;
+    request.expected_surface_generation = surface->compositor_generation;
+    request.frame_sequence = 1u;
+    request.bytes = frame->bytes;
+    request.capability.struct_size = sizeof(request.capability);
+    request.capability.version =
+        RIN_GPU_CROSS_PROCESS_CAPABILITY_V2_VERSION;
+    request.capability.token = 9u;
+    request.capability.device_generation = 3u;
+    request.capability.rights = RIN_GPU_CROSS_PROCESS_RIGHT_READ;
+    request.width = frame->width;
+    request.height = frame->height;
+    request.row_pitch = frame->row_pitch;
+    import_result = compositor_gpu_readback_runtime_core_import(
+        &request, frame->pixels, frame->bytes, 77u, &buffer_slot);
+    if (import_result != RIN_RESULT_OK) {
+        surface->last_import_result = import_result;
+        return RIN_RESULT_IO;
+    }
+    surface->last_import_result = 0;
+    surface->compositor_buffer_slot = buffer_slot;
+    ++surface->frame_import_calls;
+    return RIN_RESULT_OK;
+}
+
+static RinRuntimeGuiHandle test_native_window_app_wnd_create(
+        const char* title, int x, int y, int width, int height) {
+    TestNativeWindowAppSurface* surface = &g_native_window_app_surface;
+    if (!title || strcmp(title, "RinVulkan native-window surface") != 0 ||
+        x != 64 || y != 64 || width != 960 || height != 540)
+        return RIN_WINDOW_HANDLE_INVALID;
+    ++surface->window_create_calls;
+    return UINT64_C(0x7712);
+}
+
+static void test_native_window_app_wnd_close(RinRuntimeGuiHandle handle) {
+    TestNativeWindowAppSurface* surface = &g_native_window_app_surface;
+    if (handle == UINT64_C(0x7712) &&
+        surface->completion_callback == NULL)
+        ++surface->window_close_calls;
+}
+
+static int test_native_window_app_wnd_dispatch_compositor(
+        uint32_t timeout_ms, uint32_t max_completions) {
+    TestNativeWindowAppSurface* surface = &g_native_window_app_surface;
+    RinRuntimeGuiCompletionV1 completion;
+    if (timeout_ms != 50u || max_completions != 8u ||
+        surface->frame_import_calls != 1u ||
+        !surface->completion_callback)
+        return -1;
+    memset(&completion, 0, sizeof(completion));
+    completion.struct_size = sizeof(completion);
+    completion.version = 1u;
+    completion.request_type = RIN_COMPOSITOR_DAMAGE;
+    completion.status = RIN_RESULT_OK;
+    completion.handle = UINT64_C(0x7712);
+    completion.cookie = 14u;
+    surface->completion_callback(&completion, surface->completion_context);
+    ++surface->compositor_dispatch_calls;
+    return 1;
+}
+
+static int test_native_window_app_wnd_get_gpu_surface_ops_v1(
+        RinRuntimeCompositorGpuSurfaceOpsV1* ops_out) {
+    TestNativeWindowAppSurface* surface = &g_native_window_app_surface;
+    if (!ops_out) return RIN_ERROR_INVALID_ARGUMENT;
+    memset(ops_out, 0, sizeof(*ops_out));
+    ops_out->struct_size = sizeof(*ops_out);
+    ops_out->version = RIN_RUNTIME_COMPOSITOR_GPU_SURFACE_OPS_V1_VERSION;
+    ops_out->context = surface;
+    ops_out->query = test_native_window_app_surface_query;
+    ops_out->import_frame = test_native_window_app_surface_import;
+    ++surface->surface_ops_calls;
+    return RIN_RESULT_OK;
+}
+
+static int test_native_window_app_wnd_get_size(
+        RinRuntimeGuiHandle handle, int* width, int* height) {
+    if (handle != UINT64_C(0x7712) || !width || !height)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    *width = 2;
+    *height = 2;
+    return RIN_RESULT_OK;
+}
+
+static int test_native_window_app_wnd_set_completion_callback(
+        RinRuntimeGuiHandle handle, RinRuntimeGuiCompletionCallback callback,
+        void* context) {
+    TestNativeWindowAppSurface* surface = &g_native_window_app_surface;
+    if (handle != UINT64_C(0x7712)) return RIN_ERROR_INVALID_ARGUMENT;
+    if (callback) {
+        if (surface->completion_callback) return RIN_ERROR_BUSY;
+        surface->completion_callback = callback;
+        surface->completion_context = context;
+        return RIN_RESULT_OK;
+    }
+    if (!surface->completion_callback || context != NULL)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    surface->completion_callback = NULL;
+    surface->completion_context = NULL;
+    return RIN_RESULT_OK;
 }
 #endif
 
@@ -4548,6 +4754,64 @@ int main(void) {
 #if defined(RIN_VULKAN_NATIVE_WINDOW_COMPOSITOR_TEST)
     CHECK(test_dispatch_fixture_frame_to_compositor(&compositor) == 0);
 #endif
+#endif
+
+#if defined(RIN_VULKAN_NATIVE_WINDOW_COMPOSITOR_TEST)
+    memset(&g_native_window_app_surface, 0,
+           sizeof(g_native_window_app_surface));
+    {
+        uint8_t imported_pixels[2u * 2u * 4u];
+        uint32_t imported_surface_id = 0u;
+        uint32_t imported_buffer_slot = UINT32_MAX;
+        uint32_t imported_front_slot = UINT32_MAX;
+        uint64_t imported_surface_generation = 0u;
+        uint64_t imported_frame_sequence = 0u;
+        uint32_t pixel;
+        int imported_pixels_nonzero = 0;
+        CHECK(compositor_gpu_readback_runtime_core_reset(
+                  77u, 2u, 2u, &imported_surface_id,
+                  &imported_surface_generation) == 0);
+        CHECK(imported_surface_id != 0u &&
+              imported_surface_generation != 0u);
+        g_native_window_app_surface.compositor_surface_id =
+            imported_surface_id;
+        g_native_window_app_surface.compositor_generation =
+            imported_surface_generation;
+    {
+        const int app_result = rinos_native_window_surface_main();
+        if (app_result != 0)
+            fprintf(stderr,
+                    "native-window public app failed: result=%d, imports=%u/%u, compositor=%d\n",
+                    app_result,
+                    g_native_window_app_surface.frame_import_calls,
+                    g_native_window_app_surface.frame_import_attempts,
+                    g_native_window_app_surface.last_import_result);
+        CHECK(app_result == 0);
+    }
+    CHECK(g_native_window_app_surface.window_create_calls == 1u &&
+          g_native_window_app_surface.surface_ops_calls == 1u &&
+          g_native_window_app_surface.frame_import_calls == 1u &&
+          g_native_window_app_surface.frame_import_attempts == 1u &&
+          g_native_window_app_surface.compositor_dispatch_calls == 1u &&
+          g_native_window_app_surface.window_close_calls == 1u &&
+          g_native_window_app_surface.completion_callback == NULL &&
+          g_native_window_app_surface.completion_context == NULL);
+        imported_buffer_slot =
+            g_native_window_app_surface.compositor_buffer_slot;
+        CHECK(compositor_gpu_readback_runtime_core_observe(
+                  imported_buffer_slot, imported_pixels,
+                  sizeof(imported_pixels), &imported_front_slot,
+                  &imported_frame_sequence) == 0);
+        CHECK(imported_front_slot == imported_buffer_slot &&
+              imported_frame_sequence == 1u);
+        for (pixel = 0u; pixel < 4u; ++pixel)
+            if (imported_pixels[pixel * 4u] != 0u ||
+                imported_pixels[pixel * 4u + 1u] != 0u ||
+                imported_pixels[pixel * 4u + 2u] != 0u ||
+                imported_pixels[pixel * 4u + 3u] != 0u)
+                imported_pixels_nonzero = 1;
+        CHECK(imported_pixels_nonzero);
+    }
 #endif
 
 #if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
