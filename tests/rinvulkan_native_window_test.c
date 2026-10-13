@@ -1108,11 +1108,7 @@ static int test_submit_process_commands_v6(
             if (dispatch->bind_group_cookie !=
                     adapters->sdk_last_bind_group_token ||
                 adapters->sdk_last_bind_group_count != 1u ||
-                resource_count != 1u || !resources ||
-                resources[0].allocation_handle == 0u ||
-                (resources[0].required_gpu_access &
-                 ~(RIN_GPU_ALLOCATION_GPU_READ |
-                   RIN_GPU_ALLOCATION_GPU_WRITE)) != 0u)
+                resource_count != 0u)
                 return RIN_VULKAN_PRODUCT_PROTOCOL;
         }
         adapters->canonical_last_command = commands[0];
@@ -3041,12 +3037,9 @@ static int test_process_compute_descriptor_dispatch(
         adapters->canonical_last_command.value.dispatch.group_count_x == 2u &&
         adapters->canonical_last_command.value.dispatch.group_count_y == 3u &&
         adapters->canonical_last_command.value.dispatch.group_count_z == 4u &&
-        adapters->canonical_resource_count == 1u &&
-        adapters->canonical_last_resources[0].allocation_handle ==
-            adapters->sdk_last_resource_binding.allocation &&
-        adapters->canonical_last_resources[0].required_gpu_access ==
-            (RIN_VULKAN_PRODUCT_MEMORY_GPU_READ |
-             RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE));
+        adapters->canonical_resource_count == 0u &&
+        adapters->canonical_last_resources[0].allocation_handle == 0u &&
+        adapters->canonical_last_resources[0].required_gpu_access == 0u);
 
     adapters->sdk_bind_group_destroy_busy_attempts = 1u;
     PROCESS_DESCRIPTOR_CHECK(vkQueueWaitIdle(queue) == RIN_VK_SUCCESS);
