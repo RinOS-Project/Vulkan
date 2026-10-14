@@ -1475,6 +1475,26 @@ static RinVulkanProductPlatformV9* acquire_process_query_platform(void) {
     return product_v9;
 }
 
+static int process_timestamp_query_provider_available(void) {
+    RinVulkanProductPlatformV9* platform =
+        acquire_process_query_platform();
+    if (!platform) return 0;
+    release_product();
+    return 1;
+}
+
+static int profile_supports_process_timestamps(
+        const RinGpuVulkanPhysicalDeviceV2* profile) {
+    uint32_t index;
+    if (!profile || profile->timestamp_period_ns_x1000 == 0u ||
+        !process_timestamp_query_provider_available())
+        return 0;
+    for (index = 0u; index < profile->queue_family_count; ++index)
+        if (profile->queue_families[index].timestamp_valid_bits != 0u)
+            return 1;
+    return 0;
+}
+
 static int product_v4_memory_mapping_available_for_profile(
         const RinGpuVulkanPhysicalDeviceV2* profile) {
     RinVulkanProductPlatformV1* product;
@@ -11644,6 +11664,8 @@ static void publish_legacy_properties(
         const RinGpuVulkanPhysicalDeviceV2* profile,
         RinVkPhysicalDeviceProperties* properties) {
     uint32_t index;
+    const int timestamps_supported =
+        profile_supports_process_timestamps(profile);
     memset(properties, 0, sizeof(*properties));
     properties->apiVersion = profile->api_version < RIN_GPU_VK_ICD_API_VERSION
                                  ? profile->api_version
@@ -11676,10 +11698,12 @@ static void publish_legacy_properties(
         (size_t)RIN_VK_MIN_MEMORY_MAP_ALIGNMENT;
     properties->limits.nonCoherentAtomSize =
         RIN_VK_NON_COHERENT_ATOM_SIZE;
-    properties->limits.timestampPeriod =
-        (float)profile->timestamp_period_ns_x1000 / 1000.0f;
+    properties->limits.timestampPeriod = timestamps_supported
+        ? (float)profile->timestamp_period_ns_x1000 / 1000.0f
+        : 0.0f;
     for (index = 0u; index < profile->queue_family_count; ++index) {
-        if ((profile->queue_families[index].flags &
+        if (timestamps_supported &&
+            (profile->queue_families[index].flags &
              (RIN_GPU_VK_QUEUE_GRAPHICS | RIN_GPU_VK_QUEUE_COMPUTE)) ==
                 (RIN_GPU_VK_QUEUE_GRAPHICS | RIN_GPU_VK_QUEUE_COMPUTE) &&
             profile->queue_families[index].timestamp_valid_bits != 0u) {
@@ -11823,6 +11847,7 @@ void RIN_VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties(
         RinVkPhysicalDevice physical_device, uint32_t* property_count,
         RinVkQueueFamilyProperties* properties) {
     RinGpuVulkanPhysicalDeviceV2 profile;
+    int timestamps_supported;
     uint32_t capacity;
     uint32_t count;
     uint32_t index;
@@ -11839,6 +11864,7 @@ void RIN_VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties(
     count = capacity < profile.queue_family_count
                 ? capacity
                 : profile.queue_family_count;
+    timestamps_supported = profile_supports_process_timestamps(&profile);
     for (index = 0u; index < count; ++index) {
         memset(&properties[index], 0, sizeof(properties[index]));
         properties[index].queueFlags = profile.queue_families[index].flags &
@@ -11846,8 +11872,9 @@ void RIN_VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties(
              RIN_GPU_VK_QUEUE_TRANSFER);
         properties[index].queueCount =
             profile.queue_families[index].queue_count;
-        properties[index].timestampValidBits =
-            profile.queue_families[index].timestamp_valid_bits;
+        properties[index].timestampValidBits = timestamps_supported
+            ? profile.queue_families[index].timestamp_valid_bits
+            : 0u;
         properties[index].minImageTransferGranularity.width = 1u;
         properties[index].minImageTransferGranularity.height = 1u;
         properties[index].minImageTransferGranularity.depth = 1u;

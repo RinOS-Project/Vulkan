@@ -4270,6 +4270,8 @@ int main(void) {
     RinGpuVulkanRuntimeV1 runtime;
     RinGpuVulkanSoftwarePlatformV1 software;
     TestProductAdapters product_adapters;
+    RinVkPhysicalDeviceProperties physical_properties;
+    RinVkQueueFamilyProperties timestamp_queue_properties[2];
     RinRuntimeCompositorGpuSurfaceOpsV1 surface_ops;
 #if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
     RinRuntimeGuiSurface* runtime_surface = NULL;
@@ -4450,6 +4452,19 @@ int main(void) {
     CHECK(rin_gpu_vulkan_icd_bind_product_platform_v9(
               product_adapters.v9) == RIN_GPU_VULKAN_OK);
     product_v9_bound = 1u;
+    memset(&physical_properties, 0, sizeof(physical_properties));
+    vkGetPhysicalDeviceProperties(physical, &physical_properties);
+    CHECK(physical_properties.limits.timestampComputeAndGraphics == 1u &&
+          physical_properties.limits.timestampPeriod == 1.0f);
+    {
+        uint32_t timestamp_queue_count = 1u;
+        memset(timestamp_queue_properties, 0,
+               sizeof(timestamp_queue_properties));
+        vkGetPhysicalDeviceQueueFamilyProperties(
+            physical, &timestamp_queue_count, timestamp_queue_properties);
+        CHECK(timestamp_queue_count == 1u &&
+              timestamp_queue_properties[0].timestampValidBits == 64u);
+    }
 
 #if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
     memset(g_surfaces, 0, sizeof(g_surfaces));
