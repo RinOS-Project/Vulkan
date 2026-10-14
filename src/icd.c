@@ -8051,7 +8051,7 @@ int rin_gpu_vulkan_icd_bind_wsi_platform_v6(
         base->base.struct_size != sizeof(*platform) ||
         base->base.version != RIN_VULKAN_WSI_PLATFORM_V6_VERSION ||
         !base->base.context || !base->base.query_displays ||
-        !base->base.query_modes || !base->base.present ||
+        !base->base.query_modes ||
         !base->base.poll_present || !base->base.cancel_present ||
         !base->base.query_planes ||
         !base->base.query_plane_supported_displays ||

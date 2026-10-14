@@ -36,6 +36,7 @@ rinvulkan_rinos_process_backend = static_library(
   [
     'src/rinos_process_submit_backend_v1.c',
     'src/rinos_catalog_v1.c',
+    'src/rinos_process_wsi_platform_v1.c',
     'src/rinos_process_product_platform_v1.c',
   ],
   include_directories: [rinvulkan_inc, rin_sdk_inc,

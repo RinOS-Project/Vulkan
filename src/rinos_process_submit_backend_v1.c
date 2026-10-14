@@ -133,9 +133,6 @@ static int rinos_submit_process_commands(
     RinVulkanProductProcessSubmitReceiptV1* receipt_out) {
     RinVulkanRinOSProcessSubmitBackendV1* backend =
         (RinVulkanRinOSProcessSubmitBackendV1*)context;
-    RinGpuProcessResourceV1 sdk_resources[
-        RIN_GPU_PROCESS_MAX_RESOURCES_V1];
-    RinGpuProcessSubmitDescV1 descriptor_v1;
     RinGpuProcessSubmitDescV2 descriptor_v2;
     RinGpuProcessSubmitReceiptV1 sdk_receipt;
     RinVulkanRinOSProcessQueueV1* selected_queue = NULL;
@@ -148,8 +145,6 @@ static int rinos_submit_process_commands(
         command_count == 0u ||
         command_count > RIN_GPU_PROCESS_MAX_COMMANDS_V1 ||
         resource_count > RIN_GPU_PROCESS_MAX_RESOURCES_V1 ||
-        sizeof(RinGpuBackendCommandV1) !=
-            RIN_GPU_PROCESS_COMMAND_RECORD_SIZE_V1 ||
         !rinos_range_valid(commands, sizeof(*commands) * command_count) ||
         (resource_count != 0u &&
          (!resources || !rinos_range_valid(
@@ -192,7 +187,6 @@ static int rinos_submit_process_commands(
         return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
     }
 
-    memset(sdk_resources, 0, sizeof(sdk_resources));
     for (index = 0u; index < resource_count; ++index) {
         if (resources[index].allocation_handle == 0u ||
             resources[index].reserved != 0u ||
@@ -203,9 +197,6 @@ static int rinos_submit_process_commands(
             __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
             return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
         }
-        sdk_resources[index].allocation = resources[index].allocation_handle;
-        sdk_resources[index].required_gpu_access =
-            resources[index].required_gpu_access;
     }
 
     command_bytes = (uint64_t)command_count * sizeof(*commands);
@@ -213,33 +204,19 @@ static int rinos_submit_process_commands(
         __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
         return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
     }
-    memset(&descriptor_v1, 0, sizeof(descriptor_v1));
     memset(&descriptor_v2, 0, sizeof(descriptor_v2));
     memset(&sdk_receipt, 0, sizeof(sdk_receipt));
-    if (resource_count == 0u) {
-        descriptor_v2.struct_size = sizeof(descriptor_v2);
-        descriptor_v2.version = RIN_GPU_PROCESS_SUBMIT_DESC_VERSION_V2;
-        descriptor_v2.commands.address = (uint64_t)(uintptr_t)commands;
-        descriptor_v2.commands.size = command_bytes;
-        descriptor_v2.command_count = command_count;
-        descriptor_v2.command_record_size = sizeof(*commands);
-        result = rinos_map_sdk_result(rin_gpu_process_submit_v2(
-            selected_queue->token, &descriptor_v2, &sdk_receipt));
-    } else {
-        descriptor_v1.struct_size = sizeof(descriptor_v1);
-        descriptor_v1.version = RIN_GPU_PROCESS_SUBMIT_DESC_VERSION_V1;
-        descriptor_v1.commands.address = (uint64_t)(uintptr_t)commands;
-        descriptor_v1.commands.size = command_bytes;
-        descriptor_v1.command_count = command_count;
-        descriptor_v1.command_record_size = sizeof(*commands);
-        descriptor_v1.resources.address =
-            (uint64_t)(uintptr_t)sdk_resources;
-        descriptor_v1.resources.size =
-            (uint64_t)resource_count * sizeof(sdk_resources[0]);
-        descriptor_v1.resource_count = resource_count;
-        result = rinos_map_sdk_result(rin_gpu_process_submit_v1(
-            selected_queue->token, &descriptor_v1, &sdk_receipt));
-    }
+    /* V2 resolves the command resource cookies through process-owned bindings.
+     * This preserves the canonical command record and its lifetime contract;
+     * it must not be narrowed to the legacy 856-byte submit-V1 record. */
+    descriptor_v2.struct_size = sizeof(descriptor_v2);
+    descriptor_v2.version = RIN_GPU_PROCESS_SUBMIT_DESC_VERSION_V2;
+    descriptor_v2.commands.address = (uint64_t)(uintptr_t)commands;
+    descriptor_v2.commands.size = command_bytes;
+    descriptor_v2.command_count = command_count;
+    descriptor_v2.command_record_size = sizeof(*commands);
+    result = rinos_map_sdk_result(rin_gpu_process_submit_v2(
+        selected_queue->token, &descriptor_v2, &sdk_receipt));
     if (result == RIN_VULKAN_PRODUCT_OK) {
         if (sdk_receipt.struct_size != sizeof(sdk_receipt) ||
             sdk_receipt.version != RIN_GPU_PROCESS_SUBMIT_RECEIPT_VERSION_V1 ||

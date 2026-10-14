@@ -9,8 +9,6 @@
 #include <stddef.h>
 #include <string.h>
 
-#define RIN_VULKAN_RINOS_CATALOG_STATE_ACTIVE UINT32_C(1)
-
 static int catalog_range_valid(const void* pointer, size_t size)
 {
     uintptr_t address;

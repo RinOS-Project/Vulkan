@@ -58,6 +58,7 @@ endif()
 add_library(RinVulkanRinOSProcessBackend STATIC
     src/rinos_process_submit_backend_v1.c
     src/rinos_catalog_v1.c
+    src/rinos_process_wsi_platform_v1.c
     src/rinos_process_product_platform_v1.c)
 add_library(RinVulkan::RinOSProcessBackend ALIAS
     RinVulkanRinOSProcessBackend)
