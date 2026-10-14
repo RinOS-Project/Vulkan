@@ -384,15 +384,11 @@ int main(void) {
     CHECK(platform->submit_process_commands(
               platform->context, 2u, commands, 2u, resources, 2u,
               &receipt) == RIN_VULKAN_PRODUCT_OK);
-    CHECK(submit_calls == 1u && observed_queue_token == 0x9002u &&
-          observed_queue_id == 2u && observed_commands == commands &&
-          observed_command_count == 2u && observed_resource_count == 2u &&
-          observed_resources[0].allocation == UINT64_C(0xA001) &&
-          observed_resources[0].required_gpu_access ==
-              RIN_GPU_ALLOCATION_GPU_READ &&
-          observed_resources[1].allocation == UINT64_C(0xA002) &&
-          observed_resources[1].required_gpu_access ==
-              RIN_GPU_ALLOCATION_GPU_WRITE);
+    CHECK(submit_calls == 1u &&
+          observed_submit_version == RIN_GPU_PROCESS_SUBMIT_DESC_VERSION_V2 &&
+          observed_queue_token == 0x9002u && observed_queue_id == 2u &&
+          observed_commands == commands && observed_command_count == 2u &&
+          observed_resource_count == 0u);
     CHECK(receipt.struct_size == sizeof(receipt) &&
           receipt.version ==
               RIN_VULKAN_PRODUCT_PROCESS_SUBMIT_RECEIPT_V1_VERSION &&
