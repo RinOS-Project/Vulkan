@@ -135,7 +135,8 @@ static int rinos_submit_process_commands(
         (RinVulkanRinOSProcessSubmitBackendV1*)context;
     RinGpuProcessResourceV1 sdk_resources[
         RIN_GPU_PROCESS_MAX_RESOURCES_V1];
-    RinGpuProcessSubmitDescV1 descriptor;
+    RinGpuProcessSubmitDescV1 descriptor_v1;
+    RinGpuProcessSubmitDescV2 descriptor_v2;
     RinGpuProcessSubmitReceiptV1 sdk_receipt;
     RinVulkanRinOSProcessQueueV1* selected_queue = NULL;
     uint64_t command_bytes;
@@ -212,23 +213,33 @@ static int rinos_submit_process_commands(
         __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
         return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
     }
-    memset(&descriptor, 0, sizeof(descriptor));
-    descriptor.struct_size = sizeof(descriptor);
-    descriptor.version = RIN_GPU_PROCESS_SUBMIT_DESC_VERSION_V1;
-    descriptor.commands.address = (uint64_t)(uintptr_t)commands;
-    descriptor.commands.size = command_bytes;
-    descriptor.command_count = command_count;
-    descriptor.command_record_size = sizeof(*commands);
-    descriptor.resource_count = resource_count;
-    if (resource_count != 0u) {
-        descriptor.resources.address = (uint64_t)(uintptr_t)sdk_resources;
-        descriptor.resources.size =
-            (uint64_t)resource_count * sizeof(sdk_resources[0]);
-    }
-
+    memset(&descriptor_v1, 0, sizeof(descriptor_v1));
+    memset(&descriptor_v2, 0, sizeof(descriptor_v2));
     memset(&sdk_receipt, 0, sizeof(sdk_receipt));
-    result = rinos_map_sdk_result(rin_gpu_process_submit_v1(
-        selected_queue->token, &descriptor, &sdk_receipt));
+    if (resource_count == 0u) {
+        descriptor_v2.struct_size = sizeof(descriptor_v2);
+        descriptor_v2.version = RIN_GPU_PROCESS_SUBMIT_DESC_VERSION_V2;
+        descriptor_v2.commands.address = (uint64_t)(uintptr_t)commands;
+        descriptor_v2.commands.size = command_bytes;
+        descriptor_v2.command_count = command_count;
+        descriptor_v2.command_record_size = sizeof(*commands);
+        result = rinos_map_sdk_result(rin_gpu_process_submit_v2(
+            selected_queue->token, &descriptor_v2, &sdk_receipt));
+    } else {
+        descriptor_v1.struct_size = sizeof(descriptor_v1);
+        descriptor_v1.version = RIN_GPU_PROCESS_SUBMIT_DESC_VERSION_V1;
+        descriptor_v1.commands.address = (uint64_t)(uintptr_t)commands;
+        descriptor_v1.commands.size = command_bytes;
+        descriptor_v1.command_count = command_count;
+        descriptor_v1.command_record_size = sizeof(*commands);
+        descriptor_v1.resources.address =
+            (uint64_t)(uintptr_t)sdk_resources;
+        descriptor_v1.resources.size =
+            (uint64_t)resource_count * sizeof(sdk_resources[0]);
+        descriptor_v1.resource_count = resource_count;
+        result = rinos_map_sdk_result(rin_gpu_process_submit_v1(
+            selected_queue->token, &descriptor_v1, &sdk_receipt));
+    }
     if (result == RIN_VULKAN_PRODUCT_OK) {
         if (sdk_receipt.struct_size != sizeof(sdk_receipt) ||
             sdk_receipt.version != RIN_GPU_PROCESS_SUBMIT_RECEIPT_VERSION_V1 ||

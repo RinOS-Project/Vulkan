@@ -2301,6 +2301,25 @@ RinResult rin_gpu_process_submit_v1(
     return RIN_SUCCESS;
 }
 
+RinResult rin_gpu_process_submit_v2(
+        RinGpuProcessQueueV1 token,
+        const RinGpuProcessSubmitDescV2* descriptor,
+        RinGpuProcessSubmitReceiptV1* receipt_out) {
+    RinGpuProcessSubmitDescV1 v1_descriptor;
+
+    if (!descriptor || descriptor->struct_size != sizeof(*descriptor) ||
+        descriptor->version != RIN_GPU_PROCESS_SUBMIT_DESC_VERSION_V2 ||
+        descriptor->reserved[0] != 0u || descriptor->reserved[1] != 0u)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    memset(&v1_descriptor, 0, sizeof(v1_descriptor));
+    v1_descriptor.struct_size = sizeof(v1_descriptor);
+    v1_descriptor.version = RIN_GPU_PROCESS_SUBMIT_DESC_VERSION_V1;
+    v1_descriptor.commands = descriptor->commands;
+    v1_descriptor.command_count = descriptor->command_count;
+    v1_descriptor.command_record_size = descriptor->command_record_size;
+    return rin_gpu_process_submit_v1(token, &v1_descriptor, receipt_out);
+}
+
 static int initialize_product_adapters(
         TestProductAdapters* adapters,
         RinGpuVulkanSoftwarePlatformV1* software) {

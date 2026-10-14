@@ -23,6 +23,7 @@ static uint32_t bind_calls;
 static uint32_t fail_bind_queue_id;
 static uint32_t release_calls;
 static uint32_t submit_calls;
+static uint32_t observed_submit_version;
 static uint32_t observed_queue_id;
 static RinGpuProcessQueueV1 observed_queue_token;
 static const RinGpuBackendCommandV1* observed_commands;
@@ -81,6 +82,7 @@ RinResult rin_gpu_process_submit_v1(
         descriptor->version != RIN_GPU_PROCESS_SUBMIT_DESC_VERSION_V1 ||
         descriptor->command_record_size != sizeof(RinGpuBackendCommandV1))
         return RIN_ERROR_INVALID_ARGUMENT;
+    observed_submit_version = RIN_GPU_PROCESS_SUBMIT_DESC_VERSION_V1;
     observed_queue_token = queue;
     observed_queue_id = (uint32_t)(queue - UINT64_C(0x9000));
     observed_commands = (const RinGpuBackendCommandV1*)
@@ -94,6 +96,33 @@ RinResult rin_gpu_process_submit_v1(
         memcpy(observed_resources, source,
                descriptor->resource_count * sizeof(*source));
     }
+    *receipt_out = supplied_receipt;
+    return submit_result;
+}
+
+RinResult rin_gpu_process_submit_v2(
+    RinGpuProcessQueueV1 queue,
+    const RinGpuProcessSubmitDescV2* descriptor,
+    RinGpuProcessSubmitReceiptV1* receipt_out) {
+    ++submit_calls;
+    if (!descriptor || !receipt_out ||
+        descriptor->struct_size != sizeof(*descriptor) ||
+        descriptor->version != RIN_GPU_PROCESS_SUBMIT_DESC_VERSION_V2 ||
+        descriptor->reserved[0] != 0u || descriptor->reserved[1] != 0u ||
+        descriptor->command_count == 0u ||
+        descriptor->command_record_size != sizeof(RinGpuBackendCommandV1) ||
+        descriptor->commands.address == 0u ||
+        descriptor->commands.size !=
+            (uint64_t)descriptor->command_count *
+                descriptor->command_record_size)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    observed_submit_version = RIN_GPU_PROCESS_SUBMIT_DESC_VERSION_V2;
+    observed_queue_token = queue;
+    observed_queue_id = (uint32_t)(queue - UINT64_C(0x9000));
+    observed_commands = (const RinGpuBackendCommandV1*)
+        (uintptr_t)descriptor->commands.address;
+    observed_command_count = descriptor->command_count;
+    observed_resource_count = 0u;
     *receipt_out = supplied_receipt;
     return submit_result;
 }
@@ -276,6 +305,7 @@ static void reset_mocks(void) {
     bind_calls = 0u;
     release_calls = 0u;
     submit_calls = 0u;
+    observed_submit_version = 0u;
     observed_queue_id = 0u;
     observed_queue_token = 0u;
     observed_commands = NULL;
@@ -636,7 +666,9 @@ int main(void) {
               backend_v4.platform_v6.context, 0u, commands, 1u, NULL, 0u,
               &receipt) == RIN_VULKAN_PRODUCT_OK);
     CHECK(submit_calls == 1u && observed_queue_token == UINT64_C(0x9002) &&
-          observed_queue_id == 2u && receipt.queue_id == 0u &&
+          observed_queue_id == 2u &&
+          observed_submit_version == RIN_GPU_PROCESS_SUBMIT_DESC_VERSION_V2 &&
+          observed_resource_count == 0u && receipt.queue_id == 0u &&
           receipt.sequence == 17u);
     supplied_receipt.queue_id = 0u;
     CHECK(backend_v4.platform_v6.submit_process_commands(
