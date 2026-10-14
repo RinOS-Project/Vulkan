@@ -662,14 +662,30 @@ int main(void) {
           backend_v4.platform_v6.base == &parent &&
           backend_v4.platform_v6.context == &backend_v4 &&
           platform_v8_v4->create_process_compute_bind_group != NULL);
+    commands[0].type = RIN_GPU_BACKEND_COMMAND_COPY_BUFFER;
+    commands[0].value.buffer_copy.source_cookie = UINT64_C(0xA11CE001);
+    commands[0].value.buffer_copy.source_offset = 32u;
+    commands[0].value.buffer_copy.destination_cookie = UINT64_C(0xA11CE002);
+    commands[0].value.buffer_copy.destination_offset = 64u;
+    commands[0].value.buffer_copy.size_bytes = 128u;
     CHECK(backend_v4.platform_v6.submit_process_commands(
               backend_v4.platform_v6.context, 0u, commands, 1u, NULL, 0u,
               &receipt) == RIN_VULKAN_PRODUCT_OK);
     CHECK(submit_calls == 1u && observed_queue_token == UINT64_C(0x9002) &&
           observed_queue_id == 2u &&
           observed_submit_version == RIN_GPU_PROCESS_SUBMIT_DESC_VERSION_V2 &&
-          observed_resource_count == 0u && receipt.queue_id == 0u &&
+          observed_resource_count == 0u && observed_commands == commands &&
+          observed_commands[0].type == RIN_GPU_BACKEND_COMMAND_COPY_BUFFER &&
+          observed_commands[0].value.buffer_copy.source_cookie ==
+              UINT64_C(0xA11CE001) &&
+          observed_commands[0].value.buffer_copy.source_offset == 32u &&
+          observed_commands[0].value.buffer_copy.destination_cookie ==
+              UINT64_C(0xA11CE002) &&
+          observed_commands[0].value.buffer_copy.destination_offset == 64u &&
+          observed_commands[0].value.buffer_copy.size_bytes == 128u &&
+          receipt.queue_id == 0u &&
           receipt.sequence == 17u);
+    memset(&commands[0], 0, sizeof(commands[0]));
     supplied_receipt.queue_id = 0u;
     CHECK(backend_v4.platform_v6.submit_process_commands(
               backend_v4.platform_v6.context, 1u, commands, 1u, NULL, 0u,
