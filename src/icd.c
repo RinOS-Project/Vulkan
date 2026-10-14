@@ -6,6 +6,10 @@
 #include <rinvulkan/graphics.h>
 #include <rin/contract_abi.h>
 #include <rinruntime/window.h>
+#if defined(__rinos__)
+#include <rin/base.h>
+#include <ringpu/cross_process_capability.h>
+#endif
 
 #include <float.h>
 #include <stdlib.h>
@@ -135,6 +139,10 @@ static int get_physical_profile(
     RinGpuVulkanPhysicalDeviceV2* profile);
 static int device_has_swapchains(const struct RinVkDevice_T* device);
 static int instance_has_swapchains(const struct RinVkInstance_T* instance);
+#if defined(__rinos__)
+static int retry_deferred_present_readback_releases(
+    struct RinVkDevice_T* device);
+#endif
 static int call_query_physical(
     RinGpuVulkanRuntimeV1* runtime, RinGpuVulkanHandle instance,
     RinGpuVulkanHandle physical,
@@ -220,6 +228,10 @@ typedef struct RinVkMemorySlot {
     uint64_t mapped_size;
     uint64_t mapped_offset;
     uint64_t mapping_lease;
+    uint32_t deferred_present_release_state;
+    uint32_t deferred_present_release_rights;
+    uint64_t deferred_present_release_token;
+    uint64_t deferred_present_release_generation;
 } RinVkMemorySlot;
 
 typedef struct RinVkBufferSlot {
@@ -2982,9 +2994,74 @@ static void clear_memory_slot(RinVkMemorySlot* slot) {
     slot->requested_size = 0u;
     slot->memory_type_index = 0u;
     slot->bound_resource_count = 0u;
+    slot->deferred_present_release_state = 0u;
+    slot->deferred_present_release_rights = 0u;
+    slot->deferred_present_release_token = 0u;
+    slot->deferred_present_release_generation = 0u;
     clear_memory_mapping(slot);
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
 }
+
+#if defined(__rinos__)
+static int revoke_present_readback_token(
+    const RinGpuCrossProcessCapabilityTokenV2* token) {
+    RinGpuCrossProcessCapabilityIpcClientV1 client;
+    int result;
+    memset(&client, 0, sizeof(client));
+    client.channel = RIN_HANDLE_INVALID;
+    if (!token || token->struct_size != sizeof(*token) ||
+        token->version != RIN_GPU_CROSS_PROCESS_CAPABILITY_V2_VERSION ||
+        token->token == 0u || token->device_generation == 0u ||
+        token->rights != RIN_GPU_CROSS_PROCESS_RIGHT_READ ||
+        token->reserved[0] != 0u || token->reserved[1] != 0u ||
+        token->reserved[2] != 0u)
+        return 0;
+    result = rin_gpu_cross_process_capability_ipc_connect(&client);
+    if (result == RIN_GPU_CROSS_PROCESS_OK)
+        result = rin_gpu_cross_process_capability_ipc_revoke_v2(
+            &client, token);
+    if (client.channel != RIN_HANDLE_INVALID)
+        (void)rin_object_close_v1((RinObject)client.channel);
+    return result == RIN_GPU_CROSS_PROCESS_OK;
+}
+
+static int retry_deferred_present_readback_releases(
+    struct RinVkDevice_T* device) {
+    uint32_t index;
+    if (!device) return 0;
+    for (index = 0u; index < RIN_VK_MAX_MEMORIES; ++index) {
+        RinVkMemorySlot* memory = &g_memories[index];
+        RinGpuCrossProcessCapabilityTokenV2 token;
+        RinVkDeviceMemory handle;
+        if (__atomic_load_n(&memory->state, __ATOMIC_ACQUIRE) != 1u ||
+            memory->owner != device ||
+            memory->deferred_present_release_state == 0u)
+            continue;
+        if (memory->deferred_present_release_state == 1u) {
+            memset(&token, 0, sizeof(token));
+            token.struct_size = sizeof(token);
+            token.version = RIN_GPU_CROSS_PROCESS_CAPABILITY_V2_VERSION;
+            token.token = memory->deferred_present_release_token;
+            token.device_generation =
+                memory->deferred_present_release_generation;
+            token.rights = memory->deferred_present_release_rights;
+            if (!revoke_present_readback_token(&token)) return 0;
+            memory->deferred_present_release_state = 2u;
+            memory->deferred_present_release_token = 0u;
+            memory->deferred_present_release_rights = 0u;
+            memory->deferred_present_release_generation = 0u;
+        } else if (memory->deferred_present_release_state != 2u) {
+            return 0;
+        }
+        handle = resource_handle(RIN_VK_MEMORY_TAG, index,
+                                 memory->generation);
+        vkFreeMemory((RinVkDevice)device, handle, NULL);
+        if (__atomic_load_n(&memory->state, __ATOMIC_ACQUIRE) == 1u)
+            return 0;
+    }
+    return 1;
+}
+#endif
 
 static void clear_buffer_slot(RinVkBufferSlot* slot) {
     slot->owner = NULL;
@@ -12221,6 +12298,12 @@ void RIN_VKAPI_CALL vkDestroyDevice(RinVkDevice device,
     uint32_t expected = 1u;
     int result;
     (void)allocator;
+#if defined(__rinos__)
+    /* vkDestroyDevice has no error result channel. Keep the device and all
+     * backing allocations live so a caller can retry destruction; releasing
+     * them while a Compositor READ lease is outstanding would be unsafe. */
+    if (slot && !retry_deferred_present_readback_releases(slot)) return;
+#endif
     if (!slot || device_has_swapchains(slot) ||
         maintain_device_submissions(slot) != RIN_VK_SUCCESS ||
         device_submission_slots_active(slot) ||
@@ -13407,6 +13490,94 @@ static int record_native_window_image_barrier(
     return core->record_error == 0u;
 }
 
+#if defined(__rinos__)
+static RinVkResult native_window_import_readback_capability(
+    struct RinVkDevice_T* device, RinVkNativeWindowSurfaceSlot* surface,
+    RinVkDeviceMemory staging_memory, uint64_t surface_generation,
+    uint32_t width, uint32_t height, uint32_t row_pitch,
+    uint64_t frame_bytes) {
+    RinVkMemorySlot* memory = memory_slot((RinVkDevice)device, staging_memory);
+    RinIpcPeerIdentityV1 recipient;
+    RinGpuCrossProcessCapabilityIpcClientV1 client;
+    RinGpuCrossProcessCapabilityGrantDescV2 grant;
+    RinGpuCrossProcessCapabilityTokenV2 token;
+    RinRuntimeGpuReadbackLeaseV1 readback;
+    int result;
+    int revoke_result = RIN_GPU_CROSS_PROCESS_INVALID_ARGUMENT;
+    int runtime_result;
+
+    if (!device || !surface || !memory || memory->owner != device ||
+        memory->product_allocation == 0u ||
+        memory->requested_size < frame_bytes || frame_bytes == 0u ||
+        surface_generation == 0u || width == 0u || height == 0u ||
+        width > UINT32_MAX / 4u ||
+        row_pitch < width * 4u || device->physical_profile.device_epoch == 0u)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+
+    memset(&recipient, 0, sizeof(recipient));
+    if (wnd_get_compositor_peer_identity_v1(&recipient) != RIN_RESULT_OK ||
+        recipient.process_id == 0u ||
+        recipient.process_instance_cookie == 0u)
+        return RIN_VK_ERROR_SURFACE_LOST_KHR;
+    memset(&client, 0, sizeof(client));
+    client.channel = RIN_HANDLE_INVALID;
+    result = rin_gpu_cross_process_capability_ipc_connect(&client);
+    if (result != RIN_GPU_CROSS_PROCESS_OK)
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+
+    memset(&grant, 0, sizeof(grant));
+    grant.struct_size = sizeof(grant);
+    grant.version = RIN_GPU_CROSS_PROCESS_CAPABILITY_V2_VERSION;
+    grant.rights = RIN_GPU_CROSS_PROCESS_RIGHT_READ;
+    grant.device_generation = device->physical_profile.device_epoch;
+    grant.resource_id = memory->product_allocation;
+    grant.recipient_process_id = recipient.process_id;
+    grant.recipient_process_instance_cookie =
+        recipient.process_instance_cookie;
+    memset(&token, 0, sizeof(token));
+    result = rin_gpu_cross_process_capability_ipc_issue_v2(
+        &client, &grant, &token);
+    if (result != RIN_GPU_CROSS_PROCESS_OK) {
+        (void)rin_object_close_v1((RinObject)client.channel);
+        return result == RIN_GPU_CROSS_PROCESS_BUSY ||
+                       result == RIN_GPU_CROSS_PROCESS_LIMIT
+                   ? RIN_VK_NOT_READY
+                   : RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    }
+
+    memset(&readback, 0, sizeof(readback));
+    readback.struct_size = sizeof(readback);
+    readback.version = RIN_RUNTIME_GPU_READBACK_LEASE_V1_VERSION;
+    readback.format = RIN_COMPOSITOR_GPU_READBACK_FORMAT_RGBA8;
+    readback.width = width;
+    readback.height = height;
+    readback.row_pitch = row_pitch;
+    readback.bytes = frame_bytes;
+    readback.capability = token;
+    readback.expected_surface_generation = surface_generation;
+    runtime_result = wnd_present_gpu_readback_lease_sync_v1(
+        surface->window_handle, &readback);
+
+    revoke_result = rin_gpu_cross_process_capability_ipc_revoke_v2(
+        &client, &token);
+    (void)rin_object_close_v1((RinObject)client.channel);
+    if (revoke_result != RIN_GPU_CROSS_PROCESS_OK) {
+        memory->deferred_present_release_state = 1u;
+        memory->deferred_present_release_rights = token.rights;
+        memory->deferred_present_release_token = token.token;
+        memory->deferred_present_release_generation =
+            token.device_generation;
+        return RIN_VK_ERROR_DEVICE_LOST;
+    }
+    if (runtime_result == RIN_RESULT_OK) return RIN_VK_SUCCESS;
+    if (runtime_result == RIN_RESULT_BUSY ||
+        runtime_result == RIN_ERROR_BUSY ||
+        runtime_result == RIN_ERROR_WOULD_BLOCK)
+        return RIN_VK_NOT_READY;
+    return RIN_VK_ERROR_SURFACE_LOST_KHR;
+}
+#endif
+
 static RinVkResult native_window_readback_import(
         struct RinVkQueue_T* queue, RinVkSwapchainSlot* swapchain,
         uint32_t image_index, uint64_t expected_surface_generation) {
@@ -13420,7 +13591,9 @@ static RinVkResult native_window_readback_import(
     RinVkCommandBufferBeginInfo command_begin_info;
     RinVkFenceCreateInfo fence_info;
     RinVkSubmitInfo submit_info;
+#if !defined(__rinos__)
     RinVkMappedMemoryRange mapped_range;
+#endif
     RinVkBufferImageCopy copy_region;
     RinVkCommandPool command_pool = (RinVkCommandPool)0;
     RinVkCommandBuffer command_buffer = NULL;
@@ -13428,11 +13601,13 @@ static RinVkResult native_window_readback_import(
     RinVkDeviceMemory staging_memory = 0u;
     RinVkFence fence = 0u;
     RinVkResult result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+#if !defined(__rinos__)
     RinRuntimeCompositorGpuSurfaceV1 snapshot;
     RinRuntimeCompositorGpuFrameV1 frame;
     RinVkNativeWindowSurfaceSlot* surface = NULL;
     void* mapped = NULL;
     void* frame_pixels = NULL;
+#endif
     uint64_t frame_bytes;
     uint32_t row_pitch;
     uint32_t memory_type = UINT32_MAX;
@@ -13440,7 +13615,9 @@ static RinVkResult native_window_readback_import(
     uint32_t index;
     int submitted = 0;
     int gpu_complete = 0;
+#if !defined(__rinos__)
     int mapped_active = 0;
+#endif
 
     if (!queue || !swapchain || !swapchain->native_window_surface ||
         image_index >= swapchain->image_count ||
@@ -13449,6 +13626,10 @@ static RinVkResult native_window_readback_import(
         (uint64_t)swapchain->image_extent.width *
                 swapchain->image_extent.height > UINT64_MAX / 4u)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
+#if defined(__rinos__)
+    if (!retry_deferred_present_readback_releases(device))
+        return RIN_VK_ERROR_DEVICE_LOST;
+#endif
     row_pitch = swapchain->image_extent.width * 4u;
     frame_bytes = (uint64_t)row_pitch * swapchain->image_extent.height;
     if (frame_bytes == 0u || frame_bytes > SIZE_MAX)
@@ -13600,6 +13781,13 @@ static RinVkResult native_window_readback_import(
     if (result != RIN_VK_SUCCESS) goto cleanup;
     gpu_complete = 1;
 
+#if defined(__rinos__)
+    result = native_window_import_readback_capability(
+        device, swapchain->native_window_surface, staging_memory,
+        expected_surface_generation, swapchain->image_extent.width,
+        swapchain->image_extent.height, row_pitch, frame_bytes);
+    if (result != RIN_VK_SUCCESS) goto cleanup;
+#else
     result = vkMapMemory((RinVkDevice)device, staging_memory, 0u,
                          frame_bytes, 0u, &mapped);
     if (result != RIN_VK_SUCCESS) goto cleanup;
@@ -13622,16 +13810,21 @@ static RinVkResult native_window_readback_import(
     memcpy(frame_pixels, mapped, (size_t)frame_bytes);
     vkUnmapMemory((RinVkDevice)device, staging_memory);
     mapped_active = 0;
+#endif
 
 cleanup:
     if (submitted && !gpu_complete) {
+#if !defined(__rinos__)
         free(frame_pixels);
+#endif
         return result;
     }
+#if !defined(__rinos__)
     if (mapped_active) {
         vkUnmapMemory((RinVkDevice)device, staging_memory);
         mapped_active = 0;
     }
+#endif
     if (fence != 0u) {
         vkDestroyFence((RinVkDevice)device, fence, NULL);
         if (fence_slot((RinVkDevice)device, fence))
@@ -13652,12 +13845,22 @@ cleanup:
             staging_buffer = 0u;
     }
     if (staging_memory != 0u && staging_buffer == 0u) {
-        vkFreeMemory((RinVkDevice)device, staging_memory, NULL);
-        if (memory_slot((RinVkDevice)device, staging_memory))
-            result = RIN_VK_ERROR_DEVICE_LOST;
-        else
+        RinVkMemorySlot* staging =
+            memory_slot((RinVkDevice)device, staging_memory);
+        if (!staging || staging->deferred_present_release_state == 0u) {
+            vkFreeMemory((RinVkDevice)device, staging_memory, NULL);
+            if (memory_slot((RinVkDevice)device, staging_memory))
+                result = RIN_VK_ERROR_DEVICE_LOST;
+            else
+                staging_memory = 0u;
+        } else {
+            /* Keep the exact backing allocation until the Compositor's
+             * capability lease can be revoked; device/process teardown owns
+             * the retry if the transport is currently unavailable. */
             staging_memory = 0u;
+        }
     }
+#if !defined(__rinos__)
     if (result != RIN_VK_SUCCESS || !frame_pixels) {
         free(frame_pixels);
         return result != RIN_VK_SUCCESS ? result
@@ -13701,6 +13904,9 @@ cleanup:
         }
     }
     free(frame_pixels);
+#else
+    if (result != RIN_VK_SUCCESS) return result;
+#endif
     return result;
 }
 
