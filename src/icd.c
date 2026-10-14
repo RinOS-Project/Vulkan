@@ -1483,6 +1483,10 @@ static int process_timestamp_query_provider_available(void) {
     return 1;
 }
 
+static int timestamp_valid_bits_supported(uint32_t valid_bits) {
+    return valid_bits >= 36u && valid_bits <= 64u;
+}
+
 static int profile_supports_process_timestamps(
         const RinGpuVulkanPhysicalDeviceV2* profile) {
     uint32_t index;
@@ -1490,7 +1494,8 @@ static int profile_supports_process_timestamps(
         !process_timestamp_query_provider_available())
         return 0;
     for (index = 0u; index < profile->queue_family_count; ++index)
-        if (profile->queue_families[index].timestamp_valid_bits != 0u)
+        if (timestamp_valid_bits_supported(
+                profile->queue_families[index].timestamp_valid_bits))
             return 1;
     return 0;
 }
@@ -11664,6 +11669,8 @@ static void publish_legacy_properties(
         const RinGpuVulkanPhysicalDeviceV2* profile,
         RinVkPhysicalDeviceProperties* properties) {
     uint32_t index;
+    int has_graphics_or_compute_queue = 0;
+    int all_graphics_or_compute_queues_support_timestamps = 1;
     const int timestamps_supported =
         profile_supports_process_timestamps(profile);
     memset(properties, 0, sizeof(*properties));
@@ -11702,15 +11709,21 @@ static void publish_legacy_properties(
         ? (float)profile->timestamp_period_ns_x1000 / 1000.0f
         : 0.0f;
     for (index = 0u; index < profile->queue_family_count; ++index) {
-        if (timestamps_supported &&
-            (profile->queue_families[index].flags &
-             (RIN_GPU_VK_QUEUE_GRAPHICS | RIN_GPU_VK_QUEUE_COMPUTE)) ==
-                (RIN_GPU_VK_QUEUE_GRAPHICS | RIN_GPU_VK_QUEUE_COMPUTE) &&
-            profile->queue_families[index].timestamp_valid_bits != 0u) {
-            properties->limits.timestampComputeAndGraphics = 1u;
-            break;
-        }
+        const RinGpuVulkanQueueFamilyV1* family =
+            &profile->queue_families[index];
+        if ((family->flags &
+             (RIN_GPU_VK_QUEUE_GRAPHICS | RIN_GPU_VK_QUEUE_COMPUTE)) == 0u)
+            continue;
+        has_graphics_or_compute_queue = 1;
+        if (!timestamps_supported ||
+            !timestamp_valid_bits_supported(family->timestamp_valid_bits))
+            all_graphics_or_compute_queues_support_timestamps = 0;
     }
+    properties->limits.timestampComputeAndGraphics =
+        has_graphics_or_compute_queue &&
+                all_graphics_or_compute_queues_support_timestamps
+            ? 1u
+            : 0u;
 }
 
 void RIN_VKAPI_CALL vkGetPhysicalDeviceProperties(
@@ -11872,7 +11885,9 @@ void RIN_VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties(
              RIN_GPU_VK_QUEUE_TRANSFER);
         properties[index].queueCount =
             profile.queue_families[index].queue_count;
-        properties[index].timestampValidBits = timestamps_supported
+        properties[index].timestampValidBits =
+            timestamps_supported && timestamp_valid_bits_supported(
+                profile.queue_families[index].timestamp_valid_bits)
             ? profile.queue_families[index].timestamp_valid_bits
             : 0u;
         properties[index].minImageTransferGranularity.width = 1u;

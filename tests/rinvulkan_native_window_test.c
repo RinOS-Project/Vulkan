@@ -3330,12 +3330,14 @@ static void make_profile(RinGpuVulkanPhysicalDeviceV2* profile) {
     profile->driver_digest[0] = 0x42u;
     profile->iommu_domain_cookie = UINT64_C(0x3001);
     profile->device_epoch = 7u;
-    profile->queue_family_count = 1u;
+    profile->queue_family_count = 2u;
     profile->queue_families[0].flags = RIN_GPU_VK_QUEUE_GRAPHICS |
                                        RIN_GPU_VK_QUEUE_COMPUTE |
                                        RIN_GPU_VK_QUEUE_TRANSFER;
     profile->queue_families[0].queue_count = 2u;
     profile->queue_families[0].timestamp_valid_bits = 64u;
+    profile->queue_families[1].flags = RIN_GPU_VK_QUEUE_COMPUTE;
+    profile->queue_families[1].queue_count = 1u;
     profile->memory_heap_count = 2u;
     profile->memory_heaps[0].size_bytes = UINT64_C(512) * 1024u * 1024u;
     profile->memory_heaps[0].flags = RIN_GPU_VK_HEAP_DEVICE_LOCAL;
@@ -4454,16 +4456,17 @@ int main(void) {
     product_v9_bound = 1u;
     memset(&physical_properties, 0, sizeof(physical_properties));
     vkGetPhysicalDeviceProperties(physical, &physical_properties);
-    CHECK(physical_properties.limits.timestampComputeAndGraphics == 1u &&
+    CHECK(physical_properties.limits.timestampComputeAndGraphics == 0u &&
           physical_properties.limits.timestampPeriod == 1.0f);
     {
-        uint32_t timestamp_queue_count = 1u;
+        uint32_t timestamp_queue_count = 2u;
         memset(timestamp_queue_properties, 0,
                sizeof(timestamp_queue_properties));
         vkGetPhysicalDeviceQueueFamilyProperties(
             physical, &timestamp_queue_count, timestamp_queue_properties);
-        CHECK(timestamp_queue_count == 1u &&
-              timestamp_queue_properties[0].timestampValidBits == 64u);
+        CHECK(timestamp_queue_count == 2u &&
+              timestamp_queue_properties[0].timestampValidBits == 64u &&
+              timestamp_queue_properties[1].timestampValidBits == 0u);
     }
 
 #if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
