@@ -1784,6 +1784,9 @@ static int software_submit(void* context,
                 operation->type ==
                     RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER) {
                 RinGpuVulkanSoftwareAllocationV1* destination;
+                const uint32_t required_access = compute_barrier_gpu_access(
+                    (uint32_t)(operation->barrier.src_access_mask |
+                               operation->barrier.dst_access_mask));
                 uint32_t src_queue_family;
                 uint32_t dst_queue_family;
                 if (operation->source_allocation == 0u ||
@@ -1793,8 +1796,7 @@ static int software_submit(void* context,
                     !resource_has_access(
                         resources, resource_count,
                         operation->destination_allocation,
-                        RIN_VULKAN_PRODUCT_MEMORY_GPU_READ |
-                            RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE) ||
+                        required_access) ||
                     (operation->barrier.src_stage_mask &
                      ~RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS) != 0u ||
                     (operation->barrier.src_access_mask &

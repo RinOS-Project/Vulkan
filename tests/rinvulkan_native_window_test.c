@@ -170,6 +170,9 @@ typedef struct TestProductAdapters {
     uint32_t sdk_last_command_count;
     RinGpuBackendCommandV1 sdk_last_commands[
         TEST_SDK_PROCESS_COMMAND_CAPTURE];
+    uint32_t sdk_last_submit_resource_count;
+    RinVulkanProductResourceV1 sdk_last_submit_resources[
+        RIN_GPU_PROCESS_MAX_RESOURCES_V1];
     uint32_t sdk_resource_bind_calls;
     uint32_t sdk_resource_unbind_calls;
     uint32_t sdk_bind_group_create_calls;
@@ -2301,23 +2304,488 @@ RinResult rin_gpu_process_submit_v1(
     return RIN_SUCCESS;
 }
 
+static RinResult test_process_submit_add_v2_resource(
+        TestProductAdapters* adapters, uint64_t resource_cookie,
+        uint64_t resource_offset, uint64_t resource_size,
+        uint32_t required_gpu_access, int range_limited, int optional,
+        RinVulkanProductResourceV1* resources, uint32_t* resource_count) {
+    const uint32_t known_access = RIN_GPU_ALLOCATION_GPU_READ |
+                                  RIN_GPU_ALLOCATION_GPU_WRITE;
+    const RinGpuProcessResourceBindingV1* sdk_binding = NULL;
+    const TestResourceBinding* product_binding;
+    uint32_t lease_access;
+    uint32_t product_access = 0u;
+    uint32_t index;
+
+    if (!adapters || !resources || !resource_count ||
+        *resource_count > RIN_GPU_PROCESS_MAX_RESOURCES_V1 ||
+        (required_gpu_access & ~known_access) != 0u)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    if (resource_cookie == 0u)
+        return optional ? RIN_SUCCESS : RIN_ERROR_INVALID_ARGUMENT;
+    for (index = 0u; index < RIN_GPU_PROCESS_MAX_COMPUTE_BINDINGS_V1;
+         ++index) {
+        const TestSdkProcessResource* resource =
+            &adapters->sdk_resources[index];
+        if (resource->active != 0u &&
+            resource->binding.resource_cookie == resource_cookie) {
+            sdk_binding = &resource->binding;
+            break;
+        }
+    }
+    /* Native-window resources enter this fixture through the authenticated
+     * V5 product bind callback; process-SDK tests additionally populate the
+     * syscall-shaped registry above. The product binding is the common
+     * capability table consumed by both paths. */
+    product_binding = test_find_resource_binding(adapters, resource_cookie);
+    if (!product_binding) return RIN_ERROR_STALE_HANDLE;
+    if (product_binding->resource_cookie != resource_cookie ||
+        product_binding->allocation_handle == 0u ||
+        product_binding->size_bytes == 0u ||
+        product_binding->required_gpu_access == 0u ||
+        (product_binding->required_gpu_access & ~known_access) != 0u ||
+        product_binding->allocation_offset >
+            UINT64_MAX - product_binding->size_bytes)
+        return RIN_ERROR_ABI_MISMATCH;
+    if ((required_gpu_access &
+         ~product_binding->required_gpu_access) != 0u) {
+        fprintf(stderr,
+                "V2 submit resource rights mismatch: cookie=%llu "
+                "requested=%u bound=%u\n",
+                (unsigned long long)resource_cookie, required_gpu_access,
+                product_binding->required_gpu_access);
+        return RIN_ERROR_ACCESS_DENIED;
+    }
+    if (range_limited &&
+        (resource_size == 0u ||
+         resource_offset > product_binding->size_bytes ||
+         resource_size > product_binding->size_bytes - resource_offset))
+        return RIN_ERROR_INVALID_ARGUMENT;
+
+    /* When the syscall-shaped SDK fixture also owns this cookie, require it
+     * to match the product owner exactly. V2 never trusts an allocation handle
+     * supplied by the command descriptor. */
+    if (sdk_binding &&
+        (sdk_binding->struct_size != sizeof(*sdk_binding) ||
+         sdk_binding->version !=
+             RIN_GPU_PROCESS_RESOURCE_BINDING_VERSION_V1 ||
+         sdk_binding->resource_cookie != resource_cookie ||
+         sdk_binding->allocation != product_binding->allocation_handle ||
+         sdk_binding->allocation_offset !=
+             product_binding->allocation_offset ||
+         sdk_binding->size_bytes != product_binding->size_bytes ||
+         sdk_binding->required_gpu_access !=
+             product_binding->required_gpu_access ||
+         sdk_binding->reserved != 0u))
+        return RIN_ERROR_ABI_MISMATCH;
+
+    lease_access = required_gpu_access != 0u
+                       ? required_gpu_access
+                       : product_binding->required_gpu_access;
+    if ((lease_access & RIN_GPU_ALLOCATION_GPU_READ) != 0u)
+        product_access |= RIN_VULKAN_PRODUCT_MEMORY_GPU_READ;
+    if ((lease_access & RIN_GPU_ALLOCATION_GPU_WRITE) != 0u)
+        product_access |= RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE;
+    for (index = 0u; index < *resource_count; ++index) {
+        if (resources[index].allocation_handle ==
+            product_binding->allocation_handle) {
+            resources[index].required_gpu_access |= product_access;
+            return RIN_SUCCESS;
+        }
+    }
+    if (*resource_count >= RIN_GPU_PROCESS_MAX_RESOURCES_V1)
+        return RIN_ERROR_LIMIT_EXCEEDED;
+    resources[*resource_count].allocation_handle =
+        product_binding->allocation_handle;
+    resources[*resource_count].required_gpu_access = product_access;
+    ++*resource_count;
+    return RIN_SUCCESS;
+}
+
+static RinResult test_process_submit_derive_v2_resources(
+        TestProductAdapters* adapters, const RinGpuBackendCommandV1* commands,
+        uint32_t command_count, RinVulkanProductResourceV1* resources,
+        uint32_t* resource_count) {
+    const uint32_t read = RIN_GPU_ALLOCATION_GPU_READ;
+    const uint32_t write = RIN_GPU_ALLOCATION_GPU_WRITE;
+    const uint32_t read_write = read | write;
+    uint32_t command_index;
+    RinResult result;
+
+    if (!adapters || !commands || command_count == 0u || !resources ||
+        !resource_count)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    *resource_count = 0u;
+    memset(resources, 0, sizeof(*resources) *
+                              RIN_GPU_PROCESS_MAX_RESOURCES_V1);
+#define TEST_V2_REQUIRE_COOKIE(cookie, access)                               \
+    do {                                                                      \
+        result = test_process_submit_add_v2_resource(                         \
+            adapters, (cookie), 0u, 0u, (access), 0, 0, resources,            \
+            resource_count);                                                  \
+        if (result != RIN_SUCCESS) {                                           \
+            fprintf(stderr, "V2 submit resolve failed: command=%u type=%u "  \
+                    "cookie=%llu access=%u result=%d\n", command_index,    \
+                    commands[command_index].type,                            \
+                    (unsigned long long)(cookie), (unsigned)(access), result);\
+            return result;                                                    \
+        }                                                                     \
+    } while (0)
+#define TEST_V2_OPTIONAL_COOKIE(cookie, access)                              \
+    do {                                                                      \
+        result = test_process_submit_add_v2_resource(                         \
+            adapters, (cookie), 0u, 0u, (access), 0, 1, resources,            \
+            resource_count);                                                  \
+        if (result != RIN_SUCCESS) {                                           \
+            fprintf(stderr, "V2 submit resolve failed: command=%u type=%u "  \
+                    "optional_cookie=%llu access=%u result=%d\n",          \
+                    command_index, commands[command_index].type,             \
+                    (unsigned long long)(cookie), (unsigned)(access), result);\
+            return result;                                                    \
+        }                                                                     \
+    } while (0)
+#define TEST_V2_REQUIRE_RANGE(cookie, offset, size, access)                  \
+    do {                                                                      \
+        result = test_process_submit_add_v2_resource(                         \
+            adapters, (cookie), (offset), (size), (access), 1, 0, resources,  \
+            resource_count);                                                  \
+        if (result != RIN_SUCCESS) {                                           \
+            fprintf(stderr, "V2 submit resolve failed: command=%u type=%u "  \
+                    "range_cookie=%llu offset=%llu size=%llu access=%u "     \
+                    "result=%d\n", command_index,                            \
+                    commands[command_index].type,                            \
+                    (unsigned long long)(cookie),                            \
+                    (unsigned long long)(offset),                            \
+                    (unsigned long long)(size), (unsigned)(access), result);  \
+            return result;                                                    \
+        }                                                                     \
+    } while (0)
+#define TEST_V2_VERTEX_BINDINGS(bindings, count)                             \
+    do {                                                                      \
+        if ((count) > RIN_GPU_MAX_VERTEX_BUFFER_BINDINGS)                     \
+            return RIN_ERROR_INVALID_ARGUMENT;                                \
+        for (uint32_t binding_index = 0u; binding_index < (count);            \
+             ++binding_index) {                                               \
+            if ((bindings)[binding_index].reserved != 0u)                    \
+                return RIN_ERROR_ABI_MISMATCH;                                \
+            TEST_V2_REQUIRE_COOKIE(                                           \
+                (bindings)[binding_index].buffer_cookie, read);               \
+        }                                                                     \
+    } while (0)
+
+    for (command_index = 0u; command_index < command_count; ++command_index) {
+        const RinGpuBackendCommandV1* command = &commands[command_index];
+        if (command->reserved != 0u) return RIN_ERROR_ABI_MISMATCH;
+        switch (command->type) {
+        case RIN_GPU_BACKEND_COMMAND_COPY_BUFFER:
+            TEST_V2_REQUIRE_RANGE(command->value.buffer_copy.source_cookie,
+                                  command->value.buffer_copy.source_offset,
+                                  command->value.buffer_copy.size_bytes, read);
+            TEST_V2_REQUIRE_RANGE(
+                command->value.buffer_copy.destination_cookie,
+                command->value.buffer_copy.destination_offset,
+                command->value.buffer_copy.size_bytes, write);
+            break;
+        case RIN_GPU_BACKEND_COMMAND_COPY_IMAGE:
+            TEST_V2_REQUIRE_COOKIE(command->value.image_copy.source_cookie,
+                                   read);
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.image_copy.destination_cookie, write);
+            break;
+        case RIN_GPU_BACKEND_COMMAND_COPY_IMAGE_TO_BUFFER:
+            TEST_V2_REQUIRE_RANGE(
+                command->value.image_to_buffer_copy.buffer_cookie,
+                command->value.image_to_buffer_copy.buffer_offset,
+                command->value.image_to_buffer_copy.buffer_size_bytes, write);
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.image_to_buffer_copy.image_cookie, read);
+            break;
+        case RIN_GPU_BACKEND_COMMAND_COPY_BUFFER_TO_IMAGE:
+            TEST_V2_REQUIRE_RANGE(
+                command->value.buffer_to_image_copy.buffer_cookie,
+                command->value.buffer_to_image_copy.buffer_offset,
+                command->value.buffer_to_image_copy.buffer_size_bytes, read);
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.buffer_to_image_copy.image_cookie, write);
+            break;
+        case RIN_GPU_BACKEND_COMMAND_TRANSITION_IMAGE:
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.image_transition.image_cookie, 0u);
+            break;
+        case RIN_GPU_BACKEND_COMMAND_DRAW:
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.draw.color_target_cookie, read_write);
+            break;
+        case RIN_GPU_BACKEND_COMMAND_DISPATCH:
+            break;
+        case RIN_GPU_BACKEND_COMMAND_DISPATCH_INDIRECT:
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.dispatch_indirect.indirect_buffer_cookie, read);
+            break;
+        case RIN_GPU_BACKEND_COMMAND_BEGIN_RENDER_PASS:
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.render_pass_begin.color_target_cookie,
+                read_write);
+            break;
+        case RIN_GPU_BACKEND_COMMAND_END_RENDER_PASS:
+        case RIN_GPU_BACKEND_COMMAND_COMPUTE_BARRIER:
+        case RIN_GPU_BACKEND_COMMAND_GRAPHICS_BARRIER:
+        case RIN_GPU_BACKEND_COMMAND_SET_RASTER_STATE:
+        case RIN_GPU_BACKEND_COMMAND_COMPUTE_BARRIER_V2:
+        case RIN_GPU_BACKEND_COMMAND_GRAPHICS_BARRIER_V2:
+        case RIN_GPU_BACKEND_COMMAND_SET_PUSH_CONSTANTS:
+        case RIN_GPU_BACKEND_COMMAND_BEGIN_QUERY:
+        case RIN_GPU_BACKEND_COMMAND_END_QUERY:
+        case RIN_GPU_BACKEND_COMMAND_RESET_QUERY:
+            break;
+        case RIN_GPU_BACKEND_COMMAND_PRESENT:
+            TEST_V2_REQUIRE_COOKIE(command->value.present.image_cookie, read);
+            break;
+        case RIN_GPU_BACKEND_COMMAND_DRAW_VERTICES:
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.draw_vertices.color_target_cookie, read_write);
+            TEST_V2_OPTIONAL_COOKIE(
+                command->value.draw_vertices.vertex_buffer_cookie, read);
+            break;
+        case RIN_GPU_BACKEND_COMMAND_DRAW_INDEXED:
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.draw_indexed.color_target_cookie, read_write);
+            TEST_V2_OPTIONAL_COOKIE(
+                command->value.draw_indexed.vertex_buffer_cookie, read);
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.draw_indexed.index_buffer_cookie, read);
+            break;
+        case RIN_GPU_BACKEND_COMMAND_BEGIN_RENDER_PASS_DEPTH:
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.render_pass_depth_begin.color_target_cookie,
+                read_write);
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.render_pass_depth_begin.depth_target_cookie,
+                read_write);
+            break;
+        case RIN_GPU_BACKEND_COMMAND_DRAW_INDEXED_BASE_VERTEX:
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.draw_indexed_base_vertex.color_target_cookie,
+                read_write);
+            TEST_V2_OPTIONAL_COOKIE(
+                command->value.draw_indexed_base_vertex.vertex_buffer_cookie,
+                read);
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.draw_indexed_base_vertex.index_buffer_cookie,
+                read);
+            break;
+        case RIN_GPU_BACKEND_COMMAND_DRAW_VERTICES_V2:
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.draw_vertices_v2.color_target_cookie,
+                read_write);
+            TEST_V2_VERTEX_BINDINGS(
+                command->value.draw_vertices_v2.vertex_buffers,
+                command->value.draw_vertices_v2.vertex_binding_count);
+            break;
+        case RIN_GPU_BACKEND_COMMAND_DRAW_INDEXED_V2:
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.draw_indexed_v2.color_target_cookie,
+                read_write);
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.draw_indexed_v2.index_buffer_cookie, read);
+            TEST_V2_VERTEX_BINDINGS(
+                command->value.draw_indexed_v2.vertex_buffers,
+                command->value.draw_indexed_v2.vertex_binding_count);
+            break;
+        case RIN_GPU_BACKEND_COMMAND_BEGIN_RENDER_PASS_DEPTH_STENCIL:
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.render_pass_depth_stencil_begin
+                    .color_target_cookie,
+                read_write);
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.render_pass_depth_stencil_begin
+                    .depth_target_cookie,
+                read_write);
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.render_pass_depth_stencil_begin
+                    .stencil_target_cookie,
+                read_write);
+            break;
+        case RIN_GPU_BACKEND_COMMAND_BEGIN_RENDER_PASS_MRT: {
+            const RinGpuBackendRenderPassMrtBeginV1* mrt =
+                &command->value.render_pass_mrt_begin;
+            if ((mrt->active_color_mask & ~UINT32_C(0x0f)) != 0u)
+                return RIN_ERROR_INVALID_ARGUMENT;
+            for (uint32_t target = 0u; target < RIN_GPU_MAX_COLOR_TARGETS;
+                 ++target) {
+                if ((mrt->active_color_mask & (UINT32_C(1) << target)) != 0u)
+                    TEST_V2_REQUIRE_COOKIE(mrt->color_target_cookies[target],
+                                           read_write);
+            }
+            TEST_V2_OPTIONAL_COOKIE(mrt->depth_target_cookie, read_write);
+            TEST_V2_OPTIONAL_COOKIE(mrt->stencil_target_cookie, read_write);
+            break;
+        }
+        case RIN_GPU_BACKEND_COMMAND_CLEAR_BUFFER:
+            TEST_V2_REQUIRE_RANGE(
+                command->value.buffer_clear.destination_cookie,
+                command->value.buffer_clear.offset,
+                command->value.buffer_clear.size_bytes, write);
+            break;
+        case RIN_GPU_BACKEND_COMMAND_CLEAR_IMAGE:
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.image_clear.destination_cookie, write);
+            break;
+        case RIN_GPU_BACKEND_COMMAND_BLIT_IMAGE:
+            TEST_V2_REQUIRE_COOKIE(command->value.image_blit.source_cookie,
+                                   read);
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.image_blit.destination_cookie, write);
+            break;
+        case RIN_GPU_BACKEND_COMMAND_TRANSFER_IMAGE_OWNERSHIP:
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.image_ownership_transfer.image_cookie, 0u);
+            break;
+        case RIN_GPU_BACKEND_COMMAND_RESOLVE_IMAGE:
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.image_resolve.source_cookie, read);
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.image_resolve.destination_cookie, write);
+            break;
+        case RIN_GPU_BACKEND_COMMAND_DRAW_INDIRECT:
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.draw_indirect.color_target_cookie, read_write);
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.draw_indirect.indirect_buffer_cookie, read);
+            TEST_V2_VERTEX_BINDINGS(
+                command->value.draw_indirect.vertex_buffers,
+                command->value.draw_indirect.vertex_binding_count);
+            break;
+        case RIN_GPU_BACKEND_COMMAND_DRAW_INDEXED_INDIRECT:
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.draw_indexed_indirect.color_target_cookie,
+                read_write);
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.draw_indexed_indirect.index_buffer_cookie, read);
+            TEST_V2_REQUIRE_COOKIE(
+                command->value.draw_indexed_indirect.indirect_buffer_cookie,
+                read);
+            TEST_V2_VERTEX_BINDINGS(
+                command->value.draw_indexed_indirect.vertex_buffers,
+                command->value.draw_indexed_indirect.vertex_binding_count);
+            break;
+        default:
+            return RIN_ERROR_NOT_SUPPORTED;
+        }
+    }
+#undef TEST_V2_VERTEX_BINDINGS
+#undef TEST_V2_REQUIRE_RANGE
+#undef TEST_V2_OPTIONAL_COOKIE
+#undef TEST_V2_REQUIRE_COOKIE
+    return RIN_SUCCESS;
+}
+
 RinResult rin_gpu_process_submit_v2(
         RinGpuProcessQueueV1 token,
         const RinGpuProcessSubmitDescV2* descriptor,
         RinGpuProcessSubmitReceiptV1* receipt_out) {
-    RinGpuProcessSubmitDescV1 v1_descriptor;
+    TestProductAdapters* adapters = g_process_submit_adapters;
+    RinVulkanProductResourceV1 product_resources[
+        RIN_GPU_PROCESS_MAX_RESOURCES_V1];
+    RinVulkanProductProcessSubmitReceiptV1 product_receipt;
+    RinGpuBackendCommandV1* commands;
+    uint64_t expected_command_bytes;
+    uint32_t resource_count = 0u;
+    uint32_t queue_id = UINT32_MAX;
+    uint32_t index;
+    int result;
 
-    if (!descriptor || descriptor->struct_size != sizeof(*descriptor) ||
-        descriptor->version != RIN_GPU_PROCESS_SUBMIT_DESC_VERSION_V2 ||
-        descriptor->reserved[0] != 0u || descriptor->reserved[1] != 0u)
+    if (!adapters || !descriptor || !receipt_out)
         return RIN_ERROR_INVALID_ARGUMENT;
-    memset(&v1_descriptor, 0, sizeof(v1_descriptor));
-    v1_descriptor.struct_size = sizeof(v1_descriptor);
-    v1_descriptor.version = RIN_GPU_PROCESS_SUBMIT_DESC_VERSION_V1;
-    v1_descriptor.commands = descriptor->commands;
-    v1_descriptor.command_count = descriptor->command_count;
-    v1_descriptor.command_record_size = descriptor->command_record_size;
-    return rin_gpu_process_submit_v1(token, &v1_descriptor, receipt_out);
+    ++adapters->sdk_process_submit_calls;
+    if (descriptor->struct_size != sizeof(*descriptor) ||
+        descriptor->version != RIN_GPU_PROCESS_SUBMIT_DESC_VERSION_V2 ||
+        descriptor->reserved[0] != 0u || descriptor->reserved[1] != 0u ||
+        descriptor->command_count == 0u ||
+        descriptor->command_count > RIN_GPU_PROCESS_MAX_COMMANDS_V1 ||
+        descriptor->command_record_size !=
+            RIN_GPU_PROCESS_COMMAND_RECORD_SIZE_V1 ||
+        descriptor->command_record_size != sizeof(RinGpuBackendCommandV1) ||
+        descriptor->commands.address == 0u)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    expected_command_bytes =
+        (uint64_t)descriptor->command_count *
+        RIN_GPU_PROCESS_COMMAND_RECORD_SIZE_V1;
+    if (descriptor->commands.size != expected_command_bytes ||
+        expected_command_bytes > SIZE_MAX)
+        return RIN_ERROR_ABI_MISMATCH;
+    commands = (RinGpuBackendCommandV1*)malloc(
+        (size_t)expected_command_bytes);
+    if (!commands) return RIN_ERROR_LIMIT_EXCEEDED;
+    memcpy(commands, (const void*)(uintptr_t)descriptor->commands.address,
+           (size_t)expected_command_bytes);
+
+    for (index = 0u; index < RIN_GPU_PROCESS_MAX_QUEUES_V1; ++index) {
+        const TestSdkProcessQueue* queue = &adapters->sdk_queues[index];
+        if (queue->active == 1u && queue->token == token) {
+            queue_id = queue->queue_id;
+            break;
+        }
+    }
+    if (queue_id == UINT32_MAX) {
+        result = RIN_ERROR_STALE_HANDLE;
+        goto done;
+    }
+    result = test_process_submit_derive_v2_resources(
+        adapters, commands, descriptor->command_count, product_resources,
+        &resource_count);
+    if (result != RIN_SUCCESS) goto done;
+    if (!adapters->software_v6.submit_process_commands) {
+        result = RIN_ERROR_NOT_SUPPORTED;
+        goto done;
+    }
+
+    adapters->sdk_last_command_count = 0u;
+    memset(adapters->sdk_last_commands, 0,
+           sizeof(adapters->sdk_last_commands));
+    if (descriptor->command_count <= TEST_SDK_PROCESS_COMMAND_CAPTURE) {
+        adapters->sdk_last_command_count = descriptor->command_count;
+        memcpy(adapters->sdk_last_commands, commands,
+               descriptor->command_count * sizeof(*commands));
+    }
+    memset(&product_receipt, 0, sizeof(product_receipt));
+    result = adapters->software_v6.submit_process_commands(
+        adapters->software_v6.context, queue_id, commands,
+        descriptor->command_count, product_resources, resource_count,
+        &product_receipt);
+    if (result != RIN_VULKAN_PRODUCT_OK) {
+        result = test_product_result_to_sdk(result);
+        goto done;
+    }
+    if (product_receipt.struct_size != sizeof(product_receipt) ||
+        product_receipt.version !=
+            RIN_VULKAN_PRODUCT_PROCESS_SUBMIT_RECEIPT_V1_VERSION ||
+        product_receipt.queue_id != queue_id ||
+        product_receipt.sequence == 0u ||
+        product_receipt.completion_value == 0u ||
+        product_receipt.device_epoch == 0u ||
+        product_receipt.iommu_map_generation == 0u) {
+        result = RIN_ERROR_ABI_MISMATCH;
+        goto done;
+    }
+    memset(receipt_out, 0, sizeof(*receipt_out));
+    receipt_out->struct_size = sizeof(*receipt_out);
+    receipt_out->version = RIN_GPU_PROCESS_SUBMIT_RECEIPT_VERSION_V1;
+    receipt_out->queue_id = product_receipt.queue_id;
+    receipt_out->sequence = product_receipt.sequence;
+    receipt_out->completion_value = product_receipt.completion_value;
+    receipt_out->device_epoch = product_receipt.device_epoch;
+    receipt_out->iommu_map_generation = product_receipt.iommu_map_generation;
+    adapters->sdk_last_submit_resource_count = resource_count;
+    memset(adapters->sdk_last_submit_resources, 0,
+           sizeof(adapters->sdk_last_submit_resources));
+    memcpy(adapters->sdk_last_submit_resources, product_resources,
+           resource_count * sizeof(product_resources[0]));
+    result = RIN_SUCCESS;
+
+done:
+    free(commands);
+    return (RinResult)result;
 }
 
 static int initialize_product_adapters(
@@ -3629,10 +4097,47 @@ static RinVkResult record_and_submit_buffer_copy(
     if (result != RIN_VK_SUCCESS) goto done;
     if (product_adapters->canonical_submit_calls != submits_before + 1u ||
         product_adapters->canonical_command_count != 1u ||
+        product_adapters->sdk_last_command_count != 1u ||
+        product_adapters->sdk_last_commands[0].type !=
+            RIN_GPU_BACKEND_COMMAND_COPY_BUFFER ||
+        product_adapters->sdk_last_submit_resource_count != 2u ||
         vkMapMemory(device, destination_memory, 0u, buffer_size, 0u,
                     &mapped) != RIN_VK_SUCCESS) {
         result = RIN_VK_ERROR_INITIALIZATION_FAILED;
         goto done;
+    }
+    {
+        const RinGpuBackendBufferCopyV1* submitted_copy =
+            &product_adapters->sdk_last_commands[0].value.buffer_copy;
+        const TestResourceBinding* source_binding = test_find_resource_binding(
+            product_adapters, submitted_copy->source_cookie);
+        const TestResourceBinding* destination_binding =
+            test_find_resource_binding(product_adapters,
+                                       submitted_copy->destination_cookie);
+        uint32_t source_lease_found = 0u;
+        uint32_t destination_lease_found = 0u;
+        if (!source_binding || !destination_binding) {
+            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+            goto done;
+        }
+        for (uint32_t resource_index = 0u; resource_index < 2u;
+             ++resource_index) {
+            const RinVulkanProductResourceV1* lease =
+                &product_adapters->sdk_last_submit_resources[resource_index];
+            if (lease->allocation_handle == source_binding->allocation_handle &&
+                lease->required_gpu_access ==
+                    RIN_VULKAN_PRODUCT_MEMORY_GPU_READ)
+                source_lease_found = 1u;
+            if (lease->allocation_handle ==
+                    destination_binding->allocation_handle &&
+                lease->required_gpu_access ==
+                    RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE)
+                destination_lease_found = 1u;
+        }
+        if (!source_lease_found || !destination_lease_found) {
+            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+            goto done;
+        }
     }
     if (memcmp((const uint8_t*)mapped + destination_offset, source_bytes,
                sizeof(source_bytes)) != 0 ||
@@ -3644,6 +4149,15 @@ static RinVkResult record_and_submit_buffer_copy(
     result = RIN_VK_SUCCESS;
 
 done:
+    if (result != RIN_VK_SUCCESS)
+        fprintf(stderr,
+                "native-window buffer-copy fixture failed: result=%d "
+                "sdk_submits=%u canonical_submits=%u command_count=%u "
+                "resource_count=%u\n",
+                result, product_adapters->sdk_process_submit_calls,
+                product_adapters->canonical_submit_calls,
+                product_adapters->sdk_last_command_count,
+                product_adapters->sdk_last_submit_resource_count);
     if (mapped) vkUnmapMemory(device, destination_memory != 0u
                                          ? destination_memory
                                          : source_memory);
@@ -4129,11 +4643,11 @@ static RinVkResult record_image_resolve_roundtrip(
     barrier.sType = RIN_VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     barrier.srcStageMask = RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     barrier.dstStageMask = RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-    barrier.dstAccessMask = RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = RIN_VK_ACCESS_2_TRANSFER_READ_BIT;
     barrier.srcQueueFamilyIndex = RIN_VK_QUEUE_FAMILY_IGNORED;
     barrier.dstQueueFamilyIndex = RIN_VK_QUEUE_FAMILY_IGNORED;
     barrier.oldLayout = RIN_VK_IMAGE_LAYOUT_UNDEFINED;
-    barrier.newLayout = RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     barrier.image = source;
     barrier.subresourceRange.aspectMask = RIN_VK_IMAGE_ASPECT_COLOR_BIT;
     barrier.subresourceRange.levelCount = 1u;
@@ -4143,15 +4657,9 @@ static RinVkResult record_image_resolve_roundtrip(
     dependency.imageMemoryBarrierCount = 1u;
     dependency.pImageMemoryBarriers = &barrier;
     vkCmdPipelineBarrier2(command_buffer, &dependency);
+    barrier.dstAccessMask = RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    barrier.newLayout = RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     barrier.image = destination;
-    vkCmdPipelineBarrier2(command_buffer, &dependency);
-    barrier.srcStageMask = RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-    barrier.srcAccessMask = RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT;
-    barrier.dstStageMask = RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-    barrier.dstAccessMask = RIN_VK_ACCESS_2_TRANSFER_READ_BIT;
-    barrier.image = source;
-    barrier.oldLayout = RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    barrier.newLayout = RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     vkCmdPipelineBarrier2(command_buffer, &dependency);
 
     memset(&resolve, 0, sizeof(resolve));
@@ -4231,9 +4739,9 @@ static RinVkResult record_image_resolve_roundtrip(
     if (product_adapters->canonical_submit_calls != submits_before + 1u ||
         product_adapters->canonical_resolve_command_count !=
             resolves_before + 1u ||
-        product_adapters->canonical_command_count != 11u ||
+        product_adapters->canonical_command_count != 9u ||
         product_adapters->canonical_graphics_barrier_count !=
-            barriers_before + 5u ||
+            barriers_before + 4u ||
         product_adapters->canonical_last_graphics_barrier.source_stage !=
             RIN_GPU_PIPELINE_STAGE_COPY ||
         product_adapters->canonical_last_graphics_barrier.source_access !=
