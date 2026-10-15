@@ -361,8 +361,10 @@ int rin_vk_sync2_access_stage_valid(uint64_t stage_mask,
                                     uint32_t second_scope) {
     const uint64_t indirect_access =
         RIN_VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
-    const uint64_t transfer_access = RIN_VK_ACCESS_2_TRANSFER_READ_BIT |
-                                     RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    const uint64_t transfer_read_access =
+        RIN_VK_ACCESS_2_TRANSFER_READ_BIT;
+    const uint64_t transfer_write_access =
+        RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT;
     const uint64_t index_read = RIN_VK_ACCESS_2_INDEX_READ_BIT;
     const uint64_t vertex_attribute_read =
         RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT;
@@ -391,12 +393,13 @@ int rin_vk_sync2_access_stage_valid(uint64_t stage_mask,
         RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
     const uint64_t host_access = RIN_VK_ACCESS_2_HOST_READ_BIT |
                                  RIN_VK_ACCESS_2_HOST_WRITE_BIT;
-    const uint64_t transfer_stages =
+    const uint64_t transfer_read_stages =
         RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT |
         RIN_VK_PIPELINE_STAGE_2_COPY_BIT |
         RIN_VK_PIPELINE_STAGE_2_RESOLVE_BIT |
-        RIN_VK_PIPELINE_STAGE_2_BLIT_BIT |
-        RIN_VK_PIPELINE_STAGE_2_CLEAR_BIT;
+        RIN_VK_PIPELINE_STAGE_2_BLIT_BIT;
+    const uint64_t transfer_write_stages =
+        transfer_read_stages | RIN_VK_PIPELINE_STAGE_2_CLEAR_BIT;
     uint64_t effective_stages;
     if (!sync2_effective_stage_mask_for_scope(stage_mask, second_scope,
                                               &effective_stages))
@@ -459,9 +462,15 @@ int rin_vk_sync2_access_stage_valid(uint64_t stage_mask,
           RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
           RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
         return 0;
-    if ((access_mask & transfer_access) != 0u &&
+    if ((access_mask & transfer_read_access) != 0u &&
         (effective_stages &
-         (transfer_stages | RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
+         (transfer_read_stages |
+          RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
+        return 0;
+    if ((access_mask & transfer_write_access) != 0u &&
+        (effective_stages &
+         (transfer_write_stages |
+          RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
         return 0;
     if ((access_mask & host_access) != 0u &&
         (effective_stages & RIN_VK_PIPELINE_STAGE_2_HOST_BIT) == 0u)
