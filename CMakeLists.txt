@@ -270,6 +270,23 @@ if(BUILD_TESTING)
         ${RINGPU_DIR}/../../RinOS-SDK/include)
     add_test(NAME rinvulkan-sync2-scope
         COMMAND rinvulkan-sync2-scope-test)
+    add_executable(rinvulkan-image-state-test
+        tests/rinvulkan_image_state_test.c)
+    target_compile_features(rinvulkan-image-state-test PRIVATE c_std_11)
+    target_include_directories(rinvulkan-image-state-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${RINGPU_DIR}/include
+        ${RINGPU_DIR}/../rinresource/include
+        ${RINGPU_DIR}/../../RinOS-SDK/include)
+    if(MSVC)
+        target_compile_options(rinvulkan-image-state-test PRIVATE /W4)
+    else()
+        target_compile_options(rinvulkan-image-state-test
+            PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+    add_test(NAME rinvulkan-image-state
+        COMMAND rinvulkan-image-state-test)
     add_executable(rinvulkan-platform-time-test
         tests/rinvulkan_platform_time_test.c
         src/platform/time.c)

@@ -17,6 +17,7 @@
 
 #include "atomic_compat.h"
 #include "buffer_ownership.h"
+#include "image_state.h"
 #include "platform/time.h"
 #include "sync2_scope.h"
 
@@ -4158,28 +4159,7 @@ static void complete_submission_waits(RinVkSubmissionSlot* slot) {
 
 static int process_image_layout_to_state(uint32_t layout,
                                          uint32_t* state_out) {
-    if (!state_out) return 0;
-    switch (layout) {
-    case RIN_VK_IMAGE_LAYOUT_UNDEFINED:
-        *state_out = RIN_GPU_IMAGE_STATE_UNDEFINED;
-        return 1;
-    case RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
-        *state_out = RIN_GPU_IMAGE_STATE_COPY_SOURCE;
-        return 1;
-    case RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
-        *state_out = RIN_GPU_IMAGE_STATE_COPY_DESTINATION;
-        return 1;
-    case RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
-        *state_out = RIN_GPU_IMAGE_STATE_COLOR_TARGET;
-        return 1;
-    case RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
-        *state_out = RIN_GPU_IMAGE_STATE_PRESENT;
-        return 1;
-    default:
-        /* GENERAL and extension layouts have no lossless RinGPU image-state
-         * equivalent. Do not infer a state from the adjacent access masks. */
-        return 0;
-    }
+    return rin_vk_image_layout_to_ringpu_state(layout, state_out);
 }
 
 static const RinVkCommandResourceUse* process_image_use_for_operation(
