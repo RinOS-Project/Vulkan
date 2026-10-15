@@ -3705,6 +3705,131 @@ static int test_sync2_event_queue_type_validation(RinVkDevice device) {
            record_sync2_transfer_queue_event_case(device, 2u);
 }
 
+static int test_sync2_queue_submit_stage_validation(
+        RinVkDevice device, RinVkQueue transfer_queue) {
+    RinVkSemaphoreCreateInfo semaphore_info;
+    RinVkSemaphore semaphore = 0u;
+    RinVkSemaphoreSubmitInfo semaphore_submit;
+    RinVkSubmitInfo2 submit;
+    RinVkSubmitInfo legacy_submit;
+    RinVkSemaphore legacy_wait_semaphores[1];
+    uint32_t legacy_wait_stage;
+    int result = 0;
+
+    memset(&semaphore_info, 0, sizeof(semaphore_info));
+    semaphore_info.sType = RIN_VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    if (vkCreateSemaphore(device, &semaphore_info, NULL, &semaphore) !=
+        RIN_VK_SUCCESS)
+        goto done;
+    memset(&semaphore_submit, 0, sizeof(semaphore_submit));
+    semaphore_submit.sType = RIN_VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    semaphore_submit.semaphore = semaphore;
+    semaphore_submit.stageMask = RIN_VK_PIPELINE_STAGE_2_COPY_BIT;
+    memset(&submit, 0, sizeof(submit));
+    submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    submit.signalSemaphoreInfoCount = 1u;
+    submit.pSignalSemaphoreInfos = &semaphore_submit;
+    if (vkQueueSubmit2(transfer_queue, 1u, &submit, 0u) != RIN_VK_SUCCESS)
+        goto done;
+
+    semaphore_submit.stageMask = RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    if (vkQueueSubmit2(transfer_queue, 1u, &submit, 0u) !=
+        RIN_VK_ERROR_FEATURE_NOT_PRESENT)
+        goto done;
+
+    submit.signalSemaphoreInfoCount = 0u;
+    submit.pSignalSemaphoreInfos = NULL;
+    submit.waitSemaphoreInfoCount = 1u;
+    submit.pWaitSemaphoreInfos = &semaphore_submit;
+    if (vkQueueSubmit2(transfer_queue, 1u, &submit, 0u) !=
+        RIN_VK_ERROR_FEATURE_NOT_PRESENT)
+        goto done;
+
+    memset(&legacy_submit, 0, sizeof(legacy_submit));
+    legacy_submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    legacy_wait_semaphores[0] = semaphore;
+    legacy_submit.waitSemaphoreCount = 1u;
+    legacy_submit.pWaitSemaphores = legacy_wait_semaphores;
+    legacy_submit.pWaitDstStageMask = &legacy_wait_stage;
+    legacy_wait_stage = RIN_VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    if (vkQueueSubmit(transfer_queue, 1u, &legacy_submit, 0u) !=
+        RIN_VK_ERROR_FEATURE_NOT_PRESENT)
+        goto done;
+
+    semaphore_submit.stageMask = RIN_VK_PIPELINE_STAGE_2_COPY_BIT;
+    if (vkQueueSubmit2(transfer_queue, 1u, &submit, 0u) != RIN_VK_SUCCESS ||
+        vkQueueWaitIdle(transfer_queue) != RIN_VK_SUCCESS)
+        goto done;
+    result = 1;
+
+done:
+    if (semaphore != 0u) vkDestroySemaphore(device, semaphore, NULL);
+    return result;
+}
+
+static int record_timestamp_queue_family_case(
+        RinVkDevice device, uint64_t stage, int synchronization2,
+        int expected_success) {
+    RinVkQueryPoolCreateInfo query_info;
+    RinVkQueryPool query_pool = 0u;
+    RinVkCommandPoolCreateInfo pool_info;
+    RinVkCommandPool pool = NULL;
+    RinVkCommandBufferAllocateInfo allocate_info;
+    RinVkCommandBuffer command_buffer = NULL;
+    RinVkCommandBufferBeginInfo begin_info;
+    RinVkResult end_result;
+    int result = 0;
+
+    memset(&query_info, 0, sizeof(query_info));
+    query_info.sType = RIN_VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+    query_info.queryType = RIN_VK_QUERY_TYPE_TIMESTAMP;
+    query_info.queryCount = 1u;
+    if (vkCreateQueryPool(device, &query_info, NULL, &query_pool) !=
+        RIN_VK_SUCCESS)
+        goto done;
+    memset(&pool_info, 0, sizeof(pool_info));
+    pool_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pool_info.queueFamilyIndex = 1u;
+    if (vkCreateCommandPool(device, &pool_info, NULL, &pool) !=
+        RIN_VK_SUCCESS)
+        goto done;
+    memset(&allocate_info, 0, sizeof(allocate_info));
+    allocate_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocate_info.commandPool = pool;
+    allocate_info.level = RIN_VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocate_info.commandBufferCount = 1u;
+    if (vkAllocateCommandBuffers(device, &allocate_info, &command_buffer) !=
+        RIN_VK_SUCCESS)
+        goto done;
+    memset(&begin_info, 0, sizeof(begin_info));
+    begin_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    if (vkBeginCommandBuffer(command_buffer, &begin_info) != RIN_VK_SUCCESS)
+        goto done;
+    if (synchronization2)
+        vkCmdWriteTimestamp2(command_buffer, stage, query_pool, 0u);
+    else
+        vkCmdWriteTimestamp(command_buffer, stage, query_pool, 0u);
+    end_result = vkEndCommandBuffer(command_buffer);
+    result = expected_success ? end_result == RIN_VK_SUCCESS
+                              : end_result != RIN_VK_SUCCESS;
+
+done:
+    if (pool != NULL) vkDestroyCommandPool(device, pool, NULL);
+    if (query_pool != 0u) vkDestroyQueryPool(device, query_pool, NULL);
+    return result;
+}
+
+static int test_timestamp_queue_family_stage_validation(RinVkDevice device) {
+    return record_timestamp_queue_family_case(
+               device, RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 1, 1) &&
+           record_timestamp_queue_family_case(
+               device, RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 1, 0) &&
+           record_timestamp_queue_family_case(
+               device, RIN_VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1) &&
+           record_timestamp_queue_family_case(
+               device, RIN_VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0);
+}
+
 static RinVkResult record_process_wait_barrier(
         RinVkDevice device, TestRecordedBarrier* recorded) {
     RinVkCommandPoolCreateInfo pool_info;
@@ -3961,6 +4086,7 @@ static void make_profile(RinGpuVulkanPhysicalDeviceV2* profile) {
     profile->queue_families[0].timestamp_valid_bits = 64u;
     profile->queue_families[1].flags = RIN_GPU_VK_QUEUE_TRANSFER;
     profile->queue_families[1].queue_count = 1u;
+    profile->queue_families[1].timestamp_valid_bits = 64u;
     profile->memory_heap_count = 2u;
     profile->memory_heaps[0].size_bytes = UINT64_C(512) * 1024u * 1024u;
     profile->memory_heaps[0].flags = RIN_GPU_VK_HEAP_DEVICE_LOCAL;
@@ -4981,6 +5107,7 @@ int main(void) {
     RinVkDevice device = NULL;
     RinVkQueue queue = NULL;
     RinVkQueue second_queue = NULL;
+    RinVkQueue transfer_queue = NULL;
     const float queue_priorities[2] = {1.0f, 1.0f};
     RinVkSwapchainCreateInfoKHR swapchain_info;
     RinVkSwapchainKHR swapchain = 0u;
@@ -5130,7 +5257,7 @@ int main(void) {
             physical, &timestamp_queue_count, timestamp_queue_properties);
         CHECK(timestamp_queue_count == 2u &&
               timestamp_queue_properties[0].timestampValidBits == 64u &&
-              timestamp_queue_properties[1].timestampValidBits == 0u);
+              timestamp_queue_properties[1].timestampValidBits == 64u);
     }
 
 #if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
@@ -5232,8 +5359,12 @@ int main(void) {
     CHECK(queue != NULL);
     vkGetDeviceQueue(device, 0u, 1u, &second_queue);
     CHECK(second_queue != NULL && second_queue != queue);
+    vkGetDeviceQueue(device, 1u, 0u, &transfer_queue);
+    CHECK(transfer_queue != NULL);
     CHECK(test_sync2_queue_family_stage_validation(device));
     CHECK(test_sync2_event_queue_type_validation(device));
+    CHECK(test_sync2_queue_submit_stage_validation(device, transfer_queue));
+    CHECK(test_timestamp_queue_family_stage_validation(device));
     {
         const RinVkResult process_wait_result =
             test_process_submit_wait_completion(

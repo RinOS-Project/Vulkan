@@ -13427,13 +13427,24 @@ static int synchronization2_stage_mask_supported_by_queue_family(
     return 1;
 }
 
+static int queue_family_stage_mask_valid(
+        const struct RinVkDevice_T* owner, uint32_t queue_family,
+        uint64_t stage_mask) {
+    if (!owner || owner->physical_profile.struct_size !=
+                      sizeof(owner->physical_profile) ||
+        queue_family >= owner->physical_profile.queue_family_count)
+        return 0;
+    return synchronization2_stage_mask_supported_by_queue_family(
+        stage_mask,
+        owner->physical_profile.queue_families[queue_family].flags);
+}
+
 static int command_queue_family_stage_mask_valid(
         const RinGpuVulkanCommandBufferV1* core,
         const struct RinVkDevice_T* owner, uint64_t stage_mask) {
-    uint32_t queue_flags;
-    return command_queue_family_flags(core, owner, &queue_flags) &&
-           synchronization2_stage_mask_supported_by_queue_family(
-               stage_mask, queue_flags);
+    return core && core->pool &&
+           queue_family_stage_mask_valid(
+               owner, core->pool->queue_family_index, stage_mask);
 }
 
 static int command_queue_family_supports_event_commands(
@@ -14644,7 +14655,11 @@ void RIN_VKAPI_CALL vkCmdWriteTimestamp(
         (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
     struct RinVkDevice_T* owner;
     RinVkQueryPoolSlot* pool;
+    uint64_t sync2_stage;
     if (!command_owner_device(core, &owner) || !event_stage_mask_valid(stage) ||
+        !rin_vk_sync2_legacy_stage_mask((uint32_t)stage, &sync2_stage) ||
+        (sync2_stage & RIN_VK_PIPELINE_STAGE_2_HOST_BIT) != 0u ||
+        !command_queue_family_stage_mask_valid(core, owner, sync2_stage) ||
         !(pool = query_pool_slot((RinVkDevice)owner, query_pool)) ||
         query >= pool->query_count ||
         pool->query_type != RIN_VK_QUERY_TYPE_TIMESTAMP ||
@@ -14659,17 +14674,7 @@ static int timestamp2_stage_supported(
         const struct RinVkDevice_T* owner,
         const RinGpuVulkanCommandBufferV1* core, uint64_t stage) {
     const RinGpuVulkanQueueFamilyV1* family;
-    const uint64_t graphics_stages =
-        RIN_VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
-        RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-    const uint64_t transfer_stages =
-        RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT |
-        RIN_VK_PIPELINE_STAGE_2_COPY_BIT |
-        RIN_VK_PIPELINE_STAGE_2_RESOLVE_BIT |
-        RIN_VK_PIPELINE_STAGE_2_BLIT_BIT |
-        RIN_VK_PIPELINE_STAGE_2_CLEAR_BIT;
     uint64_t runtime_stage;
-    uint32_t queue_flags;
 
     if (!owner || !core || !core->pool ||
         core->pool->queue_family_index >=
@@ -14681,20 +14686,7 @@ static int timestamp2_stage_supported(
     family = &owner->physical_profile.queue_families[
         core->pool->queue_family_index];
     if (family->timestamp_valid_bits == 0u) return 0;
-    if (stage == 0u) return 1;
-    queue_flags = family->flags;
-    if ((stage & graphics_stages) != 0u &&
-        (queue_flags & RIN_GPU_VK_QUEUE_GRAPHICS) == 0u)
-        return 0;
-    if (stage == RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT &&
-        (queue_flags & RIN_GPU_VK_QUEUE_COMPUTE) == 0u)
-        return 0;
-    if ((stage & transfer_stages) != 0u &&
-        (queue_flags & (RIN_GPU_VK_QUEUE_TRANSFER |
-                        RIN_GPU_VK_QUEUE_GRAPHICS |
-                        RIN_GPU_VK_QUEUE_COMPUTE)) == 0u)
-        return 0;
-    return 1;
+    return command_queue_family_stage_mask_valid(core, owner, stage);
 }
 
 void RIN_VKAPI_CALL vkCmdWriteTimestamp2(
@@ -17428,6 +17420,22 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     memset(wait_values, 0, sizeof(wait_values));
     memset(signal_values, 0, sizeof(signal_values));
     for (index = 0u; index < request.waitSemaphoreCount; ++index) {
+        uint64_t sync2_wait_stage;
+        if (request.pWaitDstStageMask[index] == 0u &&
+            device->synchronization2_enabled) {
+            sync2_wait_stage = 0u;
+        } else if (!rin_vk_sync2_legacy_stage_mask(
+                       request.pWaitDstStageMask[index],
+                       &sync2_wait_stage)) {
+            result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+            goto done;
+        }
+        if (!queue_family_stage_mask_valid(
+                device, queue_slot_value->queue_family_index,
+                sync2_wait_stage)) {
+            result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+            goto done;
+        }
         if (!wait_execution_scope_from_legacy(
                 request.pWaitDstStageMask[index],
                 device->synchronization2_enabled != 0u,
@@ -17942,6 +17950,9 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit2(
         if (wait_infos[index].sType != RIN_VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO ||
             wait_infos[index].pNext || wait_infos[index].semaphore == 0u ||
             wait_infos[index].deviceIndex != 0u || wait_infos[index].reserved != 0u ||
+            !queue_family_stage_mask_valid(
+                device, queue_value->queue_family_index,
+                wait_infos[index].stageMask) ||
             !rin_vk_sync2_semaphore_wait_stage_mask(
                 wait_infos[index].stageMask, &wait_stage_masks[index]))
             return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
@@ -17953,6 +17964,9 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit2(
         if (signal_infos[index].sType != RIN_VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO ||
             signal_infos[index].pNext || signal_infos[index].semaphore == 0u ||
             signal_infos[index].deviceIndex != 0u || signal_infos[index].reserved != 0u ||
+            !queue_family_stage_mask_valid(
+                device, queue_value->queue_family_index,
+                signal_infos[index].stageMask) ||
             !rin_vk_sync2_stage_mask(signal_infos[index].stageMask,
                                      &runtime_stage_mask))
             return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
