@@ -5124,6 +5124,11 @@ int main(void) {
         CHECK(vkQueueSubmit2(queue, 1u, &empty_submit, 0u) ==
               RIN_VK_SUCCESS);
 
+        semaphore_submit_info.stageMask =
+            RIN_VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT;
+        CHECK(vkQueueSubmit2(queue, 1u, &empty_submit, 0u) ==
+              RIN_VK_ERROR_FEATURE_NOT_PRESENT);
+
         semaphore_submit_info.stageMask = 0u;
         empty_submit.signalSemaphoreInfoCount = 0u;
         empty_submit.pSignalSemaphoreInfos = NULL;
@@ -5131,6 +5136,12 @@ int main(void) {
         empty_submit.pWaitSemaphoreInfos = &semaphore_submit_info;
         CHECK(vkQueueSubmit2(queue, 1u, &empty_submit, 0u) ==
               RIN_VK_SUCCESS);
+
+        semaphore_submit_info.stageMask =
+            RIN_VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT;
+        CHECK(vkQueueSubmit2(queue, 1u, &empty_submit, 0u) ==
+              RIN_VK_ERROR_FEATURE_NOT_PRESENT);
+
         CHECK(vkQueueWaitIdle(queue) == RIN_VK_SUCCESS);
         vkDestroySemaphore(device, empty_scope_semaphore, NULL);
     }
