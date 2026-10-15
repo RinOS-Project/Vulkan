@@ -418,6 +418,16 @@ static void test_split_vertex_input_stage_compatibility(void) {
         RIN_VK_ACCESS_2_INDEX_READ_BIT |
             RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT,
         0u));
+    assert(rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT,
+        RIN_VK_ACCESS_2_INDEX_READ_BIT |
+            RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT,
+        0u));
+    assert(rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        RIN_VK_ACCESS_2_INDEX_READ_BIT |
+            RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT,
+        0u));
 }
 
 static void test_graphics_shader_storage_barrier_scope(void) {
