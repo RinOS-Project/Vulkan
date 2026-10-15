@@ -439,8 +439,7 @@ int rin_vk_sync2_access_stage_valid(uint64_t stage_mask,
          (transfer_stages | RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
         return 0;
     if ((access_mask & host_access) != 0u &&
-        (effective_stages & (RIN_VK_PIPELINE_STAGE_2_HOST_BIT |
-                             RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
+        (effective_stages & RIN_VK_PIPELINE_STAGE_2_HOST_BIT) == 0u)
         return 0;
     if ((access_mask & generic_access) != 0u && effective_stages == 0u)
         return 0;

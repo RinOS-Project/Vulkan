@@ -496,6 +496,17 @@ static void test_access_requires_a_compatible_supported_stage(void) {
     assert(!rin_vk_sync2_access_stage_valid(
         RIN_VK_PIPELINE_STAGE_2_COPY_BIT,
         RIN_VK_ACCESS_2_HOST_WRITE_BIT, 0u));
+    assert(!rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        RIN_VK_ACCESS_2_HOST_READ_BIT, 0u));
+    assert(!rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        RIN_VK_ACCESS_2_HOST_WRITE_BIT, 0u));
+    assert(rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_HOST_BIT |
+            RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        RIN_VK_ACCESS_2_HOST_READ_BIT | RIN_VK_ACCESS_2_HOST_WRITE_BIT,
+        0u));
     assert(rin_vk_sync2_access_stage_valid(
         RIN_VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
         RIN_VK_ACCESS_2_TRANSFER_READ_BIT, 0u));
@@ -524,6 +535,19 @@ static void test_barrier_scope_packet_mapping(void) {
     assert(!rin_vk_sync2_barrier_scopes(
         RIN_VK_PIPELINE_STAGE_2_HOST_BIT,
         RIN_VK_ACCESS_2_TRANSFER_READ_BIT, 0u, 0u, &operation));
+    assert(!rin_vk_sync2_barrier_scopes(
+        RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        RIN_VK_ACCESS_2_HOST_READ_BIT, 0u, 0u, &operation));
+    assert(!rin_vk_sync2_barrier_scopes(
+        0u, 0u, RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        RIN_VK_ACCESS_2_HOST_WRITE_BIT, &operation));
+    assert(rin_vk_sync2_barrier_scopes(
+        RIN_VK_PIPELINE_STAGE_2_HOST_BIT |
+            RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        RIN_VK_ACCESS_2_HOST_READ_BIT,
+        RIN_VK_PIPELINE_STAGE_2_HOST_BIT |
+            RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        RIN_VK_ACCESS_2_HOST_WRITE_BIT, &operation));
 }
 
 int main(void) {
