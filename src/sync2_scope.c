@@ -322,9 +322,8 @@ int rin_vk_sync2_access_mask(uint64_t public_mask, uint64_t stage_mask,
         if ((runtime_stages & RIN_GPU_VULKAN_BARRIER_STAGE_COMPUTE) != 0u)
             runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_COMPUTE_WRITE;
     }
-    if ((public_mask & (memory_read | memory_write)) != 0u &&
-        runtime_stages == 0u)
-        return 0;
+    /* MEMORY_READ/WRITE are valid with any stage mask. A NONE stage scope
+     * selects no accesses, so the projected runtime access mask stays empty. */
     if ((public_mask & RIN_VK_ACCESS_2_TRANSFER_READ_BIT) != 0u)
         runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_READ;
     if ((public_mask & RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT) != 0u)
@@ -390,8 +389,6 @@ int rin_vk_sync2_access_stage_valid(uint64_t stage_mask,
         RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
     const uint64_t host_access = RIN_VK_ACCESS_2_HOST_READ_BIT |
                                  RIN_VK_ACCESS_2_HOST_WRITE_BIT;
-    const uint64_t generic_access = RIN_VK_ACCESS_2_MEMORY_READ_BIT |
-                                    RIN_VK_ACCESS_2_MEMORY_WRITE_BIT;
     const uint64_t transfer_stages =
         RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT |
         RIN_VK_PIPELINE_STAGE_2_COPY_BIT |
@@ -452,8 +449,8 @@ int rin_vk_sync2_access_stage_valid(uint64_t stage_mask,
     if ((access_mask & host_access) != 0u &&
         (effective_stages & RIN_VK_PIPELINE_STAGE_2_HOST_BIT) == 0u)
         return 0;
-    if ((access_mask & generic_access) != 0u && effective_stages == 0u)
-        return 0;
+    /* Generic memory access flags have no stage-compatibility restriction;
+     * an empty stage scope consequently selects an empty access scope. */
     return 1;
 }
 

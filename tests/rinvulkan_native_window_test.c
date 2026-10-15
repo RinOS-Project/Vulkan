@@ -3571,7 +3571,8 @@ typedef struct TestRecordedBarrier {
 
 static int record_sync2_queue_family_stage_case(
         RinVkDevice device, uint32_t queue_family, uint64_t source_stage,
-        uint64_t destination_stage, int expected_success) {
+        uint64_t source_access, uint64_t destination_stage,
+        uint64_t destination_access, int expected_success) {
     RinVkCommandPoolCreateInfo pool_info;
     RinVkCommandPool pool = NULL;
     RinVkCommandBufferAllocateInfo allocate_info;
@@ -3603,7 +3604,9 @@ static int record_sync2_queue_family_stage_case(
     memset(&barrier, 0, sizeof(barrier));
     barrier.sType = RIN_VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
     barrier.srcStageMask = source_stage;
+    barrier.srcAccessMask = source_access;
     barrier.dstStageMask = destination_stage;
+    barrier.dstAccessMask = destination_access;
     memset(&dependency, 0, sizeof(dependency));
     dependency.sType = RIN_VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
     dependency.memoryBarrierCount = 1u;
@@ -3621,27 +3624,35 @@ done:
 static int test_sync2_queue_family_stage_validation(RinVkDevice device) {
     return record_sync2_queue_family_stage_case(
                device, 1u, RIN_VK_PIPELINE_STAGE_2_COPY_BIT,
-               RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 1) &&
+               0u, RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 0u, 1) &&
            record_sync2_queue_family_stage_case(
                device, 1u, RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-               RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 0) &&
+               0u, RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 0u, 0) &&
            record_sync2_queue_family_stage_case(
                device, 1u, RIN_VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
-               RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 0) &&
+               0u, RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 0u, 0) &&
            record_sync2_queue_family_stage_case(
                device, 1u, RIN_VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT,
-               RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 0) &&
+               0u, RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 0u, 0) &&
            record_sync2_queue_family_stage_case(
                device, 1u,
                RIN_VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT,
-               RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 0) &&
+               0u, RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 0u, 0) &&
            record_sync2_queue_family_stage_case(
                device, 0u, RIN_VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT,
-               RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 1) &&
+               0u, RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 0u, 1) &&
            record_sync2_queue_family_stage_case(
                device, 0u,
                RIN_VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT,
-               RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 1);
+               0u, RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 0u, 1) &&
+           record_sync2_queue_family_stage_case(
+               device, 1u, 0u,
+               RIN_VK_ACCESS_2_MEMORY_READ_BIT |
+                   RIN_VK_ACCESS_2_MEMORY_WRITE_BIT,
+               0u,
+               RIN_VK_ACCESS_2_MEMORY_READ_BIT |
+                   RIN_VK_ACCESS_2_MEMORY_WRITE_BIT,
+               1);
 }
 
 static int record_sync2_transfer_queue_event_case(
