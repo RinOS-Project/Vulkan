@@ -300,6 +300,15 @@ int rin_vk_sync2_access_mask(uint64_t public_mask, uint64_t stage_mask,
     if (!sync2_stage_mask_for_scope(stage_mask, second_scope,
                                     &runtime_stages))
         return 0;
+    /* TOP_OF_PIPE in the second scope and BOTTOM_OF_PIPE in the first
+     * scope map to ALL_COMMANDS with an empty access scope. */
+    if ((second_scope == RIN_VK_SYNC2_SECOND_SCOPE &&
+         (stage_mask & RIN_VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT) != 0u) ||
+        (second_scope == RIN_VK_SYNC2_FIRST_SCOPE &&
+         (stage_mask & RIN_VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT) != 0u)) {
+        *runtime_mask_out = 0u;
+        return 1;
+    }
     if ((public_mask & RIN_VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT) != 0u) {
         if ((runtime_stages & RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS) != 0u)
             runtime_mask |= RIN_GPU_VULKAN_BARRIER_ACCESS_GRAPHICS_READ;

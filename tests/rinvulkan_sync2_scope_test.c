@@ -551,6 +551,7 @@ static void test_generic_memory_access_with_empty_scope(void) {
     const uint64_t generic_access = RIN_VK_ACCESS_2_MEMORY_READ_BIT |
                                     RIN_VK_ACCESS_2_MEMORY_WRITE_BIT;
     uint64_t runtime_access = UINT64_MAX;
+    uint64_t all_commands_stage = 0u;
     RinGpuVulkanTransferOpV2 operation;
 
     assert(rin_vk_sync2_access_mask(generic_access, 0u, 0u,
@@ -561,6 +562,17 @@ static void test_generic_memory_access_with_empty_scope(void) {
         RIN_VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, generic_access, 0u));
     assert(rin_vk_sync2_access_stage_valid(
         RIN_VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, generic_access, 1u));
+    assert(rin_vk_sync2_stage_mask(
+        RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, &all_commands_stage));
+
+    assert(rin_vk_sync2_access_mask(
+        generic_access, RIN_VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 1u,
+        &runtime_access));
+    assert(runtime_access == 0u);
+    assert(rin_vk_sync2_access_mask(
+        generic_access, RIN_VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0u,
+        &runtime_access));
+    assert(runtime_access == 0u);
 
     memset(&operation, 0, sizeof(operation));
     assert(rin_vk_sync2_barrier_scopes(0u, generic_access,
@@ -569,6 +581,17 @@ static void test_generic_memory_access_with_empty_scope(void) {
     assert(operation.barrier.src_access_mask == 0u);
     assert(operation.barrier.dst_stage_mask == 0u);
     assert(operation.barrier.dst_access_mask == 0u);
+
+    assert(rin_vk_sync2_barrier_scopes(
+        0u, 0u, RIN_VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+        generic_access, &operation));
+    assert(operation.barrier.dst_stage_mask == all_commands_stage);
+    assert(operation.barrier.dst_access_mask == 0u);
+    assert(rin_vk_sync2_barrier_scopes(
+        RIN_VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, generic_access,
+        0u, 0u, &operation));
+    assert(operation.barrier.src_stage_mask == all_commands_stage);
+    assert(operation.barrier.src_access_mask == 0u);
 }
 
 static void test_access_requires_a_compatible_supported_stage(void) {
