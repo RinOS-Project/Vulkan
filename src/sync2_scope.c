@@ -431,7 +431,6 @@ int rin_vk_sync2_access_stage_valid(uint64_t stage_mask,
     if ((access_mask & color_attachment_read) != 0u &&
         (effective_stages &
          (RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
-          RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
           RIN_VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
           RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
         return 0;
@@ -445,7 +444,6 @@ int rin_vk_sync2_access_stage_valid(uint64_t stage_mask,
         (effective_stages &
          (RIN_VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
           RIN_VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
-          RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
           RIN_VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
           RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
         return 0;

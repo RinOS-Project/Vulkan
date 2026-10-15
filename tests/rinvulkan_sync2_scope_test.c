@@ -376,7 +376,7 @@ static void test_core_access_stage_compatibility(void) {
     assert(rin_vk_sync2_access_stage_valid(
         RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
         RIN_VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT, 0u));
-    assert(rin_vk_sync2_access_stage_valid(
+    assert(!rin_vk_sync2_access_stage_valid(
         RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
         RIN_VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT, 0u));
     assert(!rin_vk_sync2_access_stage_valid(
@@ -385,7 +385,7 @@ static void test_core_access_stage_compatibility(void) {
     assert(rin_vk_sync2_access_stage_valid(
         RIN_VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
         RIN_VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT, 0u));
-    assert(rin_vk_sync2_access_stage_valid(
+    assert(!rin_vk_sync2_access_stage_valid(
         RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
         RIN_VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT, 0u));
     assert(!rin_vk_sync2_access_stage_valid(
