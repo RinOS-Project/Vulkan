@@ -13366,6 +13366,22 @@ static int synchronization2_queue_families_valid(
             dst_queue_family == queue_family);
 }
 
+static int command_queue_family_flags(
+        const RinGpuVulkanCommandBufferV1* core,
+        const struct RinVkDevice_T* owner, uint32_t* queue_flags_out) {
+    uint32_t queue_family;
+    if (!core || !core->pool || !owner || !queue_flags_out ||
+        owner->physical_profile.struct_size !=
+            sizeof(owner->physical_profile))
+        return 0;
+    queue_family = core->pool->queue_family_index;
+    if (queue_family >= owner->physical_profile.queue_family_count)
+        return 0;
+    *queue_flags_out =
+        owner->physical_profile.queue_families[queue_family].flags;
+    return 1;
+}
+
 static int synchronization2_stage_mask_supported_by_queue_family(
         uint64_t stage_mask, uint32_t queue_flags) {
     const uint64_t graphics_stages =
@@ -13411,6 +13427,24 @@ static int synchronization2_stage_mask_supported_by_queue_family(
     return 1;
 }
 
+static int command_queue_family_stage_mask_valid(
+        const RinGpuVulkanCommandBufferV1* core,
+        const struct RinVkDevice_T* owner, uint64_t stage_mask) {
+    uint32_t queue_flags;
+    return command_queue_family_flags(core, owner, &queue_flags) &&
+           synchronization2_stage_mask_supported_by_queue_family(
+               stage_mask, queue_flags);
+}
+
+static int command_queue_family_supports_event_commands(
+        const RinGpuVulkanCommandBufferV1* core,
+        const struct RinVkDevice_T* owner) {
+    uint32_t queue_flags;
+    return command_queue_family_flags(core, owner, &queue_flags) &&
+           (queue_flags & (RIN_GPU_VK_QUEUE_GRAPHICS |
+                           RIN_GPU_VK_QUEUE_COMPUTE)) != 0u;
+}
+
 static int synchronization2_barrier_queue_stages_valid(
         const RinGpuVulkanCommandBufferV1* core,
         const struct RinVkDevice_T* owner, uint32_t src_queue_family,
@@ -13422,15 +13456,8 @@ static int synchronization2_barrier_queue_stages_valid(
     int acquire;
     int release;
 
-    if (!core || !core->pool || !owner ||
-        owner->physical_profile.struct_size !=
-            sizeof(owner->physical_profile))
-        return 0;
+    if (!command_queue_family_flags(core, owner, &queue_flags)) return 0;
     command_family = core->pool->queue_family_index;
-    if (command_family >= owner->physical_profile.queue_family_count)
-        return 0;
-    queue_flags =
-        owner->physical_profile.queue_families[command_family].flags;
     ownership_transfer = resource_barrier &&
         src_queue_family != RIN_VK_QUEUE_FAMILY_IGNORED &&
         dst_queue_family != RIN_VK_QUEUE_FAMILY_IGNORED &&
@@ -14763,12 +14790,27 @@ RinVkResult RIN_VKAPI_CALL vkResetEvent(RinVkDevice device, RinVkEvent event) {
 static void record_event_operation(RinVkCommandBuffer command_buffer,
                                    RinVkEvent event, uint32_t operation,
                                    uint32_t stage_mask,
-                                   uint64_t stage_mask2) {
+                                   uint64_t stage_mask2,
+                                   int uses_sync2_stage_mask) {
     RinGpuVulkanCommandBufferV1* core =
         (RinGpuVulkanCommandBufferV1*)(void*)command_buffer;
     struct RinVkDevice_T* owner;
-    if (!command_owner_device(core, &owner) || !event_slot((RinVkDevice)owner,
-                                                            event) ||
+    uint64_t synchronization_stage_mask;
+    if (!command_owner_device(core, &owner) ||
+        !command_queue_family_supports_event_commands(core, owner)) {
+        record_query_failure(core);
+        return;
+    }
+    if (uses_sync2_stage_mask) {
+        synchronization_stage_mask = stage_mask2;
+    } else if (!rin_vk_sync2_legacy_stage_mask(
+                   stage_mask, &synchronization_stage_mask)) {
+        record_query_failure(core);
+        return;
+    }
+    if (!command_queue_family_stage_mask_valid(
+            core, owner, synchronization_stage_mask) ||
+        !event_slot((RinVkDevice)owner, event) ||
         rin_gpu_vulkan_command_buffer_record_event(
             &g_command_runtime, core, event, operation) !=
             RIN_GPU_VULKAN_COMMAND_OK)
@@ -14794,7 +14836,8 @@ void RIN_VKAPI_CALL vkCmdSetEvent(RinVkCommandBuffer command_buffer,
         record_query_failure((RinGpuVulkanCommandBufferV1*)(void*)command_buffer);
     else
         record_event_operation(command_buffer, event,
-                               RIN_GPU_VULKAN_EVENT_COMMAND_SET, stage, 0u);
+                               RIN_GPU_VULKAN_EVENT_COMMAND_SET, stage, 0u,
+                               0);
 }
 
 void RIN_VKAPI_CALL vkCmdResetEvent(RinVkCommandBuffer command_buffer,
@@ -14805,7 +14848,8 @@ void RIN_VKAPI_CALL vkCmdResetEvent(RinVkCommandBuffer command_buffer,
         record_query_failure((RinGpuVulkanCommandBufferV1*)(void*)command_buffer);
     else
         record_event_operation(command_buffer, event,
-                               RIN_GPU_VULKAN_EVENT_COMMAND_RESET, stage, 0u);
+                               RIN_GPU_VULKAN_EVENT_COMMAND_RESET, stage, 0u,
+                               0);
 }
 
 void RIN_VKAPI_CALL vkCmdResetEvent2(
@@ -14818,6 +14862,7 @@ void RIN_VKAPI_CALL vkCmdResetEvent2(
 
     if (!command_owner_device(core, &owner) ||
         !owner->synchronization2_enabled ||
+        !command_queue_family_supports_event_commands(core, owner) ||
         (stage_mask & RIN_VK_PIPELINE_STAGE_2_HOST_BIT) != 0u ||
         !rin_vk_sync2_legacy_wait_stage_mask(stage_mask,
                                               &legacy_stage_mask)) {
@@ -14826,7 +14871,7 @@ void RIN_VKAPI_CALL vkCmdResetEvent2(
     }
     record_event_operation(command_buffer, event,
                            RIN_GPU_VULKAN_EVENT_COMMAND_RESET,
-                           legacy_stage_mask, stage_mask);
+                           legacy_stage_mask, stage_mask, 1);
 }
 
 void RIN_VKAPI_CALL vkCmdResetEvent2KHR(
@@ -14854,6 +14899,7 @@ void RIN_VKAPI_CALL vkCmdSetEvent2(
     memset(operations, 0, sizeof(operations));
     if (!command_owner_device(core, &owner) ||
         !owner->synchronization2_enabled ||
+        !command_queue_family_supports_event_commands(core, owner) ||
         !event_slot((RinVkDevice)owner, event) ||
         !build_event_dependency_info(
             core, owner, dependency_info, 1, operations, &operation_count,
@@ -14926,7 +14972,9 @@ void RIN_VKAPI_CALL vkCmdWaitEvents2(
     memset(source_stage_masks, 0, sizeof(source_stage_masks));
     memset(destination_stage_masks, 0, sizeof(destination_stage_masks));
     if (!command_owner_device(core, &owner) ||
-        !owner->synchronization2_enabled || event_count == 0u || !events ||
+        !owner->synchronization2_enabled ||
+        !command_queue_family_supports_event_commands(core, owner) ||
+        event_count == 0u || !events ||
         !dependency_infos ||
         event_count > RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS ||
         core->event_command_count >
@@ -15030,12 +15078,18 @@ void RIN_VKAPI_CALL vkCmdWaitEvents(
     uint32_t first_event_index;
     uint32_t first_transfer_op;
     memset(operations, 0, sizeof(operations));
-    if (!command_owner_device(core, &owner) || event_count == 0u ||
+    if (!command_owner_device(core, &owner) ||
+        !command_queue_family_supports_event_commands(core, owner) ||
+        event_count == 0u ||
         event_count > RIN_GPU_VULKAN_COMMAND_MAX_EVENT_COMMANDS || !events ||
         !rin_vk_sync2_legacy_stage_mask(src_stage_mask, &src_stage_scope) ||
         !rin_vk_sync2_legacy_stage_mask(dst_stage_mask, &dst_stage_scope) ||
         !rin_vk_sync2_recorded_stage_mask_valid(src_stage_scope) ||
         !rin_vk_sync2_recorded_stage_mask_valid(dst_stage_scope) ||
+        !command_queue_family_stage_mask_valid(
+            core, owner, src_stage_scope) ||
+        !command_queue_family_stage_mask_valid(
+            core, owner, dst_stage_scope) ||
         (memory_barrier_count != 0u && !memory_barriers) ||
         (buffer_barrier_count != 0u && !buffer_barriers) ||
         (image_barrier_count != 0u && !image_barriers) ||

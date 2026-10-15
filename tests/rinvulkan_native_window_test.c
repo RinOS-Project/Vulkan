@@ -3630,6 +3630,81 @@ static int test_sync2_queue_family_stage_validation(RinVkDevice device) {
                RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 0);
 }
 
+static int record_sync2_transfer_queue_event_case(
+        RinVkDevice device, uint32_t event_operation) {
+    RinVkCommandPoolCreateInfo pool_info;
+    RinVkCommandPool pool = NULL;
+    RinVkCommandBufferAllocateInfo allocate_info;
+    RinVkCommandBuffer command_buffer = NULL;
+    RinVkCommandBufferBeginInfo begin_info;
+    RinVkEventCreateInfo event_info;
+    RinVkEvent event = 0u;
+    RinVkMemoryBarrier2 barrier;
+    RinVkDependencyInfo dependency;
+    RinVkResult end_result;
+    int result = 0;
+
+    memset(&event_info, 0, sizeof(event_info));
+    event_info.sType = RIN_VK_STRUCTURE_TYPE_EVENT_CREATE_INFO;
+    if (vkCreateEvent(device, &event_info, NULL, &event) != RIN_VK_SUCCESS)
+        goto done;
+    memset(&pool_info, 0, sizeof(pool_info));
+    pool_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pool_info.queueFamilyIndex = 1u;
+    if (vkCreateCommandPool(device, &pool_info, NULL, &pool) !=
+        RIN_VK_SUCCESS)
+        goto done;
+    memset(&allocate_info, 0, sizeof(allocate_info));
+    allocate_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocate_info.commandPool = pool;
+    allocate_info.level = RIN_VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocate_info.commandBufferCount = 1u;
+    if (vkAllocateCommandBuffers(device, &allocate_info, &command_buffer) !=
+        RIN_VK_SUCCESS)
+        goto done;
+    memset(&begin_info, 0, sizeof(begin_info));
+    begin_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    if (vkBeginCommandBuffer(command_buffer, &begin_info) != RIN_VK_SUCCESS)
+        goto done;
+
+    memset(&barrier, 0, sizeof(barrier));
+    barrier.sType = RIN_VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = RIN_VK_PIPELINE_STAGE_2_COPY_BIT;
+    barrier.dstStageMask = RIN_VK_PIPELINE_STAGE_2_COPY_BIT;
+    memset(&dependency, 0, sizeof(dependency));
+    dependency.sType = RIN_VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.memoryBarrierCount = 1u;
+    dependency.pMemoryBarriers = &barrier;
+
+    if (event_operation == 0u) {
+        vkCmdSetEvent2(command_buffer, event, &dependency);
+    } else if (event_operation == 1u) {
+        RinVkEvent events[1] = {event};
+        if (vkSetEvent(device, event) != RIN_VK_SUCCESS) goto done;
+        barrier.srcStageMask = RIN_VK_PIPELINE_STAGE_2_HOST_BIT;
+        barrier.srcAccessMask = RIN_VK_ACCESS_2_HOST_WRITE_BIT;
+        vkCmdWaitEvents2(command_buffer, 1u, events, &dependency);
+    } else if (event_operation == 2u) {
+        vkCmdResetEvent2(command_buffer, event,
+                         RIN_VK_PIPELINE_STAGE_2_COPY_BIT);
+    } else {
+        goto done;
+    }
+    end_result = vkEndCommandBuffer(command_buffer);
+    result = end_result != RIN_VK_SUCCESS;
+
+done:
+    if (pool != NULL) vkDestroyCommandPool(device, pool, NULL);
+    if (event != 0u) vkDestroyEvent(device, event, NULL);
+    return result;
+}
+
+static int test_sync2_event_queue_type_validation(RinVkDevice device) {
+    return record_sync2_transfer_queue_event_case(device, 0u) &&
+           record_sync2_transfer_queue_event_case(device, 1u) &&
+           record_sync2_transfer_queue_event_case(device, 2u);
+}
+
 static RinVkResult record_process_wait_barrier(
         RinVkDevice device, TestRecordedBarrier* recorded) {
     RinVkCommandPoolCreateInfo pool_info;
@@ -5158,6 +5233,7 @@ int main(void) {
     vkGetDeviceQueue(device, 0u, 1u, &second_queue);
     CHECK(second_queue != NULL && second_queue != queue);
     CHECK(test_sync2_queue_family_stage_validation(device));
+    CHECK(test_sync2_event_queue_type_validation(device));
     {
         const RinVkResult process_wait_result =
             test_process_submit_wait_completion(
