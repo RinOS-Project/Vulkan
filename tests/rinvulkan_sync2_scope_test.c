@@ -596,6 +596,12 @@ static void test_generic_memory_access_with_empty_scope(void) {
 
 static void test_access_requires_a_compatible_supported_stage(void) {
     assert(rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+        RIN_VK_ACCESS_2_TRANSFER_READ_BIT, 0u));
+    assert(rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+        RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT, 1u));
+    assert(rin_vk_sync2_access_stage_valid(
         RIN_VK_PIPELINE_STAGE_2_COPY_BIT,
         RIN_VK_ACCESS_2_TRANSFER_READ_BIT, 0u));
     assert(rin_vk_sync2_access_stage_valid(
@@ -629,6 +635,20 @@ static void test_access_requires_a_compatible_supported_stage(void) {
 static void test_barrier_scope_packet_mapping(void) {
     RinGpuVulkanTransferOpV2 operation;
     memset(&operation, 0, sizeof(operation));
+    assert(rin_vk_sync2_barrier_scopes(
+        RIN_VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+        RIN_VK_ACCESS_2_TRANSFER_READ_BIT,
+        RIN_VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+        RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT, &operation));
+    assert(operation.barrier.src_stage_mask ==
+           RIN_GPU_VULKAN_BARRIER_STAGE_TRANSFER);
+    assert(operation.barrier.src_access_mask ==
+           RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_READ);
+    assert(operation.barrier.dst_stage_mask ==
+           RIN_GPU_VULKAN_BARRIER_STAGE_TRANSFER);
+    assert(operation.barrier.dst_access_mask ==
+           RIN_GPU_VULKAN_BARRIER_ACCESS_TRANSFER_WRITE);
+
     assert(rin_vk_sync2_barrier_scopes(
         RIN_VK_PIPELINE_STAGE_2_CLEAR_BIT,
         RIN_VK_ACCESS_2_MEMORY_READ_BIT,
