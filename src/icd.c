@@ -13447,6 +13447,20 @@ static int command_queue_family_stage_mask_valid(
                owner, core->pool->queue_family_index, stage_mask);
 }
 
+static int command_queue_family_supports_timestamps(
+        const RinGpuVulkanCommandBufferV1* core,
+        const struct RinVkDevice_T* owner) {
+    uint32_t queue_family;
+    if (!core || !core->pool || !owner ||
+        owner->physical_profile.struct_size !=
+            sizeof(owner->physical_profile))
+        return 0;
+    queue_family = core->pool->queue_family_index;
+    return queue_family < owner->physical_profile.queue_family_count &&
+           owner->physical_profile.queue_families[queue_family]
+                   .timestamp_valid_bits != 0u;
+}
+
 static int command_queue_family_supports_event_commands(
         const RinGpuVulkanCommandBufferV1* core,
         const struct RinVkDevice_T* owner) {
@@ -14660,6 +14674,7 @@ void RIN_VKAPI_CALL vkCmdWriteTimestamp(
         !rin_vk_sync2_legacy_stage_mask((uint32_t)stage, &sync2_stage) ||
         (sync2_stage & RIN_VK_PIPELINE_STAGE_2_HOST_BIT) != 0u ||
         !command_queue_family_stage_mask_valid(core, owner, sync2_stage) ||
+        !command_queue_family_supports_timestamps(core, owner) ||
         !(pool = query_pool_slot((RinVkDevice)owner, query_pool)) ||
         query >= pool->query_count ||
         pool->query_type != RIN_VK_QUERY_TYPE_TIMESTAMP ||
@@ -14673,7 +14688,6 @@ void RIN_VKAPI_CALL vkCmdWriteTimestamp(
 static int timestamp2_stage_supported(
         const struct RinVkDevice_T* owner,
         const RinGpuVulkanCommandBufferV1* core, uint64_t stage) {
-    const RinGpuVulkanQueueFamilyV1* family;
     uint64_t runtime_stage;
 
     if (!owner || !core || !core->pool ||
@@ -14681,11 +14695,9 @@ static int timestamp2_stage_supported(
             owner->physical_profile.queue_family_count ||
         (stage != 0u && (stage & (stage - 1u)) != 0u) ||
         (stage & RIN_VK_PIPELINE_STAGE_2_HOST_BIT) != 0u ||
+        !command_queue_family_supports_timestamps(core, owner) ||
         !rin_vk_sync2_stage_mask(stage, &runtime_stage))
         return 0;
-    family = &owner->physical_profile.queue_families[
-        core->pool->queue_family_index];
-    if (family->timestamp_valid_bits == 0u) return 0;
     return command_queue_family_stage_mask_valid(core, owner, stage);
 }
 

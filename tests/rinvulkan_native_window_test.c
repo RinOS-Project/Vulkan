@@ -3768,8 +3768,8 @@ done:
 }
 
 static int record_timestamp_queue_family_case(
-        RinVkDevice device, uint64_t stage, int synchronization2,
-        int expected_success) {
+        RinVkDevice device, uint32_t queue_family, uint64_t stage,
+        int synchronization2, int expected_success) {
     RinVkQueryPoolCreateInfo query_info;
     RinVkQueryPool query_pool = 0u;
     RinVkCommandPoolCreateInfo pool_info;
@@ -3789,7 +3789,7 @@ static int record_timestamp_queue_family_case(
         goto done;
     memset(&pool_info, 0, sizeof(pool_info));
     pool_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    pool_info.queueFamilyIndex = 1u;
+    pool_info.queueFamilyIndex = queue_family;
     if (vkCreateCommandPool(device, &pool_info, NULL, &pool) !=
         RIN_VK_SUCCESS)
         goto done;
@@ -3821,13 +3821,16 @@ done:
 
 static int test_timestamp_queue_family_stage_validation(RinVkDevice device) {
     return record_timestamp_queue_family_case(
-               device, RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 1, 1) &&
+               device, 0u, RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 1, 1) &&
            record_timestamp_queue_family_case(
-               device, RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 1, 0) &&
+               device, 1u, RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 1, 0) &&
            record_timestamp_queue_family_case(
-               device, RIN_VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1) &&
+               device, 0u, RIN_VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1) &&
            record_timestamp_queue_family_case(
-               device, RIN_VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0);
+               device, 1u, RIN_VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0) &&
+           record_timestamp_queue_family_case(
+               device, 1u, RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 1,
+               0);
 }
 
 static RinVkResult record_process_wait_barrier(
@@ -4086,7 +4089,7 @@ static void make_profile(RinGpuVulkanPhysicalDeviceV2* profile) {
     profile->queue_families[0].timestamp_valid_bits = 64u;
     profile->queue_families[1].flags = RIN_GPU_VK_QUEUE_TRANSFER;
     profile->queue_families[1].queue_count = 1u;
-    profile->queue_families[1].timestamp_valid_bits = 64u;
+    profile->queue_families[1].timestamp_valid_bits = 0u;
     profile->memory_heap_count = 2u;
     profile->memory_heaps[0].size_bytes = UINT64_C(512) * 1024u * 1024u;
     profile->memory_heaps[0].flags = RIN_GPU_VK_HEAP_DEVICE_LOCAL;
@@ -5257,7 +5260,7 @@ int main(void) {
             physical, &timestamp_queue_count, timestamp_queue_properties);
         CHECK(timestamp_queue_count == 2u &&
               timestamp_queue_properties[0].timestampValidBits == 64u &&
-              timestamp_queue_properties[1].timestampValidBits == 64u);
+              timestamp_queue_properties[1].timestampValidBits == 0u);
     }
 
 #if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
