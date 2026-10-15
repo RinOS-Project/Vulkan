@@ -5016,24 +5016,30 @@ static int translate_routed_process_commands(
                     operation->barrier.dst_stage_mask,
                     operation->barrier.dst_access_mask, &barrier))
                 goto unsupported;
-            command = &commands[command_count++];
-            command->type = RIN_GPU_BACKEND_COMMAND_TRANSITION_IMAGE;
-            command->value.image_transition.image_cookie =
-                operation->source_allocation;
-            command->value.image_transition.transition.abi_version =
-                RIN_GPU_ABI_VERSION;
-            command->value.image_transition.transition.struct_size =
-                sizeof(command->value.image_transition.transition);
-            command->value.image_transition.transition.base_mip_level = 0u;
-            command->value.image_transition.transition.mip_level_count = 1u;
-            command->value.image_transition.transition.base_array_layer = 0u;
-            command->value.image_transition.transition.array_layer_count = 1u;
-            command->value.image_transition.transition.before_state =
-                before_state;
-            command->value.image_transition.transition.after_state =
-                after_state;
-            command->value.image_transition.transition.aspect_mask =
-                operation->destination_width;
+            if (before_state != after_state) {
+                command = &commands[command_count++];
+                command->type = RIN_GPU_BACKEND_COMMAND_TRANSITION_IMAGE;
+                command->value.image_transition.image_cookie =
+                    operation->source_allocation;
+                command->value.image_transition.transition.abi_version =
+                    RIN_GPU_ABI_VERSION;
+                command->value.image_transition.transition.struct_size =
+                    sizeof(command->value.image_transition.transition);
+                command->value.image_transition.transition.base_mip_level =
+                    0u;
+                command->value.image_transition.transition.mip_level_count =
+                    1u;
+                command->value.image_transition.transition.base_array_layer =
+                    0u;
+                command->value.image_transition.transition.array_layer_count =
+                    1u;
+                command->value.image_transition.transition.before_state =
+                    before_state;
+                command->value.image_transition.transition.after_state =
+                    after_state;
+                command->value.image_transition.transition.aspect_mask =
+                    operation->destination_width;
+            }
 
             command = &commands[command_count++];
             command->type = RIN_GPU_BACKEND_COMMAND_GRAPHICS_BARRIER_V2;
