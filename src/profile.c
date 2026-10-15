@@ -26,6 +26,11 @@ static int version_is_1_3(uint32_t version) {
     return variant == 0u && major == 1u && minor == 3u;
 }
 
+static int timestamp_valid_bits_valid(uint32_t valid_bits) {
+    return valid_bits == 0u ||
+           (valid_bits >= 36u && valid_bits <= 64u);
+}
+
 static int device_name_valid(
         const char name[RIN_GPU_VULKAN_DEVICE_NAME_SIZE]) {
     uint32_t index;
@@ -154,7 +159,8 @@ int rin_gpu_vulkan_plan_device(
         }
         if ((queue->flags & ~RIN_GPU_VK_QUEUE_KNOWN) != 0u ||
             queue->flags == 0u || queue->queue_count == 0u ||
-            queue->queue_count > 64u || queue->timestamp_valid_bits > 64u ||
+            queue->queue_count > 64u ||
+            !timestamp_valid_bits_valid(queue->timestamp_valid_bits) ||
             queue->reserved != 0u)
             return RIN_GPU_VULKAN_INVALID_ARGUMENT;
         if (primary == UINT32_MAX &&
