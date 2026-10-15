@@ -3569,6 +3569,67 @@ typedef struct TestRecordedBarrier {
     RinVkCommandBuffer command_buffer;
 } TestRecordedBarrier;
 
+static int record_sync2_queue_family_stage_case(
+        RinVkDevice device, uint32_t queue_family, uint64_t source_stage,
+        uint64_t destination_stage, int expected_success) {
+    RinVkCommandPoolCreateInfo pool_info;
+    RinVkCommandPool pool = NULL;
+    RinVkCommandBufferAllocateInfo allocate_info;
+    RinVkCommandBuffer command_buffer = NULL;
+    RinVkCommandBufferBeginInfo begin_info;
+    RinVkMemoryBarrier2 barrier;
+    RinVkDependencyInfo dependency;
+    RinVkResult end_result;
+    int result = 0;
+
+    memset(&pool_info, 0, sizeof(pool_info));
+    pool_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pool_info.queueFamilyIndex = queue_family;
+    if (vkCreateCommandPool(device, &pool_info, NULL, &pool) !=
+        RIN_VK_SUCCESS)
+        goto done;
+    memset(&allocate_info, 0, sizeof(allocate_info));
+    allocate_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocate_info.commandPool = pool;
+    allocate_info.level = RIN_VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocate_info.commandBufferCount = 1u;
+    if (vkAllocateCommandBuffers(device, &allocate_info, &command_buffer) !=
+        RIN_VK_SUCCESS)
+        goto done;
+    memset(&begin_info, 0, sizeof(begin_info));
+    begin_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    if (vkBeginCommandBuffer(command_buffer, &begin_info) != RIN_VK_SUCCESS)
+        goto done;
+    memset(&barrier, 0, sizeof(barrier));
+    barrier.sType = RIN_VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = source_stage;
+    barrier.dstStageMask = destination_stage;
+    memset(&dependency, 0, sizeof(dependency));
+    dependency.sType = RIN_VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.memoryBarrierCount = 1u;
+    dependency.pMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(command_buffer, &dependency);
+    end_result = vkEndCommandBuffer(command_buffer);
+    result = expected_success ? end_result == RIN_VK_SUCCESS
+                              : end_result != RIN_VK_SUCCESS;
+
+done:
+    if (pool != NULL) vkDestroyCommandPool(device, pool, NULL);
+    return result;
+}
+
+static int test_sync2_queue_family_stage_validation(RinVkDevice device) {
+    return record_sync2_queue_family_stage_case(
+               device, 1u, RIN_VK_PIPELINE_STAGE_2_COPY_BIT,
+               RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 1) &&
+           record_sync2_queue_family_stage_case(
+               device, 1u, RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+               RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 0) &&
+           record_sync2_queue_family_stage_case(
+               device, 1u, RIN_VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+               RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 0);
+}
+
 static RinVkResult record_process_wait_barrier(
         RinVkDevice device, TestRecordedBarrier* recorded) {
     RinVkCommandPoolCreateInfo pool_info;
@@ -3823,7 +3884,7 @@ static void make_profile(RinGpuVulkanPhysicalDeviceV2* profile) {
                                        RIN_GPU_VK_QUEUE_TRANSFER;
     profile->queue_families[0].queue_count = 2u;
     profile->queue_families[0].timestamp_valid_bits = 64u;
-    profile->queue_families[1].flags = RIN_GPU_VK_QUEUE_COMPUTE;
+    profile->queue_families[1].flags = RIN_GPU_VK_QUEUE_TRANSFER;
     profile->queue_families[1].queue_count = 1u;
     profile->memory_heap_count = 2u;
     profile->memory_heaps[0].size_bytes = UINT64_C(512) * 1024u * 1024u;
@@ -4838,7 +4899,7 @@ int main(void) {
     TestCompositorSurface compositor;
     RinVkSurfaceCapabilitiesKHR capabilities;
     RinVkSurfaceFormatKHR surface_format;
-    RinVkDeviceQueueCreateInfo queue_info;
+    RinVkDeviceQueueCreateInfo queue_infos[2];
     RinVkPhysicalDeviceVulkan12Features vulkan12;
     RinVkPhysicalDeviceSynchronization2Features synchronization2;
     RinVkDeviceCreateInfo device_info;
@@ -4903,7 +4964,8 @@ int main(void) {
     runtime_bound = 1u;
     CHECK(rin_gpu_vulkan_software_platform_init(
               &software, profile.iommu_domain_cookie, profile.device_epoch,
-              profile.queue_families[0].queue_count,
+              profile.queue_families[0].queue_count +
+                  profile.queue_families[1].queue_count,
               UINT64_C(16) * 1024u * 1024u) == RIN_VULKAN_PRODUCT_OK);
     software_initialized = 1u;
     CHECK(rin_gpu_vulkan_icd_bind_product_platform(&software.platform) ==
@@ -4983,7 +5045,7 @@ int main(void) {
     product_v9_bound = 1u;
     memset(&physical_properties, 0, sizeof(physical_properties));
     vkGetPhysicalDeviceProperties(physical, &physical_properties);
-    CHECK(physical_properties.limits.timestampComputeAndGraphics == 0u &&
+    CHECK(physical_properties.limits.timestampComputeAndGraphics == 1u &&
           physical_properties.limits.timestampPeriod == 1.0f);
     {
         uint32_t timestamp_queue_count = 2u;
@@ -5063,11 +5125,15 @@ int main(void) {
     CHECK(extension_count == 1u &&
           surface_format.format == RIN_VK_FORMAT_R8G8B8A8_UNORM);
 
-    memset(&queue_info, 0, sizeof(queue_info));
-    queue_info.sType = RIN_VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-    queue_info.queueFamilyIndex = 0u;
-    queue_info.queueCount = 2u;
-    queue_info.pQueuePriorities = queue_priorities;
+    memset(queue_infos, 0, sizeof(queue_infos));
+    queue_infos[0].sType = RIN_VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    queue_infos[0].queueFamilyIndex = 0u;
+    queue_infos[0].queueCount = 2u;
+    queue_infos[0].pQueuePriorities = queue_priorities;
+    queue_infos[1].sType = RIN_VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    queue_infos[1].queueFamilyIndex = 1u;
+    queue_infos[1].queueCount = 1u;
+    queue_infos[1].pQueuePriorities = queue_priorities;
     memset(&synchronization2, 0, sizeof(synchronization2));
     synchronization2.sType =
         RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
@@ -5080,8 +5146,8 @@ int main(void) {
     memset(&device_info, 0, sizeof(device_info));
     device_info.sType = RIN_VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     device_info.pNext = &vulkan12;
-    device_info.queueCreateInfoCount = 1u;
-    device_info.pQueueCreateInfos = &queue_info;
+    device_info.queueCreateInfoCount = 2u;
+    device_info.pQueueCreateInfos = queue_infos;
     device_info.enabledExtensionCount = 3u;
     device_info.ppEnabledExtensionNames = device_extensions;
     CHECK(vkCreateDevice(physical, &device_info, NULL, &device) ==
@@ -5091,6 +5157,7 @@ int main(void) {
     CHECK(queue != NULL);
     vkGetDeviceQueue(device, 0u, 1u, &second_queue);
     CHECK(second_queue != NULL && second_queue != queue);
+    CHECK(test_sync2_queue_family_stage_validation(device));
     {
         const RinVkResult process_wait_result =
             test_process_submit_wait_completion(

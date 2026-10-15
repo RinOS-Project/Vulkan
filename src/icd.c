@@ -13366,6 +13366,87 @@ static int synchronization2_queue_families_valid(
             dst_queue_family == queue_family);
 }
 
+static int synchronization2_stage_mask_supported_by_queue_family(
+        uint64_t stage_mask, uint32_t queue_flags) {
+    const uint64_t graphics_stages =
+        RIN_VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+        RIN_VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+        RIN_VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
+        RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+        RIN_VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT;
+    const uint64_t transfer_stages =
+        RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT |
+        RIN_VK_PIPELINE_STAGE_2_COPY_BIT |
+        RIN_VK_PIPELINE_STAGE_2_RESOLVE_BIT |
+        RIN_VK_PIPELINE_STAGE_2_BLIT_BIT |
+        RIN_VK_PIPELINE_STAGE_2_CLEAR_BIT;
+    const uint64_t queue_independent_stages =
+        RIN_VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT |
+        RIN_VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT |
+        RIN_VK_PIPELINE_STAGE_2_HOST_BIT |
+        RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    const uint32_t graphics_compute_transfer =
+        RIN_GPU_VK_QUEUE_GRAPHICS | RIN_GPU_VK_QUEUE_COMPUTE |
+        RIN_GPU_VK_QUEUE_TRANSFER;
+
+    stage_mask &= ~queue_independent_stages;
+    if ((stage_mask & graphics_stages) != 0u &&
+        (queue_flags & RIN_GPU_VK_QUEUE_GRAPHICS) == 0u)
+        return 0;
+    if ((stage_mask & RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT) != 0u &&
+        (queue_flags & RIN_GPU_VK_QUEUE_COMPUTE) == 0u)
+        return 0;
+    if ((stage_mask & transfer_stages) != 0u &&
+        (queue_flags & graphics_compute_transfer) == 0u)
+        return 0;
+    if ((stage_mask & RIN_VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT) != 0u &&
+        (queue_flags & (RIN_GPU_VK_QUEUE_GRAPHICS |
+                        RIN_GPU_VK_QUEUE_COMPUTE)) == 0u)
+        return 0;
+    return 1;
+}
+
+static int synchronization2_barrier_queue_stages_valid(
+        const RinGpuVulkanCommandBufferV1* core,
+        const struct RinVkDevice_T* owner, uint32_t src_queue_family,
+        uint32_t dst_queue_family, uint64_t src_stage_mask,
+        uint64_t dst_stage_mask, int resource_barrier) {
+    uint32_t command_family;
+    uint32_t queue_flags;
+    int ownership_transfer;
+    int acquire;
+    int release;
+
+    if (!core || !core->pool || !owner ||
+        owner->physical_profile.struct_size !=
+            sizeof(owner->physical_profile))
+        return 0;
+    command_family = core->pool->queue_family_index;
+    if (command_family >= owner->physical_profile.queue_family_count)
+        return 0;
+    queue_flags =
+        owner->physical_profile.queue_families[command_family].flags;
+    ownership_transfer = resource_barrier &&
+        src_queue_family != RIN_VK_QUEUE_FAMILY_IGNORED &&
+        dst_queue_family != RIN_VK_QUEUE_FAMILY_IGNORED &&
+        src_queue_family != dst_queue_family;
+    acquire = ownership_transfer && command_family == dst_queue_family;
+    release = ownership_transfer && command_family == src_queue_family;
+    if ((!acquire &&
+         !synchronization2_stage_mask_supported_by_queue_family(
+             src_stage_mask, queue_flags)) ||
+        (!release &&
+         !synchronization2_stage_mask_supported_by_queue_family(
+             dst_stage_mask, queue_flags)))
+        return 0;
+    return 1;
+}
+
 static int image_barrier_range_valid(
         const RinVkImageSlot* image,
         const RinVkImageSubresourceRange* range) {
@@ -14028,7 +14109,11 @@ static int build_event_dependency_info(
               RIN_VK_PIPELINE_STAGE_2_HOST_BIT) != 0u) ||
             !build_memory_barrier_operation(
                 barrier->srcStageMask, barrier->srcAccessMask,
-                barrier->dstStageMask, barrier->dstAccessMask, operation))
+                barrier->dstStageMask, barrier->dstAccessMask, operation) ||
+            !synchronization2_barrier_queue_stages_valid(
+                core, owner, RIN_VK_QUEUE_FAMILY_IGNORED,
+                RIN_VK_QUEUE_FAMILY_IGNORED, barrier->srcStageMask,
+                barrier->dstStageMask, 0))
             return 0;
         signature->memory_barriers[index][0] = barrier->srcStageMask;
         signature->memory_barriers[index][1] = barrier->srcAccessMask;
@@ -14055,7 +14140,11 @@ static int build_event_dependency_info(
                 barrier->dstQueueFamilyIndex, barrier->buffer,
                 barrier->offset, barrier->size, barrier->srcStageMask,
                 barrier->srcAccessMask, barrier->dstStageMask,
-                barrier->dstAccessMask, operation))
+                barrier->dstAccessMask, operation) ||
+            !synchronization2_barrier_queue_stages_valid(
+                core, owner, barrier->srcQueueFamilyIndex,
+                barrier->dstQueueFamilyIndex, barrier->srcStageMask,
+                barrier->dstStageMask, 1))
             return 0;
         signature->buffer_barriers[index][0] = barrier->srcStageMask;
         signature->buffer_barriers[index][1] = barrier->srcAccessMask;
@@ -14088,7 +14177,11 @@ static int build_event_dependency_info(
                 barrier->dstQueueFamilyIndex, barrier->oldLayout,
                 barrier->newLayout, barrier->image, range,
                 barrier->srcStageMask, barrier->srcAccessMask,
-                barrier->dstStageMask, barrier->dstAccessMask, operation))
+                barrier->dstStageMask, barrier->dstAccessMask, operation) ||
+            !synchronization2_barrier_queue_stages_valid(
+                core, owner, barrier->srcQueueFamilyIndex,
+                barrier->dstQueueFamilyIndex, barrier->srcStageMask,
+                barrier->dstStageMask, 1))
             return 0;
         signature->image_barriers[index][0] = barrier->srcStageMask;
         signature->image_barriers[index][1] = barrier->srcAccessMask;
@@ -14159,7 +14252,11 @@ void RIN_VKAPI_CALL vkCmdPipelineBarrier2(
             barrier->pNext ||
             !build_memory_barrier_operation(
                 barrier->srcStageMask, barrier->srcAccessMask,
-                barrier->dstStageMask, barrier->dstAccessMask, operation)) {
+                barrier->dstStageMask, barrier->dstAccessMask, operation) ||
+            !synchronization2_barrier_queue_stages_valid(
+                core, owner, RIN_VK_QUEUE_FAMILY_IGNORED,
+                RIN_VK_QUEUE_FAMILY_IGNORED, barrier->srcStageMask,
+                barrier->dstStageMask, 0)) {
             valid = 0;
             goto done;
         }
@@ -14178,7 +14275,11 @@ void RIN_VKAPI_CALL vkCmdPipelineBarrier2(
                 barrier->dstQueueFamilyIndex, barrier->buffer,
                 barrier->offset, barrier->size, barrier->srcStageMask,
                 barrier->srcAccessMask, barrier->dstStageMask,
-                barrier->dstAccessMask, operation)) {
+                barrier->dstAccessMask, operation) ||
+            !synchronization2_barrier_queue_stages_valid(
+                core, owner, barrier->srcQueueFamilyIndex,
+                barrier->dstQueueFamilyIndex, barrier->srcStageMask,
+                barrier->dstStageMask, 1)) {
             valid = 0;
             goto done;
         }
@@ -14198,7 +14299,11 @@ void RIN_VKAPI_CALL vkCmdPipelineBarrier2(
                 barrier->newLayout, barrier->image,
                 &barrier->subresourceRange, barrier->srcStageMask,
                 barrier->srcAccessMask, barrier->dstStageMask,
-                barrier->dstAccessMask, operation)) {
+                barrier->dstAccessMask, operation) ||
+            !synchronization2_barrier_queue_stages_valid(
+                core, owner, barrier->srcQueueFamilyIndex,
+                barrier->dstQueueFamilyIndex, barrier->srcStageMask,
+                barrier->dstStageMask, 1)) {
             valid = 0;
             goto done;
         }
