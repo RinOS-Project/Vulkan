@@ -3627,7 +3627,21 @@ static int test_sync2_queue_family_stage_validation(RinVkDevice device) {
                RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 0) &&
            record_sync2_queue_family_stage_case(
                device, 1u, RIN_VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
-               RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 0);
+               RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 0) &&
+           record_sync2_queue_family_stage_case(
+               device, 1u, RIN_VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT,
+               RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 0) &&
+           record_sync2_queue_family_stage_case(
+               device, 1u,
+               RIN_VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT,
+               RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 0) &&
+           record_sync2_queue_family_stage_case(
+               device, 0u, RIN_VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT,
+               RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 1) &&
+           record_sync2_queue_family_stage_case(
+               device, 0u,
+               RIN_VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT,
+               RIN_VK_PIPELINE_STAGE_2_COPY_BIT, 1);
 }
 
 static int record_sync2_transfer_queue_event_case(

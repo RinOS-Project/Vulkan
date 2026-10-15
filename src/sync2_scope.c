@@ -65,6 +65,8 @@ int rin_vk_sync2_stage_mask(uint64_t public_mask, uint64_t* runtime_mask_out) {
         RIN_VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
     const uint64_t graphics_stages =
         RIN_VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+        RIN_VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT |
+        RIN_VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT |
         graphics_shader_stages |
         RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
         RIN_VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT;
@@ -362,8 +364,9 @@ int rin_vk_sync2_access_stage_valid(uint64_t stage_mask,
         RIN_VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
     const uint64_t transfer_access = RIN_VK_ACCESS_2_TRANSFER_READ_BIT |
                                      RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT;
-    const uint64_t graphics_read = RIN_VK_ACCESS_2_INDEX_READ_BIT |
-                                   RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT;
+    const uint64_t index_read = RIN_VK_ACCESS_2_INDEX_READ_BIT;
+    const uint64_t vertex_attribute_read =
+        RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT;
     const uint64_t input_attachment_access =
         RIN_VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT;
     const uint64_t color_attachment_access =
@@ -403,10 +406,18 @@ int rin_vk_sync2_access_stage_valid(uint64_t stage_mask,
         (effective_stages & (RIN_VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
                              RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
         return 0;
-    if ((access_mask & graphics_read) != 0u &&
-        (effective_stages & (RIN_VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+    if ((access_mask & index_read) != 0u &&
+        (effective_stages & (RIN_VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT |
+                             RIN_VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
                              RIN_VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
                              RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
+        return 0;
+    if ((access_mask & vertex_attribute_read) != 0u &&
+        (effective_stages &
+         (RIN_VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT |
+          RIN_VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+          RIN_VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
+          RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
         return 0;
     if ((access_mask & input_attachment_access) != 0u &&
         (effective_stages &

@@ -13380,6 +13380,8 @@ static int synchronization2_stage_mask_supported_by_queue_family(
         uint64_t stage_mask, uint32_t queue_flags) {
     const uint64_t graphics_stages =
         RIN_VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+        RIN_VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT |
+        RIN_VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT |
         RIN_VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
         RIN_VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT |
         RIN_VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT |

@@ -390,6 +390,36 @@ static void test_core_access_stage_compatibility(void) {
         0u, (uint64_t[1]){0u}));
 }
 
+static void test_split_vertex_input_stage_compatibility(void) {
+    uint64_t runtime_stages = 0u;
+
+    assert(rin_vk_sync2_stage_mask(
+        RIN_VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT, &runtime_stages));
+    assert(runtime_stages == RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS);
+    assert(rin_vk_sync2_stage_mask(
+        RIN_VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT,
+        &runtime_stages));
+    assert(runtime_stages == RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS);
+
+    assert(rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT,
+        RIN_VK_ACCESS_2_INDEX_READ_BIT, 0u));
+    assert(!rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT,
+        RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT, 0u));
+    assert(rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT,
+        RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT, 0u));
+    assert(!rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT,
+        RIN_VK_ACCESS_2_INDEX_READ_BIT, 0u));
+    assert(rin_vk_sync2_access_stage_valid(
+        RIN_VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT,
+        RIN_VK_ACCESS_2_INDEX_READ_BIT |
+            RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT,
+        0u));
+}
+
 static void test_graphics_shader_storage_barrier_scope(void) {
     RinGpuVulkanTransferOpV2 operation;
     uint64_t runtime_mask = 0u;
@@ -561,6 +591,7 @@ int main(void) {
     test_vertex_input_access_bit_values();
     test_core_shader_and_attachment_access_masks();
     test_core_access_stage_compatibility();
+    test_split_vertex_input_stage_compatibility();
     test_graphics_shader_storage_barrier_scope();
     test_generic_memory_access_follows_stage_scope();
     test_access_requires_a_compatible_supported_stage();
