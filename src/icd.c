@@ -13485,6 +13485,11 @@ static int synchronization2_barrier_queue_stages_valid(
         src_queue_family != dst_queue_family;
     acquire = ownership_transfer && command_family == dst_queue_family;
     release = ownership_transfer && command_family == src_queue_family;
+    /* HOST accesses are not part of a queue-family ownership transfer. */
+    if (ownership_transfer &&
+        ((src_stage_mask | dst_stage_mask) &
+         RIN_VK_PIPELINE_STAGE_2_HOST_BIT) != 0u)
+        return 0;
     if ((!acquire &&
          !synchronization2_stage_mask_supported_by_queue_family(
              src_stage_mask, queue_flags)) ||
