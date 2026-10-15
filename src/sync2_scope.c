@@ -76,8 +76,17 @@ int rin_vk_sync2_stage_mask(uint64_t public_mask, uint64_t* runtime_mask_out) {
                            RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
                            RIN_VK_PIPELINE_STAGE_2_HOST_BIT |
                            RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    /* The ICD reports geometryShader and tessellationShader as unsupported
+     * and rejects enabling them at device creation. Keep their explicit
+     * synchronization stages out of every API-to-runtime projection. */
+    const uint64_t disabled_feature_stages =
+        RIN_VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT;
     uint64_t runtime_mask = 0u;
-    if (!runtime_mask_out || (public_mask & ~known) != 0u) return 0;
+    if (!runtime_mask_out || (public_mask & ~known) != 0u ||
+        (public_mask & disabled_feature_stages) != 0u)
+        return 0;
     if ((public_mask & transfer_stages) != 0u)
         runtime_mask |= RIN_GPU_VULKAN_BARRIER_STAGE_TRANSFER;
     if ((public_mask & graphics_stages) != 0u)
@@ -160,11 +169,17 @@ int rin_vk_sync2_legacy_stage_mask(uint32_t public_mask,
         RIN_VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
         RIN_VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
         RIN_VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+    /* These core optional features are never exposed or enabled by this ICD. */
+    const uint32_t disabled_feature_stages =
+        RIN_VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT |
+        RIN_VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT;
     uint64_t sync2_mask = 0u;
     /* The packet contract has coarser stage groups; widen masks rather than
      * dropping a legacy stage when mapping into those groups. */
     if (!sync2_mask_out || public_mask == 0u ||
-        (public_mask & ~known) != 0u)
+        (public_mask & ~known) != 0u ||
+        (public_mask & disabled_feature_stages) != 0u)
         return 0;
     if ((public_mask & RIN_VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT) != 0u ||
         (public_mask & RIN_VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT) != 0u ||

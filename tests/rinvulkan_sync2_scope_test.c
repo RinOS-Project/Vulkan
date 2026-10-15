@@ -39,9 +39,6 @@ static void test_transfer_stage_aliases(void) {
 static void test_graphics_shader_stage_projection(void) {
     const uint64_t graphics_stages =
         RIN_VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
-        RIN_VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT |
-        RIN_VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT |
-        RIN_VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT |
         RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
         RIN_VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
         RIN_VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
@@ -60,6 +57,18 @@ static void test_graphics_shader_stage_projection(void) {
     assert(runtime_mask ==
            (RIN_GPU_VULKAN_BARRIER_STAGE_GRAPHICS |
             RIN_GPU_VULKAN_BARRIER_STAGE_COMPUTE));
+    assert(!rin_vk_sync2_stage_mask(
+        RIN_VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT,
+        &runtime_mask));
+    assert(!rin_vk_sync2_stage_mask(
+        RIN_VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT,
+        &runtime_mask));
+    assert(!rin_vk_sync2_stage_mask(
+        RIN_VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT, &runtime_mask));
+    assert(!rin_vk_sync2_stage_mask(
+        RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT |
+            RIN_VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT,
+        &runtime_mask));
 
     assert(rin_vk_sync2_legacy_wait_stage_mask(
         RIN_VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT, &legacy_mask));
@@ -74,6 +83,14 @@ static void test_graphics_shader_stage_projection(void) {
     assert(rin_vk_sync2_legacy_stage_mask(
         RIN_VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, &runtime_mask));
     assert(runtime_mask == RIN_VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT);
+    assert(!rin_vk_sync2_legacy_stage_mask(
+        RIN_VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT,
+        &runtime_mask));
+    assert(!rin_vk_sync2_legacy_stage_mask(
+        RIN_VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT,
+        &runtime_mask));
+    assert(!rin_vk_sync2_legacy_stage_mask(
+        RIN_VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT, &runtime_mask));
 }
 
 static void test_scope_sensitive_legacy_wait_stages(void) {
