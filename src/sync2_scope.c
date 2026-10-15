@@ -368,11 +368,13 @@ int rin_vk_sync2_access_stage_valid(uint64_t stage_mask,
         RIN_VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT;
     const uint64_t input_attachment_access =
         RIN_VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT;
-    const uint64_t color_attachment_access =
-        RIN_VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+    const uint64_t color_attachment_read =
+        RIN_VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT;
+    const uint64_t color_attachment_write =
         RIN_VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-    const uint64_t depth_stencil_access =
-        RIN_VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+    const uint64_t depth_stencil_read =
+        RIN_VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+    const uint64_t depth_stencil_write =
         RIN_VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     const uint64_t shader_access =
         RIN_VK_ACCESS_2_UNIFORM_READ_BIT |
@@ -422,13 +424,28 @@ int rin_vk_sync2_access_stage_valid(uint64_t stage_mask,
           RIN_VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
           RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
         return 0;
-    if ((access_mask & color_attachment_access) != 0u &&
+    if ((access_mask & color_attachment_read) != 0u &&
+        (effective_stages &
+         (RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+          RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+          RIN_VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
+          RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
+        return 0;
+    if ((access_mask & color_attachment_write) != 0u &&
         (effective_stages &
          (RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
           RIN_VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
           RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
         return 0;
-    if ((access_mask & depth_stencil_access) != 0u &&
+    if ((access_mask & depth_stencil_read) != 0u &&
+        (effective_stages &
+         (RIN_VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+          RIN_VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
+          RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+          RIN_VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
+          RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
+        return 0;
+    if ((access_mask & depth_stencil_write) != 0u &&
         (effective_stages &
          (RIN_VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
           RIN_VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
