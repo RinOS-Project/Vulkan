@@ -2019,9 +2019,11 @@ static_assert(sizeof(RinVkClearColorValue) == 16u,
               "Vulkan clear-color ABI drift");
 static_assert(sizeof(RinVkClearDepthStencilValue) == 8u,
               "Vulkan clear-depth ABI drift");
-static_assert(sizeof(RinVkBufferMemoryBarrier2) == 80u,
+static_assert(sizeof(RinVkBufferMemoryBarrier2) ==
+                  (sizeof(void*) == 8u ? 80u : 72u),
               "Vulkan buffer-memory-barrier2 ABI drift");
-static_assert(sizeof(RinVkImageMemoryBarrier2) == 96u,
+static_assert(sizeof(RinVkImageMemoryBarrier2) ==
+                  (sizeof(void*) == 8u ? 96u : 84u),
               "Vulkan image-memory-barrier2 ABI drift");
 static_assert(sizeof(RinVkImageSubresourceRange) == 20u,
               "Vulkan image-subresource-range ABI drift");
@@ -2183,9 +2185,11 @@ _Static_assert(sizeof(RinVkDebugUtilsMessengerCallbackDataEXT) == 96u,
 _Static_assert(sizeof(RinVkDebugUtilsMessengerCreateInfoEXT) == 48u,
                "Vulkan debug messenger create ABI drift");
 #endif
-_Static_assert(sizeof(RinVkBufferMemoryBarrier2) == 80u,
+_Static_assert(sizeof(RinVkBufferMemoryBarrier2) ==
+                   (sizeof(void*) == 8u ? 80u : 72u),
                "Vulkan buffer-memory-barrier2 ABI drift");
-_Static_assert(sizeof(RinVkImageMemoryBarrier2) == 96u,
+_Static_assert(sizeof(RinVkImageMemoryBarrier2) ==
+                   (sizeof(void*) == 8u ? 96u : 84u),
                "Vulkan image-memory-barrier2 ABI drift");
 _Static_assert(sizeof(RinVkImageSubresourceRange) == 20u,
                "Vulkan image-subresource-range ABI drift");

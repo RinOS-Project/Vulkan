@@ -379,9 +379,11 @@ static_assert(sizeof(RinVulkanWsiDisplayPlaneV2) == 64u,
               "Vulkan WSI plane ABI drift");
 static_assert(sizeof(RinVulkanWsiPlaneCapabilitiesV2) == 68u,
               "Vulkan WSI plane capabilities ABI drift");
-static_assert(sizeof(RinVulkanWsiDisplayV1) == 160u,
+static_assert(sizeof(RinVulkanWsiDisplayV1) ==
+                  (sizeof(void*) == 8u ? 160u : 156u),
               "Vulkan WSI display ABI drift");
-static_assert(sizeof(RinVulkanWsiModeV1) == 64u,
+static_assert(sizeof(RinVulkanWsiModeV1) ==
+                  (sizeof(void*) == 8u ? 64u : 60u),
               "Vulkan WSI mode ABI drift");
 static_assert(sizeof(RinVulkanWsiPresentRequestV1) == 112u,
               "Vulkan WSI present request ABI drift");
@@ -430,16 +432,18 @@ static_assert(offsetof(RinVulkanWsiPlatformV6, present_v2) ==
                   sizeof(RinVulkanWsiPlatformV5),
               "Vulkan WSI V6 callback prefix drift");
 static_assert(sizeof(RinVulkanWsiPlatformV6) ==
-                  (sizeof(void*) == 8u ? 288u : 232u),
+                  (sizeof(void*) == 8u ? 288u : 228u),
               "Vulkan WSI platform V6 ABI drift");
 #else
 _Static_assert(sizeof(RinVulkanWsiDisplayPlaneV2) == 64u,
                "Vulkan WSI plane ABI drift");
 _Static_assert(sizeof(RinVulkanWsiPlaneCapabilitiesV2) == 68u,
                "Vulkan WSI plane capabilities ABI drift");
-_Static_assert(sizeof(RinVulkanWsiDisplayV1) == 160u,
+_Static_assert(sizeof(RinVulkanWsiDisplayV1) ==
+                   (sizeof(void*) == 8u ? 160u : 156u),
                "Vulkan WSI display ABI drift");
-_Static_assert(sizeof(RinVulkanWsiModeV1) == 64u,
+_Static_assert(sizeof(RinVulkanWsiModeV1) ==
+                   (sizeof(void*) == 8u ? 64u : 60u),
                "Vulkan WSI mode ABI drift");
 _Static_assert(sizeof(RinVulkanWsiPresentRequestV1) == 112u,
                "Vulkan WSI present request ABI drift");
@@ -488,7 +492,7 @@ _Static_assert(offsetof(RinVulkanWsiPlatformV6, present_v2) ==
                    sizeof(RinVulkanWsiPlatformV5),
                "Vulkan WSI V6 callback prefix drift");
 _Static_assert(sizeof(RinVulkanWsiPlatformV6) ==
-                   (sizeof(void*) == 8u ? 288u : 232u),
+                   (sizeof(void*) == 8u ? 288u : 228u),
                "Vulkan WSI platform V6 ABI drift");
 #endif
 
