@@ -406,6 +406,7 @@ int rin_vk_sync2_access_stage_valid(uint64_t stage_mask,
         return 0;
     if ((access_mask & indirect_access) != 0u &&
         (effective_stages & (RIN_VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
+                             RIN_VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
                              RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) == 0u)
         return 0;
     if ((access_mask & index_read) != 0u &&
