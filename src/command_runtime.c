@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "atomic_compat.h"
+#include "image_state.h"
 
 #define RIN_GPU_VULKAN_COMMAND_POOL_TAG UINT64_C(0x5243)
 
@@ -594,27 +595,9 @@ int rin_gpu_vulkan_command_buffer_record_transfer_ops(
                     operation->filter != 0u ||
                     operation->sample_count != 0u)
                     return RIN_GPU_VULKAN_COMMAND_INVALID_ARGUMENT;
-            } else if ((operation->source_width !=
-                            RIN_VK_IMAGE_LAYOUT_UNDEFINED &&
-                        operation->source_width != RIN_VK_IMAGE_LAYOUT_GENERAL &&
-                        operation->source_width !=
-                            RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
-                        operation->source_width !=
-                            RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR &&
-                        operation->source_width !=
-                            RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL &&
-                        operation->source_width !=
-                            RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) ||
-                       (operation->source_height !=
-                            RIN_VK_IMAGE_LAYOUT_GENERAL &&
-                        operation->source_height !=
-                            RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
-                        operation->source_height !=
-                            RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR &&
-                        operation->source_height !=
-                            RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL &&
-                        operation->source_height !=
-                            RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) ||
+            } else if (!rin_vk_image_layout_transition_valid(
+                           operation->source_width,
+                           operation->source_height) ||
                        (operation->destination_width !=
                             RIN_VK_IMAGE_ASPECT_COLOR_BIT &&
                         operation->destination_width !=

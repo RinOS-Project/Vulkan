@@ -16,6 +16,8 @@
 #include <stdatomic.h>
 #endif
 
+#include "image_state.h"
+
 #define RIN_GPU_VULKAN_SOFTWARE_ADDRESS_BASE UINT64_C(0x1000000000)
 #define RIN_GPU_VULKAN_SOFTWARE_ADDRESS_ALIGNMENT UINT64_C(2097152)
 #define RIN_GPU_VULKAN_SOFTWARE_MEMORY_FLAGS \
@@ -1825,27 +1827,9 @@ static int software_submit(void* context,
                 } else {
                     src_queue_family = operation->destination_height;
                     dst_queue_family = operation->filter;
-                    if ((operation->source_width !=
-                             RIN_VK_IMAGE_LAYOUT_UNDEFINED &&
-                         operation->source_width != RIN_VK_IMAGE_LAYOUT_GENERAL &&
-                         operation->source_width !=
-                             RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
-                         operation->source_width !=
-                             RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR &&
-                         operation->source_width !=
-                             RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL &&
-                         operation->source_width !=
-                             RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) ||
-                        (operation->source_height !=
-                             RIN_VK_IMAGE_LAYOUT_GENERAL &&
-                         operation->source_height !=
-                             RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
-                         operation->source_height !=
-                             RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR &&
-                         operation->source_height !=
-                             RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL &&
-                         operation->source_height !=
-                             RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) ||
+                    if (!rin_vk_image_layout_transition_valid(
+                            operation->source_width,
+                            operation->source_height) ||
                         (operation->destination_width !=
                              RIN_VK_IMAGE_ASPECT_COLOR_BIT &&
                          operation->destination_width !=

@@ -11837,7 +11837,8 @@ void RIN_VKAPI_CALL vkGetPhysicalDeviceFormatProperties(
         return;
     if (format == RIN_VK_FORMAT_R8G8B8A8_UNORM)
         properties->optimalTilingFeatures =
-            RIN_VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+            RIN_VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+            RIN_VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
 }
 
 RinVkResult RIN_VKAPI_CALL vkGetPhysicalDeviceImageFormatProperties(
@@ -11855,8 +11856,8 @@ RinVkResult RIN_VKAPI_CALL vkGetPhysicalDeviceImageFormatProperties(
     if (get_physical_profile(physical_device, &profile) !=
             RIN_GPU_VULKAN_OK ||
         image_type != RIN_VK_IMAGE_TYPE_2D ||
-        tiling != RIN_VK_IMAGE_TILING_OPTIMAL || flags != 0u || usage == 0u ||
-        (usage & ~RIN_VK_IMAGE_USAGE_KNOWN) != 0u ||
+        tiling != RIN_VK_IMAGE_TILING_OPTIMAL || flags != 0u ||
+        !rin_vk_image_usage_valid_for_format(format, usage) ||
         (format == RIN_VK_FORMAT_D32_SFLOAT &&
          (usage & RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0u) ||
         (bytes_per_pixel = image_format_bytes(format)) == 0u ||
@@ -13117,19 +13118,26 @@ done:
     }
 }
 
-static int image_layout_transfer_valid(uint32_t layout) {
-    return layout == RIN_VK_IMAGE_LAYOUT_GENERAL ||
-           layout == RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL ||
-           layout == RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL ||
-           layout == RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-}
-
 static int image_barrier_layout_valid(const RinVkImageSlot* image,
                                      uint32_t layout, int old_layout) {
-    if (layout == RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
-        return image && image->swapchain_owner != NULL;
-    if (old_layout && layout == RIN_VK_IMAGE_LAYOUT_UNDEFINED) return 1;
-    return image_layout_transfer_valid(layout);
+    return image && rin_vk_image_layout_valid_for_usage(
+                         layout, image->usage,
+                         image->swapchain_owner != NULL,
+                         old_layout != 0);
+}
+
+static int image_descriptor_layout_valid(const RinVkImageSlot* image,
+                                         uint32_t descriptor_type,
+                                         uint32_t layout) {
+    if (!image) return 0;
+    if (descriptor_type == RIN_VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+        return layout == RIN_VK_IMAGE_LAYOUT_GENERAL;
+    if (descriptor_type == RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
+        descriptor_type == RIN_VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+        return (image->usage & RIN_VK_IMAGE_USAGE_SAMPLED_BIT) != 0u &&
+               (layout == RIN_VK_IMAGE_LAYOUT_GENERAL ||
+                layout == RIN_VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    return 0;
 }
 
 static int image_layout_transfer_source_valid(uint32_t layout) {
@@ -18482,8 +18490,8 @@ static RinVkResult create_image_with_storage_policy(
            request.format == RIN_VK_FORMAT_R8G8B8A8_UNORM &&
            request.samples == RIN_VK_SAMPLE_COUNT_1_BIT)) ||
         allow_internal_linear > 1u ||
-        request.usage == 0u ||
-        (request.usage & ~RIN_VK_IMAGE_USAGE_KNOWN) != 0u ||
+        !rin_vk_image_usage_valid_for_format(request.format,
+                                             request.usage) ||
         request.sharingMode != RIN_VK_SHARING_MODE_EXCLUSIVE ||
         request.queueFamilyIndexCount != 0u ||
         request.pQueueFamilyIndices != NULL ||
@@ -18593,7 +18601,8 @@ RinVkResult RIN_VKAPI_CALL vkBindImageMemory(
     if ((image->usage & (RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                          RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) != 0u)
         required_gpu_access |= RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE;
-    if ((image->usage & RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0u)
+    if ((image->usage & (RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                         RIN_VK_IMAGE_USAGE_SAMPLED_BIT)) != 0u)
         required_gpu_access |= RIN_VULKAN_PRODUCT_MEMORY_GPU_READ;
     bind_result = bind_process_resource_v5(
         image_handle, memory->product_allocation, memory_offset,
@@ -19011,8 +19020,9 @@ void RIN_VKAPI_CALL vkUpdateDescriptorSets(
                 RinVkImageViewSlot* view =
                     image_view_slot(owner, image_info->imageView);
                 if (!view || !sampler_slot(owner, image_info->sampler) ||
-                    (image_info->imageLayout != RIN_VK_IMAGE_LAYOUT_GENERAL &&
-                     image_info->imageLayout != 5u)) {
+                    !image_descriptor_layout_valid(
+                        view->image, source->descriptorType,
+                        image_info->imageLayout)) {
                     invalid = 1;
                     break;
                 }
@@ -19079,8 +19089,9 @@ void RIN_VKAPI_CALL vkUpdateDescriptorSets(
                 } else {
                     RinVkImageViewSlot* view =
                         image_view_slot(owner, image_info->imageView);
-                    if (!view || (image_info->imageLayout != RIN_VK_IMAGE_LAYOUT_GENERAL &&
-                                  image_info->imageLayout != 5u)) {
+                    if (!view || !image_descriptor_layout_valid(
+                                     view->image, source->descriptorType,
+                                     image_info->imageLayout)) {
                         invalid = 1;
                         break;
                     }
