@@ -32,6 +32,12 @@ static void test_transfer_stage_aliases(void) {
     assert(runtime_mask == RIN_GPU_VULKAN_BARRIER_STAGE_TRANSFER);
     assert(rin_vk_sync2_recorded_stage_mask_valid(
         RIN_VK_PIPELINE_STAGE_2_COPY_BIT));
+    assert(rin_vk_sync2_recorded_stage_mask_valid(
+        RIN_VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT));
+    assert(rin_vk_sync2_recorded_stage_mask_valid(
+        RIN_VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT));
+    assert(!rin_vk_sync2_recorded_stage_mask_valid(
+        RIN_VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT));
     assert(!rin_vk_sync2_recorded_stage_mask_valid(0u));
     assert(!rin_vk_sync2_stage_mask(UINT64_C(0x80000000), &runtime_mask));
 }
@@ -175,9 +181,6 @@ static void test_legacy_wait_stage_projection(void) {
 }
 
 static void test_legacy_stage_conversion(void) {
-    const uint64_t graphics_scope =
-        RIN_VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
-        RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
     uint64_t sync2_mask = 0u;
     assert(rin_vk_sync2_legacy_stage_mask(
         RIN_VK_PIPELINE_STAGE_TRANSFER_BIT, &sync2_mask));
@@ -190,19 +193,36 @@ static void test_legacy_stage_conversion(void) {
     assert(sync2_mask == RIN_VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
     assert(rin_vk_sync2_legacy_stage_mask(
         RIN_VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, &sync2_mask));
-    assert(sync2_mask == graphics_scope);
+    assert(sync2_mask == RIN_VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT);
+    assert(rin_vk_sync2_access_stage_valid(
+        sync2_mask, RIN_VK_ACCESS_2_SHADER_WRITE_BIT, 0u));
     assert(rin_vk_sync2_legacy_stage_mask(
         RIN_VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, &sync2_mask));
-    assert(sync2_mask == graphics_scope);
+    assert(sync2_mask == RIN_VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT);
     assert(rin_vk_sync2_legacy_stage_mask(
         RIN_VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, &sync2_mask));
-    assert(sync2_mask == RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+    assert(sync2_mask == RIN_VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT);
+    assert(!rin_vk_sync2_access_stage_valid(
+        sync2_mask, RIN_VK_ACCESS_2_MEMORY_READ_BIT, 0u));
+    assert(rin_vk_sync2_access_stage_valid(
+        sync2_mask, RIN_VK_ACCESS_2_MEMORY_READ_BIT, 1u));
     assert(rin_vk_sync2_legacy_stage_mask(
         RIN_VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, &sync2_mask));
-    assert(sync2_mask == RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+    assert(sync2_mask == RIN_VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT);
+    assert(rin_vk_sync2_access_stage_valid(
+        sync2_mask, RIN_VK_ACCESS_2_MEMORY_READ_BIT, 0u));
+    assert(!rin_vk_sync2_access_stage_valid(
+        sync2_mask, RIN_VK_ACCESS_2_MEMORY_READ_BIT, 1u));
     assert(rin_vk_sync2_legacy_stage_mask(
         RIN_VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, &sync2_mask));
     assert(sync2_mask == RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+    assert(rin_vk_sync2_legacy_stage_mask(
+        RIN_VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+            RIN_VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        &sync2_mask));
+    assert(sync2_mask ==
+           (RIN_VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+            RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT));
     assert(!rin_vk_sync2_legacy_stage_mask(0u, &sync2_mask));
     assert(!rin_vk_sync2_legacy_stage_mask(UINT32_C(0x80000000), &sync2_mask));
     assert(!rin_vk_sync2_legacy_stage_mask(
