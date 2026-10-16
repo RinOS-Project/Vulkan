@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: MIT */
+#include "atomic_compat.h"
+
 #include <rinvulkan/rinos_process_wsi_platform_v1.h>
 
 #include <rin/gpu.h>

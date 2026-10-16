@@ -96,6 +96,12 @@ static __inline uint32_t rin_vk_atomic_add_fetch_u32(void* address,
     return previous + value;
 }
 
+static __inline uint32_t rin_vk_atomic_fetch_add_u32(void* address,
+                                                      uint32_t value) {
+    return (uint32_t)_InterlockedExchangeAdd((volatile long*)address,
+                                              (long)value);
+}
+
 static __inline uint32_t rin_vk_atomic_sub_fetch_u32(void* address,
                                                       uint32_t value) {
     uint32_t delta_bits = 0u - value;
@@ -107,11 +113,25 @@ static __inline uint32_t rin_vk_atomic_sub_fetch_u32(void* address,
     return previous - value;
 }
 
+static __inline uint32_t rin_vk_atomic_fetch_sub_u32(void* address,
+                                                      uint32_t value) {
+    uint32_t delta_bits = 0u - value;
+    long delta;
+    memcpy(&delta, &delta_bits, sizeof(delta));
+    return (uint32_t)_InterlockedExchangeAdd((volatile long*)address, delta);
+}
+
 static __inline uint64_t rin_vk_atomic_add_fetch_u64(void* address,
                                                       uint64_t value) {
     uint64_t previous = (uint64_t)_InterlockedExchangeAdd64(
         (volatile __int64*)address, (__int64)value);
     return previous + value;
+}
+
+static __inline uint64_t rin_vk_atomic_fetch_add_u64(void* address,
+                                                      uint64_t value) {
+    return (uint64_t)_InterlockedExchangeAdd64((volatile __int64*)address,
+                                                (__int64)value);
 }
 
 static __inline uint64_t rin_vk_atomic_sub_fetch_u64(void* address,
@@ -125,12 +145,24 @@ static __inline uint64_t rin_vk_atomic_sub_fetch_u64(void* address,
     return previous - value;
 }
 
+static __inline uint64_t rin_vk_atomic_fetch_sub_u64(void* address,
+                                                      uint64_t value) {
+    uint64_t delta_bits = UINT64_C(0) - value;
+    __int64 delta;
+    memcpy(&delta, &delta_bits, sizeof(delta));
+    return (uint64_t)_InterlockedExchangeAdd64((volatile __int64*)address,
+                                                delta);
+}
+
 #ifndef __ATOMIC_RELAXED
 #define __ATOMIC_RELAXED 0
 #define __ATOMIC_ACQUIRE 2
 #define __ATOMIC_RELEASE 3
 #define __ATOMIC_ACQ_REL 4
+#define __ATOMIC_SEQ_CST 5
 #endif
+
+#define __atomic_signal_fence(order) _ReadWriteBarrier()
 
 #define __atomic_load_n(object, order) \
     (_Generic(*(object), \
@@ -160,6 +192,14 @@ static __inline uint64_t rin_vk_atomic_sub_fetch_u64(void* address,
     (_Generic(*(object), \
         uint32_t: rin_vk_atomic_sub_fetch_u32, \
         uint64_t: rin_vk_atomic_sub_fetch_u64)((void*)(object), (value)))
+#define __atomic_fetch_add(object, value, order) \
+    (_Generic(*(object), \
+        uint32_t: rin_vk_atomic_fetch_add_u32, \
+        uint64_t: rin_vk_atomic_fetch_add_u64)((void*)(object), (value)))
+#define __atomic_fetch_sub(object, value, order) \
+    (_Generic(*(object), \
+        uint32_t: rin_vk_atomic_fetch_sub_u32, \
+        uint64_t: rin_vk_atomic_fetch_sub_u64)((void*)(object), (value)))
 #endif
 
 #endif

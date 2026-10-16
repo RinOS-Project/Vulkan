@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: MIT */
+#include "atomic_compat.h"
+
 #include <rinvulkan/rinos_process_submit_backend_v1.h>
 #include <ringpu/rin_shader.h>
 

@@ -196,6 +196,10 @@ if(BUILD_TESTING)
         ${RINRUNTIME_INCLUDE_DIR})
     target_link_libraries(rinvulkan-native-window-test PRIVATE
         RinVulkan::RinVulkan RinVulkan::RinOSProcessBackend)
+    if(MSVC)
+        target_compile_options(rinvulkan-native-window-test
+            PRIVATE /experimental:c11atomics)
+    endif()
     add_test(NAME rinvulkan-native-window
         COMMAND rinvulkan-native-window-test)
     add_executable(rinvulkan-sdk-target-backend-test

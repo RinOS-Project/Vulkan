@@ -5339,12 +5339,12 @@ int main(void) {
               physical, surface, &capabilities) == RIN_VK_SUCCESS);
 #if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
     CHECK(capabilities.currentExtent.width == 4u &&
-          capabilities.currentExtent.height == 4u &&
+          capabilities.currentExtent.height == 4u);
 #else
     CHECK(capabilities.currentExtent.width == compositor.width &&
-          capabilities.currentExtent.height == compositor.height &&
+          capabilities.currentExtent.height == compositor.height);
 #endif
-          (capabilities.supportedUsageFlags &
+    CHECK((capabilities.supportedUsageFlags &
            RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT) != 0u &&
           (capabilities.supportedUsageFlags &
            RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0u);
