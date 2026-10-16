@@ -47,6 +47,9 @@ static inline int rin_vk_image_descriptor_layout_valid(
         return 0;
     if ((image_usage & RIN_VK_IMAGE_USAGE_SAMPLED_BIT) == 0u)
         return 0;
+    if ((rin_vk_image_format_features(format) &
+         RIN_VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) == 0u)
+        return 0;
     if (layout == RIN_VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL)
         return format == RIN_VK_FORMAT_R8G8B8A8_UNORM ||
                format == RIN_VK_FORMAT_D32_SFLOAT;

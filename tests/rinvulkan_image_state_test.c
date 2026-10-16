@@ -164,6 +164,14 @@ int main(void)
             INT32_MAX, RIN_VK_IMAGE_USAGE_SAMPLED_BIT,
             RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
             RIN_VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL) ||
+        rin_vk_image_descriptor_layout_valid(
+            INT32_MAX, RIN_VK_IMAGE_USAGE_SAMPLED_BIT,
+            RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+            RIN_VK_IMAGE_LAYOUT_GENERAL) ||
+        rin_vk_image_descriptor_layout_valid(
+            INT32_MAX, RIN_VK_IMAGE_USAGE_SAMPLED_BIT,
+            RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+            RIN_VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) ||
         !rin_vk_image_descriptor_layout_valid(
             RIN_VK_FORMAT_D32_SFLOAT, RIN_VK_IMAGE_USAGE_SAMPLED_BIT,
             RIN_VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
