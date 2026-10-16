@@ -20,6 +20,7 @@
 #include "image_state.h"
 #include "platform/time.h"
 #include "sync2_scope.h"
+#include "wsi_present_layout.h"
 
 #define RIN_VK_ICD_BINDING_TRANSITION UINTPTR_MAX
 #define RIN_VK_ICD_CALL_RETRIES 4096u
@@ -11562,29 +11563,12 @@ RinVkResult RIN_VKAPI_CALL vkQueuePresentKHR(
             goto present_result;
         }
         {
-            uint64_t row_pitch;
-            if (image->storage_layout.struct_size !=
-                    sizeof(image->storage_layout) ||
-                image->storage_layout.version !=
-                    RIN_VULKAN_WSI_IMAGE_LAYOUT_V1_VERSION ||
-                image->storage_layout.kind !=
-                    RIN_VULKAN_WSI_IMAGE_LAYOUT_KIND_LINEAR ||
-                image->storage_layout.plane_count != 1u ||
-                image->storage_layout.modifier != 0u ||
-                image->storage_layout.planes[0].offset_bytes != 0u) {
-                release_wsi();
-                memset(pending, 0, sizeof(*pending));
-                result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
-                device_wsi_unlock(device);
-                goto present_result;
-            }
-            row_pitch = (uint64_t)image->width * 4u;
-            if (image->storage_layout.planes[0].row_pitch_bytes !=
-                    row_pitch ||
-                image->storage_layout.planes[0].size_bytes !=
-                    image->memory_size ||
-                image->height > UINT64_MAX / row_pitch ||
-                row_pitch * image->height != image->memory_size) {
+            if (image->format != RIN_VK_FORMAT_R8G8B8A8_UNORM ||
+                image->width != request.width ||
+                image->height != request.height ||
+                !rin_vk_wsi_linear_rgba8_layout_valid(
+                    &image->storage_layout, image->width, image->height,
+                    request.allocation_size)) {
                 release_wsi();
                 memset(pending, 0, sizeof(*pending));
                 result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;

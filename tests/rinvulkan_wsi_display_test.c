@@ -2,6 +2,8 @@
 #include <rinvulkan/icd.h>
 #include <rinvulkan/software_platform.h>
 
+#include "../src/wsi_present_layout.h"
+
 #include <stdio.h>
 #include <string.h>
 
@@ -448,31 +450,13 @@ static int present_retained_v2(
     uint64_t* present_token_out) {
     TestWsiProvider* provider = (TestWsiProvider*)context;
     RinVulkanWsiPresentRequestV1 legacy_request;
-    uint64_t row_bytes;
     if (!provider || !request || !present_token_out ||
         request->struct_size != sizeof(*request) ||
         request->version != RIN_VULKAN_WSI_PRESENT_REQUEST_V2_VERSION ||
-        request->image_layout.struct_size !=
-            sizeof(request->image_layout) ||
-        request->image_layout.version !=
-            RIN_VULKAN_WSI_IMAGE_LAYOUT_V1_VERSION ||
-        request->image_layout.kind !=
-            RIN_VULKAN_WSI_IMAGE_LAYOUT_KIND_LINEAR ||
-        request->image_layout.plane_count != 1u ||
-        request->image_layout.modifier != 0u ||
-        request->width == 0u || request->height == 0u ||
-        request->image_layout.planes[0].offset_bytes != 0u ||
-        request->image_layout.reserved[0] != 0u ||
-        request->image_layout.reserved[1] != 0u ||
+        !rin_vk_wsi_linear_rgba8_layout_valid(
+            &request->image_layout, request->width, request->height,
+            request->allocation_size) ||
         request->reserved[0] != 0u || request->reserved[1] != 0u)
-        return RIN_VULKAN_WSI_PLATFORM_INVALID_ARGUMENT;
-    row_bytes = (uint64_t)request->width * 4u;
-    if (request->image_layout.planes[0].row_pitch_bytes != row_bytes ||
-        request->height > UINT64_MAX / row_bytes ||
-        request->image_layout.planes[0].size_bytes !=
-            row_bytes * request->height ||
-        request->image_layout.planes[0].size_bytes !=
-            request->allocation_size)
         return RIN_VULKAN_WSI_PLATFORM_INVALID_ARGUMENT;
     provider->last_present_v2 = *request;
     memset(&legacy_request, 0, sizeof(legacy_request));
@@ -705,6 +689,7 @@ done:
 }
 
 int main(void) {
+    RinVulkanWsiImageLayoutV1 layout_probe;
     RinGpuVulkanPhysicalDeviceV2 profile;
     RinGpuVulkanRuntimeV1 runtime;
     RinGpuVulkanSoftwarePlatformV1 software;
@@ -782,6 +767,32 @@ int main(void) {
         goto cleanup; \
     } \
 } while (0)
+
+    memset(&layout_probe, 0, sizeof(layout_probe));
+    layout_probe.struct_size = sizeof(layout_probe);
+    layout_probe.version = RIN_VULKAN_WSI_IMAGE_LAYOUT_V1_VERSION;
+    layout_probe.kind = RIN_VULKAN_WSI_IMAGE_LAYOUT_KIND_LINEAR;
+    layout_probe.plane_count = 1u;
+    layout_probe.planes[0].row_pitch_bytes = UINT64_C(1280) * 4u + 64u;
+    layout_probe.planes[0].size_bytes =
+        layout_probe.planes[0].row_pitch_bytes * UINT64_C(720);
+    CHECK(rin_vk_wsi_linear_rgba8_layout_valid(
+              &layout_probe, 1280u, 720u,
+              layout_probe.planes[0].size_bytes + 4096u));
+    CHECK(!rin_vk_wsi_linear_rgba8_layout_valid(
+              &layout_probe, 1280u, 720u,
+              layout_probe.planes[0].size_bytes - 1u));
+    layout_probe.planes[0].row_pitch_bytes = UINT64_C(1280) * 4u - 1u;
+    layout_probe.planes[0].size_bytes =
+        layout_probe.planes[0].row_pitch_bytes * UINT64_C(720);
+    CHECK(!rin_vk_wsi_linear_rgba8_layout_valid(
+              &layout_probe, 1280u, 720u,
+              layout_probe.planes[0].size_bytes));
+    layout_probe.planes[0].row_pitch_bytes =
+        UINT64_MAX / UINT32_MAX + UINT64_C(1);
+    layout_probe.planes[0].size_bytes = UINT64_MAX;
+    CHECK(!rin_vk_wsi_linear_rgba8_layout_valid(
+              &layout_probe, 1u, UINT32_MAX, UINT64_MAX));
 
     make_profile(&profile);
     CHECK(rin_gpu_vulkan_runtime_init(&runtime, &profile, 1u,
