@@ -187,6 +187,20 @@ int main(void)
             RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
             RIN_VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
         return 1;
+    if (rin_vk_image_descriptor_layout_valid(
+            RIN_VK_FORMAT_R8G8B8A8_UNORM,
+            RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            RIN_VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            RIN_VK_IMAGE_LAYOUT_GENERAL) ||
+        rin_vk_image_descriptor_layout_valid(
+            RIN_VK_FORMAT_D32_SFLOAT, RIN_VK_IMAGE_USAGE_SAMPLED_BIT,
+            RIN_VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            RIN_VK_IMAGE_LAYOUT_GENERAL) ||
+        rin_vk_image_descriptor_layout_valid(
+            RIN_VK_FORMAT_R8G8B8A8_UNORM, 0u,
+            RIN_VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            RIN_VK_IMAGE_LAYOUT_GENERAL))
+        return 1;
     if (!rin_vk_image_layout_transition_valid(
             RIN_VK_IMAGE_LAYOUT_UNDEFINED, RIN_VK_IMAGE_LAYOUT_GENERAL) ||
         !rin_vk_image_layout_transition_valid(

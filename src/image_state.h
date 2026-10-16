@@ -36,8 +36,12 @@ static inline int rin_vk_image_descriptor_layout_valid(
     int32_t format, uint32_t image_usage, uint32_t descriptor_type,
     uint32_t layout)
 {
-    if (descriptor_type == RIN_VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
-        return layout == RIN_VK_IMAGE_LAYOUT_GENERAL;
+    if (descriptor_type == RIN_VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
+        /* This bounded RinVk image profile has no STORAGE usage bit or
+         * storage-image format capability. GENERAL alone cannot make an
+         * otherwise unsupported image valid for a storage descriptor. */
+        return 0;
+    }
     if (descriptor_type != RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE &&
         descriptor_type != RIN_VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
         return 0;
