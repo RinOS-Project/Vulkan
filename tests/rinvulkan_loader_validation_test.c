@@ -232,10 +232,22 @@ int main(int argc, char** argv) {
         physical_devices[0], RIN_VK_FORMAT_R8G8B8A8_UNORM,
         &format_properties);
     if (format_properties.optimalTilingFeatures !=
-            RIN_VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT ||
+            (RIN_VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+             RIN_VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) ||
         format_properties.linearTilingFeatures != 0u ||
         format_properties.bufferFeatures != 0u) {
         fprintf(stderr, "loader format query returned incorrect RGBA8 support\n");
+        goto cleanup;
+    }
+    if (vkGetPhysicalDeviceImageFormatProperties(
+            physical_devices[0], RIN_VK_FORMAT_R8G8B8A8_UNORM,
+            RIN_VK_IMAGE_TYPE_2D, RIN_VK_IMAGE_TILING_OPTIMAL,
+            RIN_VK_IMAGE_USAGE_SAMPLED_BIT, 0u,
+            &image_format_properties) != RIN_VK_SUCCESS ||
+        image_format_properties.maxExtent.width != 4096u ||
+        image_format_properties.maxExtent.height != 4096u ||
+        image_format_properties.maxResourceSize == 0u) {
+        fprintf(stderr, "loader rejected advertised sampled RGBA8 support\n");
         goto cleanup;
     }
     if (vkGetPhysicalDeviceImageFormatProperties(
