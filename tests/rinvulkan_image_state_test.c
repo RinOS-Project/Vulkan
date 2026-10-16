@@ -26,6 +26,8 @@ int main(void)
                         RIN_GPU_IMAGE_STATE_COLOR_TARGET) ||
         !expect_mapping(RIN_VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                         RIN_GPU_IMAGE_STATE_SHADER_READ) ||
+        !expect_mapping(RIN_VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                        RIN_GPU_IMAGE_STATE_SHADER_READ) ||
         !expect_mapping(RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                         RIN_GPU_IMAGE_STATE_PRESENT))
         return 1;
@@ -36,40 +38,92 @@ int main(void)
         return 1;
     if (!rin_vk_image_layout_valid_for_usage(
             RIN_VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            RIN_VK_FORMAT_R8G8B8A8_UNORM,
             RIN_VK_IMAGE_USAGE_SAMPLED_BIT, 0u, 0u) ||
         rin_vk_image_layout_valid_for_usage(
             RIN_VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            RIN_VK_FORMAT_R8G8B8A8_UNORM,
+            RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0u, 0u) ||
+        !rin_vk_image_layout_valid_for_usage(
+            RIN_VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            RIN_VK_FORMAT_D32_SFLOAT, RIN_VK_IMAGE_USAGE_SAMPLED_BIT,
+            0u, 0u) ||
+        rin_vk_image_layout_valid_for_usage(
+            RIN_VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            RIN_VK_FORMAT_R8G8B8A8_UNORM,
+            RIN_VK_IMAGE_USAGE_SAMPLED_BIT, 0u, 0u) ||
+        rin_vk_image_layout_valid_for_usage(
+            RIN_VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            RIN_VK_FORMAT_D32_SFLOAT,
             RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0u, 0u) ||
         !rin_vk_image_layout_valid_for_usage(
             RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            RIN_VK_FORMAT_R8G8B8A8_UNORM,
             RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT, 0u, 0u) ||
         rin_vk_image_layout_valid_for_usage(
             RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            RIN_VK_FORMAT_R8G8B8A8_UNORM,
             RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0u, 0u) ||
         !rin_vk_image_layout_valid_for_usage(
             RIN_VK_IMAGE_LAYOUT_UNDEFINED,
+            RIN_VK_FORMAT_R8G8B8A8_UNORM,
             RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0u, 1u) ||
         rin_vk_image_layout_valid_for_usage(
             RIN_VK_IMAGE_LAYOUT_UNDEFINED,
+            RIN_VK_FORMAT_R8G8B8A8_UNORM,
             RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0u, 0u) ||
         !rin_vk_image_layout_valid_for_usage(
             RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            RIN_VK_FORMAT_R8G8B8A8_UNORM,
             RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT, 1u, 0u) ||
         rin_vk_image_layout_valid_for_usage(
             RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            RIN_VK_FORMAT_R8G8B8A8_UNORM,
             RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0u, 0u) ||
         rin_vk_image_layout_valid_for_usage(
-            UINT32_MAX, RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0u, 0u))
+            UINT32_MAX, RIN_VK_FORMAT_R8G8B8A8_UNORM,
+            RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0u, 0u))
         return 1;
     if (!rin_vk_image_usage_valid_for_format(
             RIN_VK_FORMAT_R8G8B8A8_UNORM,
             RIN_VK_IMAGE_USAGE_SAMPLED_BIT) ||
         rin_vk_image_usage_valid_for_format(
-            RIN_VK_FORMAT_D32_SFLOAT, RIN_VK_IMAGE_USAGE_SAMPLED_BIT) ||
+            RIN_VK_FORMAT_D32_SFLOAT, RIN_VK_IMAGE_USAGE_SAMPLED_BIT) == 0 ||
+        rin_vk_image_usage_valid_for_format(
+            RIN_VK_FORMAT_D32_SFLOAT,
+            RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) ||
         rin_vk_image_usage_valid_for_format(
             RIN_VK_FORMAT_R8G8B8A8_UNORM, 0u) ||
         rin_vk_image_usage_valid_for_format(
             RIN_VK_FORMAT_R8G8B8A8_UNORM, UINT32_MAX))
+        return 1;
+    if (rin_vk_image_format_features(RIN_VK_FORMAT_R8G8B8A8_UNORM) !=
+            (RIN_VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+             RIN_VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) ||
+        rin_vk_image_format_features(RIN_VK_FORMAT_D32_SFLOAT) !=
+            RIN_VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT ||
+        rin_vk_image_format_features(UINT32_MAX) != 0u ||
+        !rin_vk_image_descriptor_layout_valid(
+            RIN_VK_FORMAT_D32_SFLOAT, RIN_VK_IMAGE_USAGE_SAMPLED_BIT,
+            RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+            RIN_VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) ||
+        !rin_vk_image_descriptor_layout_valid(
+            RIN_VK_FORMAT_D32_SFLOAT, RIN_VK_IMAGE_USAGE_SAMPLED_BIT,
+            RIN_VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            RIN_VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) ||
+        rin_vk_image_descriptor_layout_valid(
+            RIN_VK_FORMAT_R8G8B8A8_UNORM, RIN_VK_IMAGE_USAGE_SAMPLED_BIT,
+            RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+            RIN_VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) ||
+        rin_vk_image_descriptor_layout_valid(
+            RIN_VK_FORMAT_D32_SFLOAT,
+            RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+            RIN_VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) ||
+        !rin_vk_image_descriptor_layout_valid(
+            RIN_VK_FORMAT_D32_SFLOAT, RIN_VK_IMAGE_USAGE_SAMPLED_BIT,
+            RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+            RIN_VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
         return 1;
     if (!rin_vk_image_layout_transition_valid(
             RIN_VK_IMAGE_LAYOUT_UNDEFINED, RIN_VK_IMAGE_LAYOUT_GENERAL) ||

@@ -11819,10 +11819,7 @@ void RIN_VKAPI_CALL vkGetPhysicalDeviceFormatProperties(
     if (get_physical_profile(physical_device, &profile) !=
         RIN_GPU_VULKAN_OK)
         return;
-    if (format == RIN_VK_FORMAT_R8G8B8A8_UNORM)
-        properties->optimalTilingFeatures =
-            RIN_VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
-            RIN_VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+    properties->optimalTilingFeatures = rin_vk_image_format_features(format);
 }
 
 RinVkResult RIN_VKAPI_CALL vkGetPhysicalDeviceImageFormatProperties(
@@ -13105,7 +13102,7 @@ done:
 static int image_barrier_layout_valid(const RinVkImageSlot* image,
                                      uint32_t layout, int old_layout) {
     return image && rin_vk_image_layout_valid_for_usage(
-                         layout, image->usage,
+                         layout, image->format, image->usage,
                          image->swapchain_owner != NULL,
                          old_layout != 0);
 }
@@ -13113,15 +13110,9 @@ static int image_barrier_layout_valid(const RinVkImageSlot* image,
 static int image_descriptor_layout_valid(const RinVkImageSlot* image,
                                          uint32_t descriptor_type,
                                          uint32_t layout) {
-    if (!image) return 0;
-    if (descriptor_type == RIN_VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
-        return layout == RIN_VK_IMAGE_LAYOUT_GENERAL;
-    if (descriptor_type == RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
-        descriptor_type == RIN_VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
-        return (image->usage & RIN_VK_IMAGE_USAGE_SAMPLED_BIT) != 0u &&
-               (layout == RIN_VK_IMAGE_LAYOUT_GENERAL ||
-                layout == RIN_VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    return 0;
+    return image && rin_vk_image_descriptor_layout_valid(
+                         image->format, image->usage, descriptor_type,
+                         layout);
 }
 
 static int image_layout_transfer_source_valid(uint32_t layout) {

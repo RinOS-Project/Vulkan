@@ -13,9 +13,41 @@ static inline int rin_vk_image_usage_valid_for_format(int32_t format,
 {
     if (usage == 0u || (usage & ~RIN_VK_IMAGE_USAGE_KNOWN) != 0u) return 0;
     if ((usage & RIN_VK_IMAGE_USAGE_SAMPLED_BIT) != 0u &&
+        format != RIN_VK_FORMAT_R8G8B8A8_UNORM &&
+        format != RIN_VK_FORMAT_D32_SFLOAT)
+        return 0;
+    if ((usage & RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0u &&
         format != RIN_VK_FORMAT_R8G8B8A8_UNORM)
         return 0;
     return 1;
+}
+
+static inline uint32_t rin_vk_image_format_features(int32_t format)
+{
+    if (format == RIN_VK_FORMAT_R8G8B8A8_UNORM)
+        return RIN_VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+               RIN_VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+    if (format == RIN_VK_FORMAT_D32_SFLOAT)
+        return RIN_VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+    return 0u;
+}
+
+static inline int rin_vk_image_descriptor_layout_valid(
+    int32_t format, uint32_t image_usage, uint32_t descriptor_type,
+    uint32_t layout)
+{
+    if (descriptor_type == RIN_VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+        return layout == RIN_VK_IMAGE_LAYOUT_GENERAL;
+    if (descriptor_type != RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE &&
+        descriptor_type != RIN_VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+        return 0;
+    if ((image_usage & RIN_VK_IMAGE_USAGE_SAMPLED_BIT) == 0u)
+        return 0;
+    if (layout == RIN_VK_IMAGE_LAYOUT_GENERAL ||
+        layout == RIN_VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        return 1;
+    return format == RIN_VK_FORMAT_D32_SFLOAT &&
+           layout == RIN_VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 }
 
 static inline int rin_vk_image_layout_to_ringpu_state(uint32_t layout,
@@ -43,6 +75,9 @@ static inline int rin_vk_image_layout_to_ringpu_state(uint32_t layout,
     case RIN_VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
         state = RIN_GPU_IMAGE_STATE_SHADER_READ;
         break;
+    case RIN_VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+        state = RIN_GPU_IMAGE_STATE_SHADER_READ;
+        break;
     case RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
         state = RIN_GPU_IMAGE_STATE_PRESENT;
         break;
@@ -65,8 +100,8 @@ static inline int rin_vk_image_layout_transition_valid(uint32_t old_layout,
 }
 
 static inline int rin_vk_image_layout_valid_for_usage(
-    uint32_t layout, uint32_t image_usage, uint32_t is_swapchain_image,
-    uint32_t is_old_layout)
+    uint32_t layout, int32_t format, uint32_t image_usage,
+    uint32_t is_swapchain_image, uint32_t is_old_layout)
 {
     uint32_t state;
 
@@ -76,6 +111,9 @@ static inline int rin_vk_image_layout_valid_for_usage(
     if (layout == RIN_VK_IMAGE_LAYOUT_UNDEFINED) return is_old_layout != 0u;
     if (layout == RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
         return is_swapchain_image != 0u;
+    if (layout == RIN_VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL)
+        return format == RIN_VK_FORMAT_D32_SFLOAT &&
+               (image_usage & RIN_VK_IMAGE_USAGE_SAMPLED_BIT) != 0u;
     if (!rin_vk_image_layout_to_ringpu_state(layout, &state)) return 0;
     switch (state) {
     case RIN_GPU_IMAGE_STATE_GENERAL:
