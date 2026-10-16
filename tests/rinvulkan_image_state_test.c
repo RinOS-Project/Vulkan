@@ -28,6 +28,10 @@ int main(void)
                         RIN_GPU_IMAGE_STATE_SHADER_READ) ||
         !expect_mapping(RIN_VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
                         RIN_GPU_IMAGE_STATE_SHADER_READ) ||
+        !expect_mapping(RIN_VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+                        RIN_GPU_IMAGE_STATE_SHADER_READ) ||
+        !expect_mapping(RIN_VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+                        RIN_GPU_IMAGE_STATE_COLOR_TARGET) ||
         !expect_mapping(RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                         RIN_GPU_IMAGE_STATE_PRESENT))
         return 1;
@@ -48,6 +52,46 @@ int main(void)
             RIN_VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
             RIN_VK_FORMAT_D32_SFLOAT, RIN_VK_IMAGE_USAGE_SAMPLED_BIT,
             0u, 0u) ||
+        !rin_vk_image_layout_valid_for_usage(
+            RIN_VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+            RIN_VK_FORMAT_R8G8B8A8_UNORM,
+            RIN_VK_IMAGE_USAGE_SAMPLED_BIT, 0u, 0u) ||
+        !rin_vk_image_layout_valid_for_usage(
+            RIN_VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+            RIN_VK_FORMAT_D32_SFLOAT, RIN_VK_IMAGE_USAGE_SAMPLED_BIT,
+            0u, 0u) ||
+        rin_vk_image_layout_valid_for_usage(
+            RIN_VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+            RIN_VK_FORMAT_R8G8B8A8_UNORM,
+            RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, 0u, 0u) ||
+        !rin_vk_image_layout_valid_for_usage(
+            RIN_VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+            RIN_VK_FORMAT_R8G8B8A8_UNORM,
+            RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, 0u, 0u) ||
+        rin_vk_image_layout_valid_for_usage(
+            RIN_VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+            RIN_VK_FORMAT_R8G8B8A8_UNORM,
+            RIN_VK_IMAGE_USAGE_SAMPLED_BIT, 0u, 0u) ||
+        rin_vk_image_layout_valid_for_usage(
+            RIN_VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+            RIN_VK_FORMAT_D32_SFLOAT,
+            RIN_VK_IMAGE_USAGE_SAMPLED_BIT, 0u, 0u) ||
+        !rin_vk_image_color_attachment_layout_valid(
+            RIN_VK_FORMAT_R8G8B8A8_UNORM,
+            RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) ||
+        !rin_vk_image_color_attachment_layout_valid(
+            RIN_VK_FORMAT_R8G8B8A8_UNORM,
+            RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            RIN_VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL) ||
+        rin_vk_image_color_attachment_layout_valid(
+            RIN_VK_FORMAT_R8G8B8A8_UNORM,
+            RIN_VK_IMAGE_USAGE_SAMPLED_BIT,
+            RIN_VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL) ||
+        rin_vk_image_color_attachment_layout_valid(
+            RIN_VK_FORMAT_D32_SFLOAT,
+            RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            RIN_VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL) ||
         rin_vk_image_layout_valid_for_usage(
             RIN_VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
             RIN_VK_FORMAT_R8G8B8A8_UNORM,
@@ -108,6 +152,19 @@ int main(void)
             RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
             RIN_VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) ||
         !rin_vk_image_descriptor_layout_valid(
+            RIN_VK_FORMAT_R8G8B8A8_UNORM,
+            RIN_VK_IMAGE_USAGE_SAMPLED_BIT,
+            RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+            RIN_VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL) ||
+        !rin_vk_image_descriptor_layout_valid(
+            RIN_VK_FORMAT_D32_SFLOAT, RIN_VK_IMAGE_USAGE_SAMPLED_BIT,
+            RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+            RIN_VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL) ||
+        rin_vk_image_descriptor_layout_valid(
+            INT32_MAX, RIN_VK_IMAGE_USAGE_SAMPLED_BIT,
+            RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+            RIN_VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL) ||
+        !rin_vk_image_descriptor_layout_valid(
             RIN_VK_FORMAT_D32_SFLOAT, RIN_VK_IMAGE_USAGE_SAMPLED_BIT,
             RIN_VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             RIN_VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) ||
@@ -115,6 +172,11 @@ int main(void)
             RIN_VK_FORMAT_R8G8B8A8_UNORM, RIN_VK_IMAGE_USAGE_SAMPLED_BIT,
             RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
             RIN_VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) ||
+        rin_vk_image_descriptor_layout_valid(
+            RIN_VK_FORMAT_R8G8B8A8_UNORM,
+            RIN_VK_IMAGE_USAGE_SAMPLED_BIT,
+            RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+            RIN_VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL) ||
         rin_vk_image_descriptor_layout_valid(
             RIN_VK_FORMAT_D32_SFLOAT,
             RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT,

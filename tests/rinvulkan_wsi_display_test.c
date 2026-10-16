@@ -786,6 +786,15 @@ static RinVkResult transition_sampled_depth_image(
     dependency_info.imageMemoryBarrierCount = 1u;
     dependency_info.pImageMemoryBarriers = &image_barrier;
     vkCmdPipelineBarrier2(command_buffer, &dependency_info);
+
+    image_barrier.srcStageMask = RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    image_barrier.srcAccessMask = RIN_VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    image_barrier.dstStageMask = RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    image_barrier.dstAccessMask = RIN_VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    image_barrier.oldLayout =
+        RIN_VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    image_barrier.newLayout = RIN_VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
+    vkCmdPipelineBarrier2(command_buffer, &dependency_info);
     result = vkEndCommandBuffer(command_buffer);
     if (result != RIN_VK_SUCCESS) goto done;
 

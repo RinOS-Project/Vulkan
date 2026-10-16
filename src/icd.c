@@ -15944,7 +15944,10 @@ static RinVkResult snapshot_graphics_submission(
         command->graphics_draw_count != 1u ||
         command->graphics_pipeline_bound != 1u ||
         command->bound_graphics_pipeline == 0u ||
-        command->graphics_color_layout != RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL ||
+        (command->graphics_color_layout !=
+             RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
+         command->graphics_color_layout !=
+             RIN_VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL) ||
         command->graphics_width == 0u || command->graphics_width > 4096u ||
         command->graphics_height == 0u || command->graphics_height > 4096u ||
         command->graphics_vertex_count == 0u || command->graphics_vertex_count > 65535u ||
@@ -15966,6 +15969,8 @@ static RinVkResult snapshot_graphics_submission(
     if (!image || image->owner != device || !image->memory ||
         image->memory_generation != image->memory->generation ||
         image->memory->owner != device || image->memory->product_allocation == 0u ||
+        !rin_vk_image_color_attachment_layout_valid(
+            image->format, image->usage, command->graphics_color_layout) ||
         image->format != RIN_VK_FORMAT_R8G8B8A8_UNORM ||
         view->format != (uint32_t)image->format ||
         view->aspect_mask != RIN_VK_IMAGE_ASPECT_COLOR_BIT ||
@@ -19288,7 +19293,9 @@ void RIN_VKAPI_CALL vkCmdBeginRendering(
     image = view ? view->image : NULL;
     if (attachment->sType != RIN_VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO ||
         attachment->pNext ||
-        attachment->imageLayout != RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL ||
+        !rin_vk_image_color_attachment_layout_valid(
+            image ? image->format : 0, image ? image->usage : 0u,
+            attachment->imageLayout) ||
         attachment->resolveMode != 0u || attachment->resolveImageView != 0u ||
         attachment->resolveImageLayout != RIN_VK_IMAGE_LAYOUT_UNDEFINED ||
         attachment->loadOp != RIN_VK_ATTACHMENT_LOAD_OP_CLEAR ||
@@ -19305,7 +19312,7 @@ void RIN_VKAPI_CALL vkCmdBeginRendering(
         rendering_info->renderArea.extent.width != image->width ||
         rendering_info->renderArea.extent.height != image->height ||
         __atomic_load_n(&image->current_layout, __ATOMIC_ACQUIRE) !=
-            RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL ||
+            attachment->imageLayout ||
         image->ownership.transfer_pending != 0u ||
         (image->ownership.owner_queue_family != RIN_VK_QUEUE_FAMILY_IGNORED &&
          image->ownership.owner_queue_family != command->pool->queue_family_index)) {

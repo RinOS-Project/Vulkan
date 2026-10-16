@@ -43,11 +43,23 @@ static inline int rin_vk_image_descriptor_layout_valid(
         return 0;
     if ((image_usage & RIN_VK_IMAGE_USAGE_SAMPLED_BIT) == 0u)
         return 0;
+    if (layout == RIN_VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL)
+        return format == RIN_VK_FORMAT_R8G8B8A8_UNORM ||
+               format == RIN_VK_FORMAT_D32_SFLOAT;
     if (layout == RIN_VK_IMAGE_LAYOUT_GENERAL ||
         layout == RIN_VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
         return 1;
     return format == RIN_VK_FORMAT_D32_SFLOAT &&
            layout == RIN_VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+}
+
+static inline int rin_vk_image_color_attachment_layout_valid(
+    int32_t format, uint32_t image_usage, uint32_t layout)
+{
+    return format == RIN_VK_FORMAT_R8G8B8A8_UNORM &&
+           (image_usage & RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0u &&
+           (layout == RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL ||
+            layout == RIN_VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL);
 }
 
 static inline int rin_vk_image_layout_to_ringpu_state(uint32_t layout,
@@ -77,6 +89,12 @@ static inline int rin_vk_image_layout_to_ringpu_state(uint32_t layout,
         break;
     case RIN_VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
         state = RIN_GPU_IMAGE_STATE_SHADER_READ;
+        break;
+    case RIN_VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL:
+        state = RIN_GPU_IMAGE_STATE_SHADER_READ;
+        break;
+    case RIN_VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL:
+        state = RIN_GPU_IMAGE_STATE_COLOR_TARGET;
         break;
     case RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
         state = RIN_GPU_IMAGE_STATE_PRESENT;
@@ -114,6 +132,13 @@ static inline int rin_vk_image_layout_valid_for_usage(
     if (layout == RIN_VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL)
         return format == RIN_VK_FORMAT_D32_SFLOAT &&
                (image_usage & RIN_VK_IMAGE_USAGE_SAMPLED_BIT) != 0u;
+    if (layout == RIN_VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL)
+        return (format == RIN_VK_FORMAT_R8G8B8A8_UNORM ||
+                format == RIN_VK_FORMAT_D32_SFLOAT) &&
+               (image_usage & RIN_VK_IMAGE_USAGE_SAMPLED_BIT) != 0u;
+    if (layout == RIN_VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL)
+        return format == RIN_VK_FORMAT_R8G8B8A8_UNORM &&
+               (image_usage & RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0u;
     if (!rin_vk_image_layout_to_ringpu_state(layout, &state)) return 0;
     switch (state) {
     case RIN_GPU_IMAGE_STATE_GENERAL:
