@@ -9131,7 +9131,7 @@ RinVkResult RIN_VKAPI_CALL vkCreateDisplayPlaneSurfaceKHR(
         const void* allocator, RinVkSurfaceKHR* surface_out) {
     RinVkDisplayPlanePropertiesKHR plane_properties[RIN_VULKAN_WSI_MAX_PLANES];
     RinVkDisplayKHR supported_displays[RIN_VULKAN_WSI_MAX_DISPLAYS];
-    RinVkDisplayPlaneCapabilitiesKHR capabilities;
+    RinVkDisplayPlaneCapabilitiesKHR capabilities = {0};
     RinVkPhysicalDeviceProperties physical_properties;
     struct RinVkInstance_T* instance;
     struct RinVkInstance_T* mode_instance = NULL;
