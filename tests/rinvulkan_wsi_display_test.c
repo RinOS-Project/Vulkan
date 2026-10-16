@@ -688,6 +688,127 @@ done:
     return result;
 }
 
+static RinVkResult transition_sampled_depth_image(
+        RinVkDevice device, RinVkQueue queue) {
+    RinVkImageCreateInfo image_info;
+    RinVkImage image = 0u;
+    RinVkMemoryRequirements memory_requirements;
+    RinVkMemoryAllocateInfo memory_info;
+    RinVkDeviceMemory memory = 0u;
+    RinVkCommandPoolCreateInfo pool_info;
+    RinVkCommandPool command_pool = 0u;
+    RinVkCommandBufferAllocateInfo allocate_info;
+    RinVkCommandBuffer command_buffer = 0u;
+    RinVkCommandBufferBeginInfo begin_info;
+    RinVkImageMemoryBarrier2 image_barrier;
+    RinVkDependencyInfo dependency_info;
+    RinVkSubmitInfo submit_info;
+    RinVkFenceCreateInfo fence_info;
+    RinVkFence fence = 0u;
+    uint32_t memory_type_index;
+    RinVkResult result;
+
+    memset(&image_info, 0, sizeof(image_info));
+    image_info.sType = RIN_VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = RIN_VK_IMAGE_TYPE_2D;
+    image_info.format = RIN_VK_FORMAT_D32_SFLOAT;
+    image_info.extent.width = 4u;
+    image_info.extent.height = 4u;
+    image_info.extent.depth = 1u;
+    image_info.mipLevels = 1u;
+    image_info.arrayLayers = 1u;
+    image_info.samples = RIN_VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = RIN_VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = RIN_VK_IMAGE_USAGE_SAMPLED_BIT;
+    image_info.sharingMode = RIN_VK_SHARING_MODE_EXCLUSIVE;
+    result = vkCreateImage(device, &image_info, NULL, &image);
+    if (result != RIN_VK_SUCCESS) goto done;
+
+    memset(&memory_requirements, 0, sizeof(memory_requirements));
+    vkGetImageMemoryRequirements(device, image, &memory_requirements);
+    if (memory_requirements.size == 0u ||
+        memory_requirements.memoryTypeBits == 0u) {
+        result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        goto done;
+    }
+    for (memory_type_index = 0u; memory_type_index < 32u;
+         ++memory_type_index) {
+        if ((memory_requirements.memoryTypeBits &
+             (UINT32_C(1) << memory_type_index)) != 0u)
+            break;
+    }
+    if (memory_type_index == 32u) {
+        result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        goto done;
+    }
+    memset(&memory_info, 0, sizeof(memory_info));
+    memory_info.sType = RIN_VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    memory_info.allocationSize = memory_requirements.size;
+    memory_info.memoryTypeIndex = memory_type_index;
+    result = vkAllocateMemory(device, &memory_info, NULL, &memory);
+    if (result != RIN_VK_SUCCESS) goto done;
+    result = vkBindImageMemory(device, image, memory, 0u);
+    if (result != RIN_VK_SUCCESS) goto done;
+
+    memset(&pool_info, 0, sizeof(pool_info));
+    pool_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pool_info.queueFamilyIndex = 0u;
+    result = vkCreateCommandPool(device, &pool_info, NULL, &command_pool);
+    if (result != RIN_VK_SUCCESS) goto done;
+    memset(&allocate_info, 0, sizeof(allocate_info));
+    allocate_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocate_info.commandPool = command_pool;
+    allocate_info.level = RIN_VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocate_info.commandBufferCount = 1u;
+    result = vkAllocateCommandBuffers(device, &allocate_info, &command_buffer);
+    if (result != RIN_VK_SUCCESS) goto done;
+    memset(&begin_info, 0, sizeof(begin_info));
+    begin_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    result = vkBeginCommandBuffer(command_buffer, &begin_info);
+    if (result != RIN_VK_SUCCESS) goto done;
+
+    memset(&image_barrier, 0, sizeof(image_barrier));
+    image_barrier.sType = RIN_VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    image_barrier.srcStageMask = RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    image_barrier.dstStageMask = RIN_VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    image_barrier.dstAccessMask = RIN_VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    image_barrier.srcQueueFamilyIndex = RIN_VK_QUEUE_FAMILY_IGNORED;
+    image_barrier.dstQueueFamilyIndex = RIN_VK_QUEUE_FAMILY_IGNORED;
+    image_barrier.oldLayout = RIN_VK_IMAGE_LAYOUT_UNDEFINED;
+    image_barrier.newLayout =
+        RIN_VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    image_barrier.image = image;
+    image_barrier.subresourceRange.aspectMask = RIN_VK_IMAGE_ASPECT_DEPTH_BIT;
+    image_barrier.subresourceRange.levelCount = 1u;
+    image_barrier.subresourceRange.layerCount = 1u;
+    memset(&dependency_info, 0, sizeof(dependency_info));
+    dependency_info.sType = RIN_VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency_info.imageMemoryBarrierCount = 1u;
+    dependency_info.pImageMemoryBarriers = &image_barrier;
+    vkCmdPipelineBarrier2(command_buffer, &dependency_info);
+    result = vkEndCommandBuffer(command_buffer);
+    if (result != RIN_VK_SUCCESS) goto done;
+
+    memset(&fence_info, 0, sizeof(fence_info));
+    fence_info.sType = RIN_VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    result = vkCreateFence(device, &fence_info, NULL, &fence);
+    if (result != RIN_VK_SUCCESS) goto done;
+    memset(&submit_info, 0, sizeof(submit_info));
+    submit_info.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1u;
+    submit_info.pCommandBuffers = &command_buffer;
+    result = vkQueueSubmit(queue, 1u, &submit_info, (uint64_t)fence);
+    if (result != RIN_VK_SUCCESS) goto done;
+    result = vkWaitForFences(device, 1u, &fence, 1u, UINT64_MAX);
+
+done:
+    if (command_pool != 0u) vkDestroyCommandPool(device, command_pool, NULL);
+    if (fence != 0u) vkDestroyFence(device, fence, NULL);
+    if (image != 0u) vkDestroyImage(device, image, NULL);
+    if (memory != 0u) vkFreeMemory(device, memory, NULL);
+    return result;
+}
+
 int main(void) {
     RinVulkanWsiImageLayoutV1 layout_probe;
     RinGpuVulkanPhysicalDeviceV2 profile;
@@ -1676,6 +1797,8 @@ int main(void) {
             CHECK(vkGetDeviceProcAddr(device, "vkQueuePresentKHR") == NULL);
             vkGetDeviceQueue(device, 0u, 0u, &queue);
             CHECK(queue != NULL);
+            CHECK(transition_sampled_depth_image(device, queue) ==
+                  RIN_VK_SUCCESS);
 
             memset(&fence_create_info, 0, sizeof(fence_create_info));
             fence_create_info.sType = RIN_VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;

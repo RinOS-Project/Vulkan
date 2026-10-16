@@ -5192,6 +5192,7 @@ int main(void) {
     instance_initialized = 1u;
     CHECK(rin_gpu_vulkan_icd_bind_runtime(&runtime) == RIN_GPU_VULKAN_OK);
     runtime_bound = 1u;
+    memset(&software, 0, sizeof(software));
     CHECK(rin_gpu_vulkan_software_platform_init(
               &software, profile.iommu_domain_cookie, profile.device_epoch,
               profile.queue_families[0].queue_count +
