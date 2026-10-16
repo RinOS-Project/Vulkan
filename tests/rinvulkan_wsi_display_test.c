@@ -721,6 +721,8 @@ int main(void) {
     RinVkInstance instance = NULL;
     RinVkInstance foreign_instance = NULL;
     RinVkPhysicalDevice physical_devices[1];
+    RinVkFormatProperties image_format_features;
+    RinVkImageFormatProperties image_format_limits;
     RinVkDisplayPropertiesKHR display_properties[1];
     RinVkDisplayModePropertiesKHR mode_properties[2];
     RinVkDisplayModeCreateInfoKHR mode_create_info;
@@ -801,6 +803,7 @@ int main(void) {
     instance_initialized = 1u;
     CHECK(rin_gpu_vulkan_icd_bind_runtime(&runtime) == RIN_GPU_VULKAN_OK);
     runtime_bound = 1u;
+    memset(&software, 0, sizeof(software));
     CHECK(rin_gpu_vulkan_software_platform_init(
               &software, profile.iommu_domain_cookie, profile.device_epoch,
               profile.queue_families[0].queue_count,
@@ -1008,6 +1011,28 @@ int main(void) {
           RIN_VK_SUCCESS);
     CHECK(count == 1u);
     physical = physical_devices[0];
+
+    memset(&image_format_features, 0, sizeof(image_format_features));
+    vkGetPhysicalDeviceFormatProperties(
+        physical, RIN_VK_FORMAT_D32_SFLOAT, &image_format_features);
+    CHECK(image_format_features.optimalTilingFeatures ==
+              RIN_VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT &&
+          image_format_features.linearTilingFeatures == 0u &&
+          image_format_features.bufferFeatures == 0u);
+    memset(&image_format_limits, 0, sizeof(image_format_limits));
+    CHECK(vkGetPhysicalDeviceImageFormatProperties(
+              physical, RIN_VK_FORMAT_D32_SFLOAT, RIN_VK_IMAGE_TYPE_2D,
+              RIN_VK_IMAGE_TILING_OPTIMAL,
+              RIN_VK_IMAGE_USAGE_SAMPLED_BIT, 0u,
+              &image_format_limits) == RIN_VK_SUCCESS &&
+          image_format_limits.maxExtent.width == 4096u &&
+          image_format_limits.maxExtent.height == 4096u &&
+          image_format_limits.maxResourceSize != 0u);
+    CHECK(vkGetPhysicalDeviceImageFormatProperties(
+              physical, RIN_VK_FORMAT_D32_SFLOAT, RIN_VK_IMAGE_TYPE_2D,
+              RIN_VK_IMAGE_TILING_OPTIMAL,
+              RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, 0u,
+              &image_format_limits) == RIN_VK_ERROR_FORMAT_NOT_SUPPORTED);
 
     count = 0u;
     CHECK(vkGetPhysicalDeviceDisplayPropertiesKHR(physical, &count, NULL) ==
