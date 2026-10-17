@@ -4074,6 +4074,141 @@ static int routed_process_commands_v6_available(
     return product_v5 && product_v6_for_base(product_v5) != NULL;
 }
 
+static int process_graphics_packet_v6_compatible(
+        const RinVkSubmissionSlot* slot) {
+    RinGpuVulkanCommandBufferV1* command;
+    RinVkPipelineSlot* pipeline;
+    RinVkImageViewSlot* view;
+    RinVkImageSlot* image;
+    const RinGpuVulkanGraphicsPacketV1* packet;
+    if (!slot || !slot->owner || !slot->graphics_packet ||
+        slot->command_buffer_count != 1u || !slot->command_buffers[0] ||
+        slot->resource_count != 1u ||
+        submission_query_command_count(slot) != 0u)
+        return 0;
+    command = slot->command_buffers[0];
+    packet = slot->graphics_packet;
+    pipeline = pipeline_slot((RinVkDevice)(void*)slot->owner,
+                             command->bound_graphics_pipeline);
+    view = image_view_slot((RinVkDevice)(void*)slot->owner,
+                           (RinVkImageView)command->graphics_color_view);
+    image = view ? view->image : NULL;
+    if (!pipeline || pipeline->kind != RIN_VK_PIPELINE_KIND_GRAPHICS ||
+        pipeline->process_graphics_pipeline_token == 0u || !image ||
+        image->owner != slot->owner || !image->memory ||
+        image->process_resource_bound != 1u ||
+        image->memory_generation != image->memory->generation ||
+        image->memory->owner != slot->owner ||
+        image->memory->product_allocation != packet->color_allocation_handle ||
+        packet->color_offset != image->memory_offset ||
+        packet->color_size_bytes != image->memory_size ||
+        packet->width != image->width || packet->height != image->height ||
+        slot->resources[0].allocation_handle !=
+            image->memory->product_allocation ||
+        slot->resources[0].required_gpu_access !=
+            RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE ||
+        packet->vertex_allocation_handle != 0u ||
+        packet->vertex_offset != 0u || packet->vertex_size_bytes != 0u ||
+        pipeline->graphics_backend.vertex_binding_count != 0u ||
+        pipeline->graphics_backend.vertex_input_count != 0u ||
+        pipeline->graphics_backend.resource_count != 0u ||
+        pipeline->graphics_backend.primitive_topology !=
+            RIN_GPU_PRIMITIVE_TRIANGLE_LIST ||
+        pipeline->graphics_backend.blend_enabled != 0u ||
+        pipeline->graphics_backend.color_write_mask !=
+            RIN_GPU_COLOR_WRITE_ALL ||
+        pipeline->graphics_backend.cull_mode != RIN_GPU_CULL_NONE ||
+        packet->pipeline.vertex_binding_count != 0u ||
+        packet->pipeline.vertex_input_count != 0u ||
+        packet->pipeline.resource_count != 0u ||
+        packet->pipeline.blend_enabled != 0u ||
+        packet->pipeline.cull_mode != RIN_GPU_CULL_NONE ||
+        packet->pipeline.color_write_mask != RIN_GPU_COLOR_WRITE_ALL ||
+        command->graphics_vertex_buffer_bound != 0u ||
+        command->graphics_vertex_buffer != 0u ||
+        command->graphics_vertex_offset != 0u ||
+        packet->viewport_x != 0.0f || packet->viewport_y != 0.0f ||
+        packet->viewport_width != (float)image->width ||
+        packet->viewport_height != (float)image->height ||
+        packet->viewport_min_depth != 0.0f ||
+        packet->viewport_max_depth != 1.0f || packet->scissor_x != 0 ||
+        packet->scissor_y != 0 || packet->scissor_width != image->width ||
+        packet->scissor_height != image->height || packet->flags != 0u ||
+        packet->reserved != 0u || packet->vertex_count == 0u ||
+        packet->instance_count != 1u || packet->first_instance != 0u ||
+        !finite_graphics_float(packet->clear_red) ||
+        !finite_graphics_float(packet->clear_green) ||
+        !finite_graphics_float(packet->clear_blue) ||
+        !finite_graphics_float(packet->clear_alpha) ||
+        packet->clear_red < 0.0f || packet->clear_red > 1.0f ||
+        packet->clear_green < 0.0f || packet->clear_green > 1.0f ||
+        packet->clear_blue < 0.0f || packet->clear_blue > 1.0f ||
+        packet->clear_alpha < 0.0f || packet->clear_alpha > 1.0f)
+        return 0;
+    return 1;
+}
+
+static int build_process_graphics_commands_v1(
+        const RinVkSubmissionSlot* slot,
+        RinGpuBackendCommandV1 commands[3], uint32_t* command_count_out) {
+    RinGpuVulkanCommandBufferV1* command;
+    RinVkPipelineSlot* pipeline;
+    RinVkImageViewSlot* view;
+    RinVkImageSlot* image;
+    uint64_t image_cookie;
+    uint32_t image_index;
+    if (command_count_out) *command_count_out = 0u;
+    if (!commands || !command_count_out ||
+        !process_graphics_packet_v6_compatible(slot))
+        return RIN_VULKAN_PRODUCT_UNSUPPORTED;
+    command = slot->command_buffers[0];
+    pipeline = pipeline_slot((RinVkDevice)(void*)slot->owner,
+                             command->bound_graphics_pipeline);
+    view = image_view_slot((RinVkDevice)(void*)slot->owner,
+                           (RinVkImageView)command->graphics_color_view);
+    image = view->image;
+    image_index = (uint32_t)(image - g_images);
+    image_cookie = resource_handle(RIN_VK_IMAGE_TAG, image_index,
+                                   image->generation);
+    memset(commands, 0, sizeof(*commands) * 3u);
+    commands[0].type = RIN_GPU_BACKEND_COMMAND_BEGIN_RENDER_PASS;
+    commands[0].value.render_pass_begin.color_target_cookie = image_cookie;
+    commands[0].value.render_pass_begin.load_op = RIN_GPU_RENDER_CLEAR;
+    commands[0].value.render_pass_begin.store_op = RIN_GPU_RENDER_STORE;
+    commands[0].value.render_pass_begin.clear_red =
+        slot->graphics_packet->clear_red;
+    commands[0].value.render_pass_begin.clear_green =
+        slot->graphics_packet->clear_green;
+    commands[0].value.render_pass_begin.clear_blue =
+        slot->graphics_packet->clear_blue;
+    commands[0].value.render_pass_begin.clear_alpha =
+        slot->graphics_packet->clear_alpha;
+    commands[0].value.render_pass_begin.color_write_mask =
+        RIN_GPU_COLOR_WRITE_ALL;
+    commands[0].value.render_pass_begin.clear_region.x = 0;
+    commands[0].value.render_pass_begin.clear_region.y = 0;
+    commands[0].value.render_pass_begin.clear_region.width = image->width;
+    commands[0].value.render_pass_begin.clear_region.height = image->height;
+    commands[0].value.render_pass_begin.clear_region.enabled = 1u;
+
+    commands[1].type = RIN_GPU_BACKEND_COMMAND_DRAW;
+    commands[1].value.draw.pipeline_cookie =
+        pipeline->process_graphics_pipeline_token;
+    commands[1].value.draw.color_target_cookie = image_cookie;
+    commands[1].value.draw.vertex_count =
+        slot->graphics_packet->vertex_count;
+    commands[1].value.draw.instance_count =
+        slot->graphics_packet->instance_count;
+    commands[1].value.draw.first_vertex =
+        slot->graphics_packet->first_vertex;
+    commands[1].value.draw.first_instance =
+        slot->graphics_packet->first_instance;
+
+    commands[2].type = RIN_GPU_BACKEND_COMMAND_END_RENDER_PASS;
+    *command_count_out = 3u;
+    return RIN_VULKAN_PRODUCT_OK;
+}
+
 static int build_native_wait_list(
         const RinVkSubmissionSlot* slot,
         const RinVulkanProductPlatformV2* product_v2,
@@ -5349,6 +5484,7 @@ static int submit_canonical_process_commands(
         RinVulkanProductProcessSubmitReceiptV1* receipt_out) {
     RinGpuBackendCommandV1* commands = NULL;
     RinGpuBackendCommandV1 compute_command;
+    RinGpuBackendCommandV1 graphics_commands[3];
     RinVulkanProductPlatformV7* process_platform;
     RinVulkanProductPlatformV8* process_platform_v8;
     RinVulkanProductProcessComputeBindingV8 process_bindings[
@@ -5458,6 +5594,11 @@ static int submit_canonical_process_commands(
             slot->compute_packet->group_count_z;
         commands = &compute_command;
         command_count = 1u;
+    } else if (slot->graphics_packet) {
+        result = build_process_graphics_commands_v1(
+            slot, graphics_commands, &command_count);
+        if (result != RIN_VULKAN_PRODUCT_OK) return result;
+        commands = graphics_commands;
     } else {
         result = translate_routed_process_commands(
             slot, &commands, &command_count);
@@ -5495,6 +5636,7 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
     RinVulkanProductPlatformV3* product_v3;
     RinVulkanProductPlatformV6* product_v6;
     RinVkPipelineSlot* process_compute_pipeline = NULL;
+    RinVkPipelineSlot* process_graphics_pipeline = NULL;
     RinVulkanProductSubmissionV2 submission_v2;
     RinVulkanProductSubmissionV2 immutable_submission_v2;
     RinVulkanProductSubmissionV3 submission_v3;
@@ -5552,10 +5694,25 @@ static RinVkResult submit_slot_to_product(RinVkSubmissionSlot* slot) {
         process_compute_pipeline = pipeline_slot(
             (RinVkDevice)(void*)slot->owner,
             slot->command_buffers[0]->dispatch_compute_pipeline);
+    if (slot->graphics_packet && slot->command_buffer_count == 1u &&
+        slot->command_buffers[0])
+        process_graphics_pipeline = pipeline_slot(
+            (RinVkDevice)(void*)slot->owner,
+            slot->command_buffers[0]->bound_graphics_pipeline);
+    if (slot->graphics_packet && process_graphics_pipeline &&
+        process_graphics_pipeline->process_graphics_pipeline_token != 0u &&
+        (!product_v6 || query_command_count != 0u ||
+         !process_graphics_packet_v6_compatible(slot))) {
+        release_product();
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    }
     use_process_commands_v6 = product_v6 && !slot->command_stream_packet &&
-        !slot->graphics_packet &&
-        ((!slot->compute_packet &&
+        ((!slot->graphics_packet && !slot->compute_packet &&
           routed_process_commands_v6_available(slot)) ||
+         (slot->graphics_packet && query_command_count == 0u &&
+          process_graphics_pipeline &&
+          process_graphics_pipeline->process_graphics_pipeline_token != 0u &&
+          process_graphics_packet_v6_compatible(slot)) ||
          (query_command_count == 0u && slot->compute_packet &&
           process_compute_pipeline &&
           process_compute_pipeline->process_compute_pipeline_token != 0u));

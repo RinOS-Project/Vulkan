@@ -201,7 +201,9 @@ typedef struct TestProductAdapters {
     RinVulkanProductResourceV1 canonical_last_resources[
         RIN_GPU_PROCESS_MAX_RESOURCES_V1];
     uint32_t canonical_dispatch_calls;
+    uint32_t canonical_graphics_draw_calls;
     RinGpuBackendCommandV1 canonical_last_command;
+    RinGpuBackendCommandV1 canonical_last_graphics_commands[3];
     uint32_t canonical_resolve_command_count;
     uint32_t canonical_graphics_barrier_count;
     RinGpuBackendGraphicsBarrierV2 canonical_last_graphics_barrier;
@@ -1101,6 +1103,83 @@ static int test_submit_process_commands_v6(
         (resource_count != 0u && !resources) ||
         queue_id >= adapters->software->queue_count)
         return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    if (command_count == 3u &&
+        commands[0].type == RIN_GPU_BACKEND_COMMAND_BEGIN_RENDER_PASS &&
+        commands[1].type == RIN_GPU_BACKEND_COMMAND_DRAW &&
+        commands[2].type == RIN_GPU_BACKEND_COMMAND_END_RENDER_PASS) {
+        const RinGpuBackendRenderPassBeginV1* begin =
+            &commands[0].value.render_pass_begin;
+        const RinGpuBackendDrawV1* draw = &commands[1].value.draw;
+        const TestResourceBinding* target_binding;
+        if (commands[0].reserved != 0u || commands[1].reserved != 0u ||
+            commands[2].reserved != 0u ||
+            begin->color_target_cookie == 0u ||
+            begin->load_op != RIN_GPU_RENDER_CLEAR ||
+            begin->store_op != RIN_GPU_RENDER_STORE ||
+            begin->flags != 0u || begin->reserved != 0u ||
+            begin->reserved1 != 0u ||
+            begin->color_write_mask != RIN_GPU_COLOR_WRITE_ALL ||
+            begin->clear_region.x != 0 || begin->clear_region.y != 0 ||
+            begin->clear_region.width == 0u ||
+            begin->clear_region.height == 0u ||
+            begin->clear_region.enabled != 1u ||
+            begin->clear_region.reserved != 0u ||
+            begin->color_target_cookie != draw->color_target_cookie ||
+            draw->pipeline_cookie !=
+                adapters->sdk_last_graphics_pipeline_token ||
+            draw->pipeline_cookie == 0u || draw->bind_group_cookie != 0u ||
+            draw->mip_level != 0u || draw->array_layer != 0u ||
+            draw->vertex_count == 0u || draw->instance_count != 1u ||
+            draw->first_instance != 0u || draw->reserved0 != 0u ||
+            draw->reserved1 != 0u)
+            return RIN_VULKAN_PRODUCT_PROTOCOL;
+        target_binding = test_find_resource_binding(
+            adapters, begin->color_target_cookie);
+        if (!target_binding || resource_count != 1u || !resources ||
+            resources[0].allocation_handle !=
+                target_binding->allocation_handle ||
+            (resources[0].required_gpu_access &
+             (RIN_VULKAN_PRODUCT_MEMORY_GPU_READ |
+              RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE)) !=
+                (RIN_VULKAN_PRODUCT_MEMORY_GPU_READ |
+                 RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE))
+            return RIN_VULKAN_PRODUCT_PROTOCOL;
+        memcpy(adapters->canonical_last_graphics_commands, commands,
+               sizeof(adapters->canonical_last_graphics_commands));
+        ++adapters->canonical_graphics_draw_calls;
+        memset(&packet, 0, sizeof(packet));
+        packet.struct_size = sizeof(packet);
+        packet.version = RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_3;
+        packet.product_queue_id = queue_id;
+        packet.op_count = 1u;
+        packet.operations[0].type =
+            RIN_GPU_VULKAN_TRANSFER_OP_MEMORY_BARRIER;
+        packet.operations[0].barrier.src_stage_mask =
+            RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS;
+        packet.operations[0].barrier.dst_stage_mask =
+            RIN_GPU_VULKAN_BARRIER_STAGE_ALL_COMMANDS;
+        memset(&submission, 0, sizeof(submission));
+        result = adapters->software->platform.prepare_submission(
+            adapters->software->platform.context, queue_id,
+            (uint64_t)(uintptr_t)&packet, &submission);
+        if (result != RIN_VULKAN_PRODUCT_OK) return result;
+        result = adapters->software->platform.submit(
+            adapters->software->platform.context, &submission, NULL, 0u);
+        if (result != RIN_VULKAN_PRODUCT_OK) return result;
+        memset(receipt_out, 0, sizeof(*receipt_out));
+        receipt_out->struct_size = sizeof(*receipt_out);
+        receipt_out->version =
+            RIN_VULKAN_PRODUCT_PROCESS_SUBMIT_RECEIPT_V1_VERSION;
+        receipt_out->queue_id = submission.queue_id;
+        receipt_out->sequence = submission.sequence;
+        receipt_out->completion_value = submission.completion_value;
+        receipt_out->device_epoch = submission.device_epoch;
+        receipt_out->iommu_map_generation =
+            submission.iommu_map_generation;
+        ++adapters->canonical_submit_calls;
+        adapters->canonical_command_count = command_count;
+        return RIN_VULKAN_PRODUCT_OK;
+    }
     if (command_count == 1u &&
         commands[0].type == RIN_GPU_BACKEND_COMMAND_DISPATCH) {
         const RinGpuBackendDispatchV1* dispatch =
@@ -3227,7 +3306,8 @@ cleanup:
 }
 
 static int test_process_graphics_pipeline_create(
-        RinVkDevice device, TestProductAdapters* adapters) {
+        RinVkDevice device, RinVkQueue queue,
+        TestProductAdapters* adapters) {
     uint32_t vertex_words[64], fragment_words[64];
     const size_t vertex_word_count =
         make_resource_free_vertex_module(vertex_words);
@@ -3250,10 +3330,31 @@ static int test_process_graphics_pipeline_create(
     RinVkPipelineColorBlendStateCreateInfo blend;
     RinVkPipelineRenderingCreateInfo rendering;
     RinVkGraphicsPipelineCreateInfo create_info;
+    RinVkImageCreateInfo image_info;
+    RinVkImage image = 0u;
+    RinVkMemoryRequirements image_requirements;
+    RinVkMemoryAllocateInfo image_allocation_info;
+    RinVkDeviceMemory image_memory = 0u;
+    RinVkImageViewCreateInfo image_view_info;
+    RinVkImageView image_view = 0u;
+    RinVkCommandPoolCreateInfo command_pool_info;
+    RinVkCommandPool command_pool = 0u;
+    RinVkCommandBufferAllocateInfo command_allocate_info;
+    RinVkCommandBuffer command_buffers[2] = {NULL, NULL};
+    RinVkCommandBufferBeginInfo command_begin_info;
+    RinVkImageMemoryBarrier2 layout_barrier;
+    RinVkDependencyInfo dependency_info;
+    RinVkRenderingAttachmentInfo rendering_attachment;
+    RinVkRenderingInfo rendering_info;
+    RinVkSubmitInfo submit_info;
     RinVkPipeline pipeline = 0u;
     uint32_t sdk_shader_before;
     uint32_t sdk_graphics_before;
     uint32_t sdk_destroy_before;
+    uint32_t sdk_submit_before;
+    uint32_t canonical_submit_before;
+    uint32_t canonical_draw_before;
+    const TestResourceBinding* target_binding;
     int ok = 0;
 
 #define PROCESS_GRAPHICS_CHECK(condition) do { \
@@ -3265,7 +3366,7 @@ static int test_process_graphics_pipeline_create(
     } \
 } while (0)
 
-    if (!device || !adapters || !adapters->v10) return -1;
+    if (!device || !queue || !adapters || !adapters->v10) return -1;
     sdk_shader_before = adapters->sdk_shader_module_create_calls;
     sdk_graphics_before = adapters->sdk_graphics_pipeline_create_calls;
     sdk_destroy_before = adapters->sdk_object_destroy_calls;
@@ -3366,6 +3467,169 @@ static int test_process_graphics_pipeline_create(
                                RIN_SHADER_STAGE_FRAGMENT);
     PROCESS_GRAPHICS_CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v10(
                                adapters->v10) == RIN_GPU_VULKAN_BUSY);
+
+    memset(&image_info, 0, sizeof(image_info));
+    image_info.sType = RIN_VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = RIN_VK_IMAGE_TYPE_2D;
+    image_info.format = RIN_VK_FORMAT_R8G8B8A8_UNORM;
+    image_info.extent.width = 4u;
+    image_info.extent.height = 4u;
+    image_info.extent.depth = 1u;
+    image_info.mipLevels = 1u;
+    image_info.arrayLayers = 1u;
+    image_info.samples = RIN_VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = RIN_VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    image_info.sharingMode = RIN_VK_SHARING_MODE_EXCLUSIVE;
+    PROCESS_GRAPHICS_CHECK(vkCreateImage(
+        device, &image_info, NULL, &image) == RIN_VK_SUCCESS);
+    vkGetImageMemoryRequirements(device, image, &image_requirements);
+    PROCESS_GRAPHICS_CHECK(image_requirements.size != 0u &&
+                           (image_requirements.memoryTypeBits & 1u) != 0u);
+    memset(&image_allocation_info, 0, sizeof(image_allocation_info));
+    image_allocation_info.sType =
+        RIN_VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    image_allocation_info.allocationSize = image_requirements.size;
+    image_allocation_info.memoryTypeIndex = 0u;
+    PROCESS_GRAPHICS_CHECK(vkAllocateMemory(
+        device, &image_allocation_info, NULL, &image_memory) ==
+        RIN_VK_SUCCESS);
+    PROCESS_GRAPHICS_CHECK(vkBindImageMemory(
+        device, image, image_memory, 0u) == RIN_VK_SUCCESS);
+    memset(&image_view_info, 0, sizeof(image_view_info));
+    image_view_info.sType = RIN_VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    image_view_info.image = image;
+    image_view_info.viewType = RIN_VK_IMAGE_VIEW_TYPE_2D;
+    image_view_info.format = RIN_VK_FORMAT_R8G8B8A8_UNORM;
+    image_view_info.subresourceRange.aspectMask =
+        RIN_VK_IMAGE_ASPECT_COLOR_BIT;
+    image_view_info.subresourceRange.levelCount = 1u;
+    image_view_info.subresourceRange.layerCount = 1u;
+    PROCESS_GRAPHICS_CHECK(vkCreateImageView(
+        device, &image_view_info, NULL, &image_view) == RIN_VK_SUCCESS);
+    memset(&command_pool_info, 0, sizeof(command_pool_info));
+    command_pool_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    command_pool_info.queueFamilyIndex = 0u;
+    PROCESS_GRAPHICS_CHECK(vkCreateCommandPool(
+        device, &command_pool_info, NULL, &command_pool) == RIN_VK_SUCCESS);
+    memset(&command_allocate_info, 0, sizeof(command_allocate_info));
+    command_allocate_info.sType =
+        RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    command_allocate_info.commandPool = command_pool;
+    command_allocate_info.level = RIN_VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    command_allocate_info.commandBufferCount = 2u;
+    PROCESS_GRAPHICS_CHECK(vkAllocateCommandBuffers(
+        device, &command_allocate_info, command_buffers) == RIN_VK_SUCCESS);
+    memset(&command_begin_info, 0, sizeof(command_begin_info));
+    command_begin_info.sType =
+        RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    PROCESS_GRAPHICS_CHECK(vkBeginCommandBuffer(
+        command_buffers[0], &command_begin_info) == RIN_VK_SUCCESS);
+    memset(&layout_barrier, 0, sizeof(layout_barrier));
+    layout_barrier.sType = RIN_VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    layout_barrier.dstStageMask =
+        RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    layout_barrier.dstAccessMask =
+        RIN_VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    layout_barrier.srcQueueFamilyIndex = RIN_VK_QUEUE_FAMILY_IGNORED;
+    layout_barrier.dstQueueFamilyIndex = RIN_VK_QUEUE_FAMILY_IGNORED;
+    layout_barrier.oldLayout = RIN_VK_IMAGE_LAYOUT_UNDEFINED;
+    layout_barrier.newLayout = RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    layout_barrier.image = image;
+    layout_barrier.subresourceRange.aspectMask =
+        RIN_VK_IMAGE_ASPECT_COLOR_BIT;
+    layout_barrier.subresourceRange.levelCount = 1u;
+    layout_barrier.subresourceRange.layerCount = 1u;
+    memset(&dependency_info, 0, sizeof(dependency_info));
+    dependency_info.sType = RIN_VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency_info.imageMemoryBarrierCount = 1u;
+    dependency_info.pImageMemoryBarriers = &layout_barrier;
+    vkCmdPipelineBarrier2(command_buffers[0], &dependency_info);
+    PROCESS_GRAPHICS_CHECK(vkEndCommandBuffer(command_buffers[0]) ==
+                           RIN_VK_SUCCESS);
+    memset(&submit_info, 0, sizeof(submit_info));
+    submit_info.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1u;
+    submit_info.pCommandBuffers = &command_buffers[0];
+    PROCESS_GRAPHICS_CHECK(vkQueueSubmit(queue, 1u, &submit_info, 0u) ==
+                           RIN_VK_SUCCESS);
+    PROCESS_GRAPHICS_CHECK(vkQueueWaitIdle(queue) == RIN_VK_SUCCESS);
+
+    PROCESS_GRAPHICS_CHECK(vkBeginCommandBuffer(
+        command_buffers[1], &command_begin_info) == RIN_VK_SUCCESS);
+    memset(&rendering_attachment, 0, sizeof(rendering_attachment));
+    rendering_attachment.sType =
+        RIN_VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    rendering_attachment.imageView = image_view;
+    rendering_attachment.imageLayout =
+        RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    rendering_attachment.loadOp = RIN_VK_ATTACHMENT_LOAD_OP_CLEAR;
+    rendering_attachment.storeOp = RIN_VK_ATTACHMENT_STORE_OP_STORE;
+    rendering_attachment.clearValue.color.float32[0] = 0.125f;
+    rendering_attachment.clearValue.color.float32[1] = 0.25f;
+    rendering_attachment.clearValue.color.float32[2] = 0.5f;
+    rendering_attachment.clearValue.color.float32[3] = 1.0f;
+    memset(&rendering_info, 0, sizeof(rendering_info));
+    rendering_info.sType = RIN_VK_STRUCTURE_TYPE_RENDERING_INFO;
+    rendering_info.renderArea.extent.width = 4u;
+    rendering_info.renderArea.extent.height = 4u;
+    rendering_info.layerCount = 1u;
+    rendering_info.colorAttachmentCount = 1u;
+    rendering_info.pColorAttachments = &rendering_attachment;
+    vkCmdBeginRendering(command_buffers[1], &rendering_info);
+    vkCmdBindPipeline(command_buffers[1],
+                      RIN_VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vkCmdDraw(command_buffers[1], 3u, 1u, 0u, 0u);
+    vkCmdEndRendering(command_buffers[1]);
+    PROCESS_GRAPHICS_CHECK(vkEndCommandBuffer(command_buffers[1]) ==
+                           RIN_VK_SUCCESS);
+    sdk_submit_before = adapters->sdk_process_submit_calls;
+    canonical_submit_before = adapters->canonical_submit_calls;
+    canonical_draw_before = adapters->canonical_graphics_draw_calls;
+    submit_info.pCommandBuffers = &command_buffers[1];
+    PROCESS_GRAPHICS_CHECK(vkQueueSubmit(queue, 1u, &submit_info, 0u) ==
+                           RIN_VK_SUCCESS);
+    PROCESS_GRAPHICS_CHECK(vkQueueWaitIdle(queue) == RIN_VK_SUCCESS);
+    target_binding = test_find_resource_binding(adapters, image);
+    PROCESS_GRAPHICS_CHECK(target_binding != NULL &&
+                           adapters->sdk_process_submit_calls ==
+                               sdk_submit_before + 1u &&
+                           adapters->canonical_submit_calls ==
+                               canonical_submit_before + 1u &&
+                           adapters->canonical_graphics_draw_calls ==
+                               canonical_draw_before + 1u &&
+                           adapters->canonical_command_count == 3u &&
+                           adapters->sdk_last_submit_resource_count == 1u &&
+                           adapters->sdk_last_submit_resources[0]
+                                   .allocation_handle ==
+                               target_binding->allocation_handle &&
+                           (adapters->sdk_last_submit_resources[0]
+                                    .required_gpu_access &
+                            (RIN_VULKAN_PRODUCT_MEMORY_GPU_READ |
+                             RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE)) ==
+                               (RIN_VULKAN_PRODUCT_MEMORY_GPU_READ |
+                                RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE));
+    PROCESS_GRAPHICS_CHECK(
+        adapters->canonical_last_graphics_commands[0].type ==
+            RIN_GPU_BACKEND_COMMAND_BEGIN_RENDER_PASS &&
+        adapters->canonical_last_graphics_commands[0]
+                .value.render_pass_begin.color_target_cookie == image &&
+        adapters->canonical_last_graphics_commands[0]
+                .value.render_pass_begin.clear_region.width == 4u &&
+        adapters->canonical_last_graphics_commands[0]
+                .value.render_pass_begin.clear_region.height == 4u &&
+        adapters->canonical_last_graphics_commands[1].type ==
+            RIN_GPU_BACKEND_COMMAND_DRAW &&
+        adapters->canonical_last_graphics_commands[1]
+                .value.draw.pipeline_cookie ==
+            adapters->sdk_last_graphics_pipeline_token &&
+        adapters->canonical_last_graphics_commands[1]
+                .value.draw.color_target_cookie == image &&
+        adapters->canonical_last_graphics_commands[1]
+                .value.draw.vertex_count == 3u &&
+        adapters->canonical_last_graphics_commands[2].type ==
+            RIN_GPU_BACKEND_COMMAND_END_RENDER_PASS);
+
     memset(&unsupported_binding, 0, sizeof(unsupported_binding));
     unsupported_binding.stride = 16u;
     unsupported_binding.inputRate = RIN_VK_VERTEX_INPUT_RATE_VERTEX;
@@ -3387,6 +3651,10 @@ static int test_process_graphics_pipeline_create(
     ok = 1;
 
 cleanup:
+    if (command_pool != 0u) vkDestroyCommandPool(device, command_pool, NULL);
+    if (image_view != 0u) vkDestroyImageView(device, image_view, NULL);
+    if (image != 0u) vkDestroyImage(device, image, NULL);
+    if (image_memory != 0u) vkFreeMemory(device, image_memory, NULL);
     if (pipeline != 0u) vkDestroyPipeline(device, pipeline, NULL);
     if (layout != 0u) vkDestroyPipelineLayout(device, layout, NULL);
     if (fragment_module != 0u)
@@ -6257,7 +6525,7 @@ int main(void) {
         CHECK(test_process_compute_pipeline_dispatch(
                   device, queue, &product_adapters) == 0);
         CHECK(test_process_graphics_pipeline_create(
-                  device, &product_adapters) == 0);
+                  device, queue, &product_adapters) == 0);
         CHECK(test_process_compute_descriptor_dispatch(
                   device, queue, physical, &product_adapters) == 0);
         CHECK(test_process_timestamp_query(
