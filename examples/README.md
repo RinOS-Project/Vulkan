@@ -4,8 +4,9 @@
 ordinary RinRuntime window → Compositor surface path. It obtains the current
 versioned callback table from `wnd_get_gpu_surface_ops_v1`, passes it to
 `vkCreateRinOSNativeWindowSurfaceV1`, selects a surface-compatible queue,
-checks the reported capabilities/format/FIFO mode, and submits one cleared
-swapchain image through `vkQueuePresentKHR`. It then dispatches Runtime
+checks the reported capabilities/format/FIFO mode, and submits one
+RGBA8 triangle rendered with dynamic rendering through `vkQueuePresentKHR`.
+It then dispatches Runtime
 Compositor completions and waits up to ten seconds for the damage/commit
 response before teardown. The image layout transitions use the reported
 synchronization2 extension/feature; the example has no legacy or software
@@ -26,10 +27,10 @@ it composes the SDK-backed V1–V5 memory/resource adapter with the V4
 logical-to-physical queue mapping and V6–V8 canonical process-submit adapter.
 The bootstrap also binds V9 process-query and V10 resource-free graphics-
 pipeline lifecycle callbacks, and tears V10 down before its V9–V6 parents. The
-one-frame example still uses the transfer/clear/readback operations supported
-by its canonical path; graphics DRAW and operations without a real provider
-remain outside this application's live acceptance and unsupported profiles
-remain errors.
+example explicitly queries/enables synchronization2 and dynamic rendering,
+creates a resource-free RGBA8 triangle-list pipeline, records CLEAR/STORE plus
+three-vertex DRAW, then transitions the application-owned image for the normal
+Compositor transfer/readback. Unsupported features remain errors.
 It completes queue work before handing pixels to the ordinary Compositor
 surface rather than pretending process-submit supports native wait
 semaphores. This is not a `VK_KHR_display` direct-scanout path. The example
@@ -55,8 +56,9 @@ on RinRuntime's Compositor import path; physical-display WSI/provider
 registration and final scanout remain separate and are not claimed complete.
 
 The user-app target now has a process-local catalog/runtime and V1–V10
-SDK-backed memory/submit/query/graphics-pipeline bootstrap. The current frame
-remains the supported transfer example. It
+SDK-backed memory/submit/query/graphics-pipeline bootstrap. Its source records
+a single triangle frame, but the host example fixture uses fake Vulkan entry
+points and does not demonstrate execution through the SDK/OS-Core backend. It
 reports real SDK/Vulkan errors; it does not manufacture a device, install a
 compatibility renderer, or fall back to the software backend. Building the
 artifact verifies the application source and app-link graph, not that the

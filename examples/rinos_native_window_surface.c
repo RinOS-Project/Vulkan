@@ -522,7 +522,284 @@ static void record_image_barrier(RinVkCommandBuffer command_buffer,
     vkCmdPipelineBarrier2(command_buffer, &dependency);
 }
 
-static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
+static int emit_example_spirv_instruction(
+        uint32_t* words, size_t capacity, size_t* word_count,
+        uint16_t opcode, uint16_t instruction_words,
+        const uint32_t* operands) {
+    uint16_t index;
+    if (!words || !word_count || instruction_words == 0u ||
+        *word_count > capacity ||
+        (size_t)instruction_words > capacity - *word_count ||
+        (instruction_words > 1u && !operands))
+        return 0;
+    words[(*word_count)++] = ((uint32_t)instruction_words << 16u) | opcode;
+    for (index = 1u; index < instruction_words; ++index)
+        words[(*word_count)++] = operands[index - 1u];
+    return 1;
+}
+
+static size_t build_triangle_vertex_spirv(uint32_t* words,
+                                          size_t word_capacity) {
+    size_t count = 5u;
+    uint32_t op[6];
+#define EXAMPLE_SPIRV_EMIT(opcode, words_count) \
+    do { \
+        if (!emit_example_spirv_instruction( \
+                words, word_capacity, &count, (opcode), (words_count), op)) \
+            return 0u; \
+    } while (0)
+    if (!words || word_capacity < 5u) return 0u;
+    words[0] = UINT32_C(0x07230203);
+    words[1] = UINT32_C(0x00010300);
+    words[2] = 0u;
+    words[3] = 22u;
+    words[4] = 0u;
+    op[0] = 1u;
+    EXAMPLE_SPIRV_EMIT(17u, 2u);                    /* Shader capability */
+    op[0] = 0u; op[1] = 3u;
+    EXAMPLE_SPIRV_EMIT(14u, 3u);                    /* Vulkan memory model */
+    op[0] = 0u; op[1] = 13u; op[2] = UINT32_C(0x6e69616d);
+    op[3] = 0u; op[4] = 11u; op[5] = 12u;
+    EXAMPLE_SPIRV_EMIT(15u, 7u);                    /* Vertex main */
+    op[0] = 11u; op[1] = 11u; op[2] = 0u;
+    EXAMPLE_SPIRV_EMIT(71u, 4u);                    /* Position builtin */
+    op[0] = 12u; op[1] = 11u; op[2] = 42u;
+    EXAMPLE_SPIRV_EMIT(71u, 4u);                    /* VertexIndex builtin */
+    op[0] = 1u;
+    EXAMPLE_SPIRV_EMIT(19u, 2u);                    /* void */
+    op[0] = 2u; op[1] = 32u;
+    EXAMPLE_SPIRV_EMIT(22u, 3u);                    /* float */
+    op[0] = 3u; op[1] = 32u; op[2] = 1u;
+    EXAMPLE_SPIRV_EMIT(21u, 4u);                    /* signed i32 */
+    op[0] = 4u; op[1] = 2u; op[2] = 4u;
+    EXAMPLE_SPIRV_EMIT(23u, 4u);                    /* vec4 */
+    op[0] = 5u; op[1] = 3u; op[2] = 4u;
+    EXAMPLE_SPIRV_EMIT(32u, 4u);                    /* output pointer */
+    op[0] = 6u; op[1] = 1u; op[2] = 3u;
+    EXAMPLE_SPIRV_EMIT(32u, 4u);                    /* input pointer */
+    op[0] = 7u; op[1] = 1u;
+    EXAMPLE_SPIRV_EMIT(33u, 3u);                    /* function type */
+    op[0] = 2u; op[1] = 8u; op[2] = UINT32_C(0xbf800000);
+    EXAMPLE_SPIRV_EMIT(43u, 4u);                    /* -1.0 */
+    op[0] = 2u; op[1] = 9u; op[2] = 0u;
+    EXAMPLE_SPIRV_EMIT(43u, 4u);                    /* 0.0 */
+    op[0] = 2u; op[1] = 10u; op[2] = UINT32_C(0x3f800000);
+    EXAMPLE_SPIRV_EMIT(43u, 4u);                    /* 1.0 */
+    op[0] = 5u; op[1] = 11u; op[2] = 3u;
+    EXAMPLE_SPIRV_EMIT(59u, 4u);                    /* output variable */
+    op[0] = 6u; op[1] = 12u; op[2] = 1u;
+    EXAMPLE_SPIRV_EMIT(59u, 4u);                    /* vertex index */
+    op[0] = 1u; op[1] = 13u; op[2] = 0u; op[3] = 7u;
+    EXAMPLE_SPIRV_EMIT(54u, 5u);                    /* function */
+    op[0] = 14u;
+    EXAMPLE_SPIRV_EMIT(248u, 2u);                   /* label */
+    op[0] = 3u; op[1] = 15u; op[2] = 12u;
+    EXAMPLE_SPIRV_EMIT(61u, 4u);                    /* load VertexIndex */
+    op[0] = 2u; op[1] = 16u; op[2] = 15u;
+    EXAMPLE_SPIRV_EMIT(111u, 4u);                   /* signed i32 to f32 */
+    op[0] = 2u; op[1] = 17u; op[2] = 16u; op[3] = 10u;
+    EXAMPLE_SPIRV_EMIT(131u, 5u);                   /* x = index - 1 */
+    op[0] = 2u; op[1] = 18u; op[2] = 16u; op[3] = 16u;
+    EXAMPLE_SPIRV_EMIT(133u, 5u);                   /* index squared */
+    op[0] = 2u; op[1] = 19u; op[2] = 18u; op[3] = 16u;
+    EXAMPLE_SPIRV_EMIT(131u, 5u);
+    op[0] = 2u; op[1] = 20u; op[2] = 19u; op[3] = 10u;
+    EXAMPLE_SPIRV_EMIT(131u, 5u);                   /* y = i*i - i - 1 */
+    op[0] = 4u; op[1] = 21u; op[2] = 17u; op[3] = 20u;
+    op[4] = 9u; op[5] = 10u;
+    EXAMPLE_SPIRV_EMIT(80u, 7u);                    /* position vector */
+    op[0] = 11u; op[1] = 21u;
+    EXAMPLE_SPIRV_EMIT(62u, 3u);                    /* store position */
+    EXAMPLE_SPIRV_EMIT(253u, 1u);                   /* return */
+    EXAMPLE_SPIRV_EMIT(56u, 1u);                    /* function end */
+#undef EXAMPLE_SPIRV_EMIT
+    return count;
+}
+
+static size_t build_triangle_fragment_spirv(uint32_t* words,
+                                            size_t word_capacity) {
+    size_t count = 5u;
+    uint32_t op[6];
+#define EXAMPLE_SPIRV_EMIT(opcode, words_count) \
+    do { \
+        if (!emit_example_spirv_instruction( \
+                words, word_capacity, &count, (opcode), (words_count), op)) \
+            return 0u; \
+    } while (0)
+    if (!words || word_capacity < 5u) return 0u;
+    words[0] = UINT32_C(0x07230203);
+    words[1] = UINT32_C(0x00010300);
+    words[2] = 0u;
+    words[3] = 15u;
+    words[4] = 0u;
+    op[0] = 1u;
+    EXAMPLE_SPIRV_EMIT(17u, 2u);                    /* Shader capability */
+    op[0] = 0u; op[1] = 3u;
+    EXAMPLE_SPIRV_EMIT(14u, 3u);                    /* Vulkan memory model */
+    op[0] = 4u; op[1] = 12u; op[2] = UINT32_C(0x6e69616d);
+    op[3] = 0u; op[4] = 10u;
+    EXAMPLE_SPIRV_EMIT(15u, 6u);                    /* Fragment main */
+    op[0] = 12u; op[1] = 7u;
+    EXAMPLE_SPIRV_EMIT(16u, 3u);                    /* OriginUpperLeft */
+    op[0] = 10u; op[1] = 30u; op[2] = 0u;
+    EXAMPLE_SPIRV_EMIT(71u, 4u);                    /* output location 0 */
+    op[0] = 1u;
+    EXAMPLE_SPIRV_EMIT(19u, 2u);                    /* void */
+    op[0] = 2u; op[1] = 32u;
+    EXAMPLE_SPIRV_EMIT(22u, 3u);                    /* float */
+    op[0] = 3u; op[1] = 2u; op[2] = 4u;
+    EXAMPLE_SPIRV_EMIT(23u, 4u);                    /* vec4 */
+    op[0] = 4u; op[1] = 3u; op[2] = 3u;
+    EXAMPLE_SPIRV_EMIT(32u, 4u);                    /* output pointer */
+    op[0] = 5u; op[1] = 1u;
+    EXAMPLE_SPIRV_EMIT(33u, 3u);                    /* function type */
+    op[0] = 2u; op[1] = 6u; op[2] = UINT32_C(0x3f000000);
+    EXAMPLE_SPIRV_EMIT(43u, 4u);                    /* 0.5 */
+    op[0] = 2u; op[1] = 7u; op[2] = UINT32_C(0x3f800000);
+    EXAMPLE_SPIRV_EMIT(43u, 4u);                    /* 1.0 */
+    op[0] = 2u; op[1] = 8u; op[2] = UINT32_C(0x3e800000);
+    EXAMPLE_SPIRV_EMIT(43u, 4u);                    /* 0.25 */
+    op[0] = 2u; op[1] = 9u; op[2] = UINT32_C(0x3f800000);
+    EXAMPLE_SPIRV_EMIT(43u, 4u);                    /* 1.0 */
+    op[0] = 4u; op[1] = 10u; op[2] = 3u;
+    EXAMPLE_SPIRV_EMIT(59u, 4u);                    /* output variable */
+    op[0] = 1u; op[1] = 12u; op[2] = 0u; op[3] = 5u;
+    EXAMPLE_SPIRV_EMIT(54u, 5u);                    /* function */
+    op[0] = 13u;
+    EXAMPLE_SPIRV_EMIT(248u, 2u);                   /* label */
+    op[0] = 3u; op[1] = 14u; op[2] = 6u; op[3] = 8u;
+    op[4] = 6u; op[5] = 7u;
+    EXAMPLE_SPIRV_EMIT(80u, 7u);                    /* color vector */
+    op[0] = 10u; op[1] = 14u;
+    EXAMPLE_SPIRV_EMIT(62u, 3u);                    /* store color */
+    EXAMPLE_SPIRV_EMIT(253u, 1u);                   /* return */
+    EXAMPLE_SPIRV_EMIT(56u, 1u);                    /* function end */
+#undef EXAMPLE_SPIRV_EMIT
+    return count;
+}
+
+static RinVkResult create_example_triangle_pipeline(
+        RinVkDevice device, RinVkExtent2D extent,
+        RinVkShaderModule* vertex_module_out,
+        RinVkShaderModule* fragment_module_out,
+        RinVkPipelineLayout* layout_out, RinVkPipeline* pipeline_out) {
+    uint32_t vertex_words[128];
+    uint32_t fragment_words[96];
+    RinVkShaderModuleCreateInfo shader_info;
+    RinVkPipelineLayoutCreateInfo layout_info;
+    RinVkPipelineShaderStageCreateInfo stages[2];
+    RinVkPipelineVertexInputStateCreateInfo vertex_input;
+    RinVkPipelineInputAssemblyStateCreateInfo assembly;
+    RinVkPipelineViewportStateCreateInfo viewport_state;
+    RinVkViewport viewport;
+    RinVkRect2D scissor;
+    RinVkPipelineRasterizationStateCreateInfo raster;
+    RinVkPipelineMultisampleStateCreateInfo multisample;
+    RinVkPipelineColorBlendAttachmentState blend_attachment;
+    RinVkPipelineColorBlendStateCreateInfo blend;
+    RinVkPipelineRenderingCreateInfo rendering;
+    RinVkGraphicsPipelineCreateInfo pipeline_info;
+    static const int32_t color_format = RIN_VK_FORMAT_R8G8B8A8_UNORM;
+    const size_t vertex_word_count = build_triangle_vertex_spirv(
+        vertex_words, sizeof(vertex_words) / sizeof(vertex_words[0]));
+    const size_t fragment_word_count = build_triangle_fragment_spirv(
+        fragment_words, sizeof(fragment_words) / sizeof(fragment_words[0]));
+    RinVkResult result;
+
+    if (!device || !vertex_module_out || !fragment_module_out || !layout_out ||
+        !pipeline_out || extent.width == 0u || extent.height == 0u ||
+        vertex_word_count == 0u || fragment_word_count == 0u)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    *vertex_module_out = 0u;
+    *fragment_module_out = 0u;
+    *layout_out = 0u;
+    *pipeline_out = 0u;
+    memset(&shader_info, 0, sizeof(shader_info));
+    shader_info.sType = RIN_VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    shader_info.codeSize = vertex_word_count * sizeof(vertex_words[0]);
+    shader_info.pCode = vertex_words;
+    result = vkCreateShaderModule(device, &shader_info, NULL,
+                                  vertex_module_out);
+    if (result != RIN_VK_SUCCESS) return result;
+    shader_info.codeSize = fragment_word_count * sizeof(fragment_words[0]);
+    shader_info.pCode = fragment_words;
+    result = vkCreateShaderModule(device, &shader_info, NULL,
+                                  fragment_module_out);
+    if (result != RIN_VK_SUCCESS) return result;
+
+    memset(&layout_info, 0, sizeof(layout_info));
+    layout_info.sType = RIN_VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    result = vkCreatePipelineLayout(device, &layout_info, NULL, layout_out);
+    if (result != RIN_VK_SUCCESS) return result;
+
+    memset(stages, 0, sizeof(stages));
+    stages[0].sType = RIN_VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = RIN_VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = *vertex_module_out;
+    stages[0].pName = "main";
+    stages[1].sType = RIN_VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = RIN_VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = *fragment_module_out;
+    stages[1].pName = "main";
+    memset(&vertex_input, 0, sizeof(vertex_input));
+    vertex_input.sType =
+        RIN_VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    memset(&assembly, 0, sizeof(assembly));
+    assembly.sType =
+        RIN_VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    assembly.topology = RIN_VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    memset(&viewport, 0, sizeof(viewport));
+    viewport.width = (float)extent.width;
+    viewport.height = (float)extent.height;
+    viewport.maxDepth = 1.0f;
+    memset(&scissor, 0, sizeof(scissor));
+    scissor.extent = extent;
+    memset(&viewport_state, 0, sizeof(viewport_state));
+    viewport_state.sType =
+        RIN_VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewport_state.viewportCount = 1u;
+    viewport_state.pViewports = &viewport;
+    viewport_state.scissorCount = 1u;
+    viewport_state.pScissors = &scissor;
+    memset(&raster, 0, sizeof(raster));
+    raster.sType =
+        RIN_VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    raster.polygonMode = RIN_VK_POLYGON_MODE_FILL;
+    raster.frontFace = RIN_VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    raster.lineWidth = 1.0f;
+    memset(&multisample, 0, sizeof(multisample));
+    multisample.sType =
+        RIN_VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisample.rasterizationSamples = RIN_VK_SAMPLE_COUNT_1_BIT;
+    memset(&blend_attachment, 0, sizeof(blend_attachment));
+    blend_attachment.colorWriteMask = 15u;
+    memset(&blend, 0, sizeof(blend));
+    blend.sType = RIN_VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    blend.attachmentCount = 1u;
+    blend.pAttachments = &blend_attachment;
+    memset(&rendering, 0, sizeof(rendering));
+    rendering.sType = RIN_VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    rendering.colorAttachmentCount = 1u;
+    rendering.pColorAttachmentFormats = &color_format;
+    memset(&pipeline_info, 0, sizeof(pipeline_info));
+    pipeline_info.sType =
+        RIN_VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipeline_info.pNext = &rendering;
+    pipeline_info.stageCount = 2u;
+    pipeline_info.pStages = stages;
+    pipeline_info.pVertexInputState = &vertex_input;
+    pipeline_info.pInputAssemblyState = &assembly;
+    pipeline_info.pViewportState = &viewport_state;
+    pipeline_info.pRasterizationState = &raster;
+    pipeline_info.pMultisampleState = &multisample;
+    pipeline_info.pColorBlendState = &blend;
+    pipeline_info.layout = *layout_out;
+    pipeline_info.basePipelineIndex = -1;
+    return vkCreateGraphicsPipelines(device, 0u, 1u, &pipeline_info, NULL,
+                                    pipeline_out);
+}
+
+static int present_one_triangle_frame(RinVkPhysicalDevice physical_device,
                                    uint32_t queue_family,
                                    RinVkSurfaceKHR surface,
                                    RinRuntimeGuiHandle window,
@@ -531,7 +808,8 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
                                    RinVulkanExampleFrameCompletion* completion) {
     static const char* const device_extensions[] = {
         RIN_VK_KHR_SWAPCHAIN_EXTENSION,
-        RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION
+        RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION,
+        RIN_VK_KHR_DYNAMIC_RENDERING_EXTENSION
     };
     RinVkSurfaceCapabilitiesKHR capabilities;
     RinVkSurfaceFormatKHR* formats = NULL;
@@ -540,7 +818,7 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
     RinVkDeviceQueueCreateInfo queue_info;
     RinVkDeviceCreateInfo device_info;
     RinVkPhysicalDeviceFeatures2 physical_features;
-    RinVkPhysicalDeviceSynchronization2Features synchronization2;
+    RinVkPhysicalDeviceVulkan13Features vulkan13_features;
     RinVkSwapchainCreateInfoKHR swapchain_info;
     RinVkFenceCreateInfo fence_info;
     RinVkCommandPoolCreateInfo pool_info;
@@ -548,8 +826,9 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
     RinVkCommandBufferBeginInfo begin_info;
     RinVkSubmitInfo submit_info;
     RinVkPresentInfoKHR present_info;
-    RinVkClearColorValue clear_color;
-    RinVkImageSubresourceRange clear_range;
+    RinVkImageViewCreateInfo image_view_info;
+    RinVkRenderingAttachmentInfo rendering_attachment;
+    RinVkRenderingInfo rendering_info;
     RinVkResult present_result = RIN_VK_ERROR_UNKNOWN;
     RinVkResult swapchain_present_result = RIN_VK_ERROR_UNKNOWN;
     RinVkDevice device = NULL;
@@ -558,6 +837,11 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
     RinVkFence image_acquired = 0u;
     RinVkCommandPool command_pool = NULL;
     RinVkCommandBuffer command_buffer = NULL;
+    RinVkImageView image_view = 0u;
+    RinVkShaderModule vertex_module = 0u;
+    RinVkShaderModule fragment_module = 0u;
+    RinVkPipelineLayout pipeline_layout = 0u;
+    RinVkPipeline graphics_pipeline = 0u;
     RinVkSurfaceFormatKHR selected_format = {0};
     RinVkExtent2D extent;
     RinVkResult vk_result;
@@ -598,9 +882,9 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
          capabilities.minImageCount > capabilities.maxImageCount) ||
         capabilities.maxImageArrayLayers == 0u ||
         (capabilities.supportedUsageFlags &
-         (RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+         (RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
           RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) !=
-            (RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+            (RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
              RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT) ||
         capabilities.currentTransform == 0u ||
         (capabilities.supportedTransforms & capabilities.currentTransform) ==
@@ -727,15 +1011,22 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
         fprintf(stderr, "device does not expose VK_KHR_synchronization2\n");
         goto cleanup;
     }
-    memset(&synchronization2, 0, sizeof(synchronization2));
-    synchronization2.sType =
-        RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
+    if (!device_extension_available(
+            physical_device, RIN_VK_KHR_DYNAMIC_RENDERING_EXTENSION)) {
+        fprintf(stderr, "device does not expose VK_KHR_dynamic_rendering\n");
+        goto cleanup;
+    }
+    memset(&vulkan13_features, 0, sizeof(vulkan13_features));
+    vulkan13_features.sType =
+        RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     memset(&physical_features, 0, sizeof(physical_features));
     physical_features.sType = RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-    physical_features.pNext = &synchronization2;
+    physical_features.pNext = &vulkan13_features;
     vkGetPhysicalDeviceFeatures2(physical_device, &physical_features);
-    if (synchronization2.synchronization2 != 1u) {
-        fprintf(stderr, "device does not enable the synchronization2 feature\n");
+    if (vulkan13_features.synchronization2 != 1u ||
+        vulkan13_features.dynamicRendering != 1u) {
+        fprintf(stderr,
+                "device lacks synchronization2 or dynamic-rendering support\n");
         goto cleanup;
     }
 
@@ -748,8 +1039,9 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
         queue_info.pQueuePriorities = &queue_priority;
         memset(&device_info, 0, sizeof(device_info));
         device_info.sType = RIN_VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-        synchronization2.synchronization2 = 1u;
-        device_info.pNext = &synchronization2;
+        vulkan13_features.synchronization2 = 1u;
+        vulkan13_features.dynamicRendering = 1u;
+        device_info.pNext = &vulkan13_features;
         device_info.queueCreateInfoCount = 1u;
         device_info.pQueueCreateInfos = &queue_info;
         device_info.enabledExtensionCount =
@@ -786,10 +1078,9 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
     swapchain_info.imageColorSpace = selected_format.colorSpace;
     swapchain_info.imageExtent = extent;
     swapchain_info.imageArrayLayers = 1u;
-    /* RinOS native-window present explicitly copies the completed Vulkan
-     * image to a host-readable staging buffer before importing it into the
-     * Compositor's SHM slot. */
-    swapchain_info.imageUsage = RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+    /* Render into the application-owned image; the ordinary Compositor
+     * consumer still performs an explicit transfer-src readback afterward. */
+    swapchain_info.imageUsage = RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                                 RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     swapchain_info.imageSharingMode = RIN_VK_SHARING_MODE_EXCLUSIVE;
     swapchain_info.preTransform = capabilities.currentTransform;
@@ -832,6 +1123,17 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
             report_vk_failure("vkGetSwapchainImagesKHR", vk_result);
         else
             fprintf(stderr, "swapchain image enumeration returned none\n");
+        goto cleanup;
+    }
+
+    vk_result = create_example_triangle_pipeline(
+        device, extent, &vertex_module, &fragment_module, &pipeline_layout,
+        &graphics_pipeline);
+    if (vk_result != RIN_VK_SUCCESS || graphics_pipeline == 0u) {
+        if (vk_result != RIN_VK_SUCCESS)
+            report_vk_failure("create_example_triangle_pipeline", vk_result);
+        else
+            fprintf(stderr, "graphics pipeline creation returned null\n");
         goto cleanup;
     }
 
@@ -883,6 +1185,23 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
         fprintf(stderr, "acquired swapchain image index is out of range\n");
         goto cleanup;
     }
+    memset(&image_view_info, 0, sizeof(image_view_info));
+    image_view_info.sType = RIN_VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    image_view_info.image = swapchain_images[image_index];
+    image_view_info.viewType = RIN_VK_IMAGE_VIEW_TYPE_2D;
+    image_view_info.format = selected_format.format;
+    image_view_info.subresourceRange.aspectMask =
+        RIN_VK_IMAGE_ASPECT_COLOR_BIT;
+    image_view_info.subresourceRange.levelCount = 1u;
+    image_view_info.subresourceRange.layerCount = 1u;
+    vk_result = vkCreateImageView(device, &image_view_info, NULL, &image_view);
+    if (vk_result != RIN_VK_SUCCESS || image_view == 0u) {
+        if (vk_result != RIN_VK_SUCCESS)
+            report_vk_failure("vkCreateImageView(swapchain image)", vk_result);
+        else
+            fprintf(stderr, "vkCreateImageView returned null\n");
+        goto cleanup;
+    }
     vk_result = vkWaitForFences(device, 1u, &image_acquired, 1u, UINT64_MAX);
     if (vk_result != RIN_VK_SUCCESS) {
         report_vk_failure("vkWaitForFences(image-acquired)", vk_result);
@@ -899,28 +1218,39 @@ static int present_one_clear_frame(RinVkPhysicalDevice physical_device,
     }
     record_image_barrier(command_buffer, swapchain_images[image_index],
                          RIN_VK_IMAGE_LAYOUT_UNDEFINED,
-                         RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0u,
-                         RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                         RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0u,
+                         RIN_VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                          RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                         RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT);
-    memset(&clear_color, 0, sizeof(clear_color));
-    clear_color.float32[0] = 0.08f;
-    clear_color.float32[1] = 0.18f;
-    clear_color.float32[2] = 0.42f;
-    clear_color.float32[3] = 1.0f;
-    memset(&clear_range, 0, sizeof(clear_range));
-    clear_range.aspectMask = RIN_VK_IMAGE_ASPECT_COLOR_BIT;
-    clear_range.levelCount = 1u;
-    clear_range.layerCount = 1u;
-    vkCmdClearColorImage(command_buffer, swapchain_images[image_index],
-                         RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                         &clear_color, 1u, &clear_range);
+                         RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
+    memset(&rendering_attachment, 0, sizeof(rendering_attachment));
+    rendering_attachment.sType =
+        RIN_VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    rendering_attachment.imageView = image_view;
+    rendering_attachment.imageLayout =
+        RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    rendering_attachment.loadOp = RIN_VK_ATTACHMENT_LOAD_OP_CLEAR;
+    rendering_attachment.storeOp = RIN_VK_ATTACHMENT_STORE_OP_STORE;
+    rendering_attachment.clearValue.color.float32[0] = 0.08f;
+    rendering_attachment.clearValue.color.float32[1] = 0.18f;
+    rendering_attachment.clearValue.color.float32[2] = 0.42f;
+    rendering_attachment.clearValue.color.float32[3] = 1.0f;
+    memset(&rendering_info, 0, sizeof(rendering_info));
+    rendering_info.sType = RIN_VK_STRUCTURE_TYPE_RENDERING_INFO;
+    rendering_info.renderArea.extent = extent;
+    rendering_info.layerCount = 1u;
+    rendering_info.colorAttachmentCount = 1u;
+    rendering_info.pColorAttachments = &rendering_attachment;
+    vkCmdBeginRendering(command_buffer, &rendering_info);
+    vkCmdBindPipeline(command_buffer, RIN_VK_PIPELINE_BIND_POINT_GRAPHICS,
+                      graphics_pipeline);
+    vkCmdDraw(command_buffer, 3u, 1u, 0u, 0u);
+    vkCmdEndRendering(command_buffer);
     record_image_barrier(command_buffer, swapchain_images[image_index],
-                         RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                          RIN_VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                         RIN_VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                         RIN_VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                          RIN_VK_ACCESS_2_MEMORY_READ_BIT,
-                         RIN_VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                          RIN_VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
     vk_result = vkEndCommandBuffer(command_buffer);
     if (vk_result != RIN_VK_SUCCESS) {
@@ -986,6 +1316,16 @@ cleanup:
     }
     if (device && command_pool != NULL)
         vkDestroyCommandPool(device, command_pool, NULL);
+    if (device && image_view != 0u)
+        vkDestroyImageView(device, image_view, NULL);
+    if (device && graphics_pipeline != 0u)
+        vkDestroyPipeline(device, graphics_pipeline, NULL);
+    if (device && pipeline_layout != 0u)
+        vkDestroyPipelineLayout(device, pipeline_layout, NULL);
+    if (device && fragment_module != 0u)
+        vkDestroyShaderModule(device, fragment_module, NULL);
+    if (device && vertex_module != 0u)
+        vkDestroyShaderModule(device, vertex_module, NULL);
     if (device && image_acquired != 0u)
         vkDestroyFence(device, image_acquired, NULL);
     free(swapchain_images);
@@ -1189,14 +1529,14 @@ static int rinos_native_window_surface_main(void) {
                             "runtime/catalog physical-device ordering diverged\n");
                     goto cleanup;
                 }
-                exit_status = present_one_clear_frame(
+                exit_status = present_one_triangle_frame(
                     physical_devices[device_index], family, surface, window,
                     g_rinos_vulkan_catalog.devices[device_index].device_id,
                     g_rinos_vulkan_catalog.devices[device_index]
                         .device_generation,
                     &g_native_window_completion);
 #else
-                exit_status = present_one_clear_frame(
+                exit_status = present_one_triangle_frame(
                     physical_devices[device_index], family, surface, window,
                     0u, 0u, &g_native_window_completion);
 #endif
