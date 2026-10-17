@@ -27,10 +27,16 @@ extern "C" {
     RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V1_MAX_QUEUES
 #define RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V5_VERSION UINT32_C(5)
 #define RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V5_MAX_QUERIES UINT32_C(2048)
+#define RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V6_VERSION UINT32_C(6)
+#define RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V6_MAX_GRAPHICS_PIPELINES \
+    UINT32_C(64)
 #define RIN_VULKAN_RINOS_PROCESS_RESOURCE_COOKIE_TAG UINT64_C(0x5261)
 /* Reserved process-token tag for the private shader-module child associated
  * with a RinVk pipeline token. */
 #define RIN_VULKAN_RINOS_PROCESS_SHADER_MODULE_TOKEN_TAG UINT64_C(0x5260)
+#define RIN_VULKAN_RINOS_PROCESS_GRAPHICS_VERTEX_TOKEN_TAG UINT64_C(0x5262)
+#define RIN_VULKAN_RINOS_PROCESS_GRAPHICS_FRAGMENT_TOKEN_TAG \
+    UINT64_C(0x5263)
 
 typedef struct RinVulkanRinOSProcessQueueV1 {
     uint32_t queue_id;
@@ -151,6 +157,31 @@ typedef struct RinVulkanRinOSProcessSubmitBackendV5 {
     uint64_t reserved[2];
 } RinVulkanRinOSProcessSubmitBackendV5;
 
+typedef struct RinVulkanRinOSProcessGraphicsPipelineV6 {
+    uint64_t pipeline_token;
+    uint64_t vertex_shader_token;
+    uint64_t fragment_shader_token;
+    uint32_t pipeline_active;
+    uint32_t vertex_shader_active;
+    uint32_t fragment_shader_active;
+    uint32_t reserved;
+} RinVulkanRinOSProcessGraphicsPipelineV6;
+
+/* V6 preserves V5 query/submit ownership and appends an independent,
+ * process-owned resource-free graphics-pipeline table. Partial cleanup state
+ * is retained so a failed SDK destroy can be retried without losing tokens. */
+typedef struct RinVulkanRinOSProcessSubmitBackendV6 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint32_t state;
+    volatile uint32_t lock;
+    RinVulkanRinOSProcessSubmitBackendV5 submit_backend;
+    RinVulkanProductPlatformV10 platform_v10;
+    RinVulkanRinOSProcessGraphicsPipelineV6 graphics_pipelines[
+        RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V6_MAX_GRAPHICS_PIPELINES];
+    uint64_t reserved[2];
+} RinVulkanRinOSProcessSubmitBackendV6;
+
 /* Initialize caller-zeroed storage for the current RinOS process. Each queue
  * ID is bound through the authenticated RinOS SDK; the returned V6 callback
  * submits canonical RinGPU records through the process-submit syscall. The
@@ -238,6 +269,20 @@ rin_vulkan_rinos_process_submit_backend_v5_platform_v9(
     RinVulkanRinOSProcessSubmitBackendV5* backend);
 int rin_vulkan_rinos_process_submit_backend_v5_detach(
     RinVulkanRinOSProcessSubmitBackendV5* backend);
+
+int rin_vulkan_rinos_process_submit_backend_v6_init(
+    RinVulkanRinOSProcessSubmitBackendV6* backend,
+    RinVulkanProductPlatformV5* parent, uint64_t device_id,
+    uint64_t device_generation,
+    const RinVulkanRinOSProcessQueueMapV4* mappings,
+    uint32_t mapping_count);
+int rin_vulkan_rinos_process_submit_backend_v6_valid(
+    const RinVulkanRinOSProcessSubmitBackendV6* backend);
+RinVulkanProductPlatformV10*
+rin_vulkan_rinos_process_submit_backend_v6_platform_v10(
+    RinVulkanRinOSProcessSubmitBackendV6* backend);
+int rin_vulkan_rinos_process_submit_backend_v6_detach(
+    RinVulkanRinOSProcessSubmitBackendV6* backend);
 
 #ifdef __cplusplus
 }

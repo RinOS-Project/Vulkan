@@ -446,6 +446,7 @@ typedef struct RinVkPipelineSlot {
     uint8_t* shader_ir;
     uint8_t* fragment_shader_ir;
     uint64_t process_compute_pipeline_token;
+    uint64_t process_graphics_pipeline_token;
 } RinVkPipelineSlot;
 
 typedef struct RinVkQueryValue {
@@ -649,6 +650,7 @@ static uintptr_t g_product_binding_v6;
 static uintptr_t g_product_binding_v7;
 static uintptr_t g_product_binding_v8;
 static uintptr_t g_product_binding_v9;
+static uintptr_t g_product_binding_v10;
 static uint32_t g_active_product_calls;
 static volatile uint64_t g_next_process_bind_group_token = UINT64_C(1);
 static volatile uint64_t g_next_process_query_token = UINT64_C(1);
@@ -1462,6 +1464,52 @@ static RinVulkanProductPlatformV9* product_v9_for_base(
         return NULL;
     platform = (RinVulkanProductPlatformV9*)binding;
     return platform->base == base ? platform : NULL;
+}
+
+static RinVulkanProductPlatformV10* product_v10_for_base(
+        const RinVulkanProductPlatformV9* base) {
+    const uintptr_t binding =
+        __atomic_load_n(&g_product_binding_v10, __ATOMIC_ACQUIRE);
+    RinVulkanProductPlatformV10* platform;
+    if (binding == 0u || binding == RIN_VK_ICD_BINDING_TRANSITION)
+        return NULL;
+    platform = (RinVulkanProductPlatformV10*)binding;
+    return platform->base == base ? platform : NULL;
+}
+
+/* Keep the V10 adapter pinned by the same product-call lease used by the
+ * callback. A V7 process pipeline chain without V10 is reported to the caller
+ * as a missing process graphics provider, never silently downgraded. */
+static RinVulkanProductPlatformV10* acquire_process_graphics_pipeline_platform(
+        int* process_platform_required) {
+    RinVulkanProductPlatformV1* product = acquire_product();
+    RinVulkanProductPlatformV2* product_v2;
+    RinVulkanProductPlatformV3* product_v3;
+    RinVulkanProductPlatformV4* product_v4;
+    RinVulkanProductPlatformV5* product_v5;
+    RinVulkanProductPlatformV6* product_v6;
+    RinVulkanProductPlatformV7* product_v7;
+    RinVulkanProductPlatformV8* product_v8;
+    RinVulkanProductPlatformV9* product_v9;
+    RinVulkanProductPlatformV10* product_v10;
+    if (process_platform_required) *process_platform_required = 0;
+    if (!product) return NULL;
+    product_v2 = product_v2_for_base(product);
+    product_v3 = product_v2 ? product_v3_for_base(product_v2) : NULL;
+    product_v4 = product_v3 ? product_v4_for_base(product_v3) : NULL;
+    product_v5 = product_v4 ? product_v5_for_base(product_v4) : NULL;
+    product_v6 = product_v5 ? product_v6_for_base(product_v5) : NULL;
+    product_v7 = product_v6 ? product_v7_for_base(product_v6) : NULL;
+    if (!product_v7) {
+        release_product();
+        return NULL;
+    }
+    if (process_platform_required) *process_platform_required = 1;
+    product_v8 = product_v8_for_base(product_v7);
+    product_v9 = product_v8 ? product_v9_for_base(product_v8) : NULL;
+    product_v10 = product_v9 ? product_v10_for_base(product_v9) : NULL;
+    if (!product_v10) release_product();
+    return product_v10;
 }
 
 /* Holds one active product call until the returned V9 query callback finishes.
@@ -3167,6 +3215,14 @@ static int pipeline_slots_active(void) {
     for (index = 0u; index < RIN_VK_MAX_PIPELINES; ++index)
         if (__atomic_load_n(&g_pipelines[index].state,
                             __ATOMIC_ACQUIRE) != 0u)
+            return 1;
+    return 0;
+}
+
+static int process_graphics_pipeline_slots_active(void) {
+    uint32_t index;
+    for (index = 0u; index < RIN_VK_MAX_PIPELINES; ++index)
+        if (g_pipelines[index].process_graphics_pipeline_token != 0u)
             return 1;
     return 0;
 }
@@ -5911,6 +5967,7 @@ static void clear_pipeline_slot(RinVkPipelineSlot* slot) {
     slot->shader_ir = NULL;
     slot->fragment_shader_ir = NULL;
     slot->process_compute_pipeline_token = 0u;
+    slot->process_graphics_pipeline_token = 0u;
     __atomic_store_n(&slot->state, 0u, __ATOMIC_RELEASE);
 }
 
@@ -5947,6 +6004,45 @@ static int destroy_process_compute_pipeline(RinVkPipelineSlot* pipeline) {
     return result;
 }
 
+static int destroy_process_graphics_pipeline(RinVkPipelineSlot* pipeline) {
+    RinVulkanProductPlatformV1* product;
+    RinVulkanProductPlatformV2* product_v2;
+    RinVulkanProductPlatformV3* product_v3;
+    RinVulkanProductPlatformV4* product_v4;
+    RinVulkanProductPlatformV5* product_v5;
+    RinVulkanProductPlatformV6* product_v6;
+    RinVulkanProductPlatformV7* product_v7;
+    RinVulkanProductPlatformV8* product_v8;
+    RinVulkanProductPlatformV9* product_v9;
+    RinVulkanProductPlatformV10* process_platform;
+    uint64_t token;
+    int result;
+    if (!pipeline) return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    token = pipeline->process_graphics_pipeline_token;
+    if (token == 0u) return RIN_VULKAN_PRODUCT_OK;
+    product = acquire_product();
+    if (!product) return RIN_VULKAN_PRODUCT_STATE;
+    product_v2 = product_v2_for_base(product);
+    product_v3 = product_v2 ? product_v3_for_base(product_v2) : NULL;
+    product_v4 = product_v3 ? product_v4_for_base(product_v3) : NULL;
+    product_v5 = product_v4 ? product_v5_for_base(product_v4) : NULL;
+    product_v6 = product_v5 ? product_v6_for_base(product_v5) : NULL;
+    product_v7 = product_v6 ? product_v7_for_base(product_v6) : NULL;
+    product_v8 = product_v7 ? product_v8_for_base(product_v7) : NULL;
+    product_v9 = product_v8 ? product_v9_for_base(product_v8) : NULL;
+    process_platform = product_v9 ? product_v10_for_base(product_v9) : NULL;
+    if (!process_platform) {
+        release_product();
+        return RIN_VULKAN_PRODUCT_STATE;
+    }
+    result = process_platform->destroy_process_graphics_pipeline(
+        process_platform->context, token);
+    release_product();
+    if (result == RIN_VULKAN_PRODUCT_OK)
+        pipeline->process_graphics_pipeline_token = 0u;
+    return result;
+}
+
 static int retry_pending_process_compute_pipeline_destroys(
         struct RinVkDevice_T* device) {
     uint32_t index;
@@ -5958,6 +6054,27 @@ static int retry_pending_process_compute_pipeline_destroys(
             pipeline->owner != device)
             continue;
         result = destroy_process_compute_pipeline(pipeline);
+        if (result == RIN_VULKAN_PRODUCT_OK) {
+            clear_pipeline_slot(pipeline);
+        } else if (result != RIN_VULKAN_PRODUCT_BUSY &&
+                   first_error == RIN_VULKAN_PRODUCT_OK) {
+            first_error = result;
+        }
+    }
+    return first_error;
+}
+
+static int retry_pending_process_graphics_pipeline_destroys(
+        struct RinVkDevice_T* device) {
+    uint32_t index;
+    int first_error = RIN_VULKAN_PRODUCT_OK;
+    for (index = 0u; index < RIN_VK_MAX_PIPELINES; ++index) {
+        RinVkPipelineSlot* pipeline = &g_pipelines[index];
+        int result;
+        if (__atomic_load_n(&pipeline->state, __ATOMIC_ACQUIRE) != 4u ||
+            pipeline->owner != device)
+            continue;
+        result = destroy_process_graphics_pipeline(pipeline);
         if (result == RIN_VULKAN_PRODUCT_OK) {
             clear_pipeline_slot(pipeline);
         } else if (result != RIN_VULKAN_PRODUCT_BUSY &&
@@ -5980,6 +6097,31 @@ static int cleanup_device_process_compute_pipelines(
             pipeline->process_compute_pipeline_token == 0u)
             continue;
         if (destroy_process_compute_pipeline(pipeline) !=
+            RIN_VULKAN_PRODUCT_OK) {
+            sync_unlock();
+            return 0;
+        }
+    }
+    sync_unlock();
+    return 1;
+}
+
+static int cleanup_device_process_graphics_pipelines(
+        struct RinVkDevice_T* device) {
+    uint32_t index;
+    if (!device) return 0;
+    sync_lock();
+    for (index = 0u; index < RIN_VK_MAX_PIPELINES; ++index) {
+        RinVkPipelineSlot* pipeline = &g_pipelines[index];
+        const uint32_t state =
+            __atomic_load_n(&pipeline->state, __ATOMIC_ACQUIRE);
+        if (state == 0u || pipeline->owner != device) continue;
+        if (state == 2u) {
+            sync_unlock();
+            return 0;
+        }
+        if (pipeline->process_graphics_pipeline_token == 0u) continue;
+        if (destroy_process_graphics_pipeline(pipeline) !=
             RIN_VULKAN_PRODUCT_OK) {
             sync_unlock();
             return 0;
@@ -6968,6 +7110,11 @@ static RinVkResult maintain_device_submissions(struct RinVkDevice_T* device) {
         sync_unlock();
         return map_product_result(result);
     }
+    result = retry_pending_process_graphics_pipeline_destroys(device);
+    if (result != RIN_VULKAN_PRODUCT_OK) {
+        sync_unlock();
+        return map_product_result(result);
+    }
     if (!submission_slots_active() ||
         !device_product_submissions_active(device)) {
         sync_unlock();
@@ -7031,6 +7178,11 @@ static RinVkResult maintain_device_submissions(struct RinVkDevice_T* device) {
         clear_submission_slot(slot);
     }
     result = retry_pending_process_compute_pipeline_destroys(device);
+    if (result != RIN_VULKAN_PRODUCT_OK) {
+        sync_unlock();
+        return map_product_result(result);
+    }
+    result = retry_pending_process_graphics_pipeline_destroys(device);
     if (result != RIN_VULKAN_PRODUCT_OK) {
         sync_unlock();
         return map_product_result(result);
@@ -7863,6 +8015,7 @@ int rin_gpu_vulkan_icd_unbind_product_platform_v9(
     if (platform->struct_size != sizeof(*platform) ||
         platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V9_VERSION ||
         !platform->base ||
+        __atomic_load_n(&g_product_binding_v10, __ATOMIC_ACQUIRE) != 0u ||
         __atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
         query_pool_slots_active()) {
         __atomic_store_n(&g_product_binding_v9, (uintptr_t)platform,
@@ -7870,6 +8023,62 @@ int rin_gpu_vulkan_icd_unbind_product_platform_v9(
         return RIN_GPU_VULKAN_BUSY;
     }
     __atomic_store_n(&g_product_binding_v9, 0u, __ATOMIC_RELEASE);
+    return RIN_GPU_VULKAN_OK;
+}
+
+int rin_gpu_vulkan_icd_bind_product_platform_v10(
+        RinVulkanProductPlatformV10* platform) {
+    uintptr_t expected = 0u;
+    uintptr_t v9_binding;
+    if (!platform || (uintptr_t)platform == RIN_VK_ICD_BINDING_TRANSITION ||
+        platform->struct_size != sizeof(*platform) ||
+        platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V10_VERSION ||
+        !platform->base || !platform->context ||
+        !platform->create_process_graphics_pipeline ||
+        !platform->destroy_process_graphics_pipeline ||
+        !wsi_zero_words(platform->reserved, 2u))
+        return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    if (!__atomic_compare_exchange_n(&g_product_binding_v10, &expected,
+                                    RIN_VK_ICD_BINDING_TRANSITION, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        return RIN_GPU_VULKAN_BUSY;
+    v9_binding =
+        __atomic_load_n(&g_product_binding_v9, __ATOMIC_ACQUIRE);
+    if (v9_binding == 0u ||
+        v9_binding == RIN_VK_ICD_BINDING_TRANSITION ||
+        v9_binding != (uintptr_t)platform->base ||
+        !platform->base->base ||
+        __atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
+        process_graphics_pipeline_slots_active()) {
+        __atomic_store_n(&g_product_binding_v10, 0u, __ATOMIC_RELEASE);
+        return RIN_GPU_VULKAN_BUSY;
+    }
+    __atomic_store_n(&g_product_binding_v10, (uintptr_t)platform,
+                     __ATOMIC_RELEASE);
+    return RIN_GPU_VULKAN_OK;
+}
+
+int rin_gpu_vulkan_icd_unbind_product_platform_v10(
+        RinVulkanProductPlatformV10* platform) {
+    uintptr_t expected;
+    if (!platform) return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    expected = (uintptr_t)platform;
+    if (!__atomic_compare_exchange_n(
+            &g_product_binding_v10, &expected,
+            RIN_VK_ICD_BINDING_TRANSITION, 0, __ATOMIC_ACQ_REL,
+            __ATOMIC_RELAXED))
+        return expected == 0u ? RIN_GPU_VULKAN_NOT_INITIALIZED
+                              : RIN_GPU_VULKAN_BUSY;
+    if (platform->struct_size != sizeof(*platform) ||
+        platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V10_VERSION ||
+        !platform->base ||
+        __atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
+        process_graphics_pipeline_slots_active()) {
+        __atomic_store_n(&g_product_binding_v10, (uintptr_t)platform,
+                         __ATOMIC_RELEASE);
+        return RIN_GPU_VULKAN_BUSY;
+    }
+    __atomic_store_n(&g_product_binding_v10, 0u, __ATOMIC_RELEASE);
     return RIN_GPU_VULKAN_OK;
 }
 
@@ -12258,6 +12467,10 @@ void RIN_VKAPI_CALL vkDestroyDevice(RinVkDevice device,
         return;
     }
     if (!cleanup_device_process_compute_pipelines(slot)) {
+        __atomic_store_n(&slot->state, 1u, __ATOMIC_RELEASE);
+        return;
+    }
+    if (!cleanup_device_process_graphics_pipelines(slot)) {
         __atomic_store_n(&slot->state, 1u, __ATOMIC_RELEASE);
         return;
     }
@@ -19657,6 +19870,7 @@ static RinVkResult create_graphics_pipeline_one(
     RinGpuVulkanVertexInputAttributeV1 attributes[RIN_GPU_MAX_VERTEX_ATTRIBUTES];
     RinGpuVulkanGraphicsStateV1 state;
     RinGpuVulkanGraphicsPipelinePlanV1 plan;
+    RinVulkanProductPlatformV10* process_platform = NULL;
     RinSpirvTranslationInfoV1 vertex_translation;
     RinSpirvTranslationInfoV1 fragment_translation;
     uint32_t* vertex_spirv = NULL;
@@ -19666,6 +19880,9 @@ static RinVkResult create_graphics_pipeline_one(
     size_t vertex_spirv_size = 0u, fragment_spirv_size = 0u;
     size_t vertex_ir_size, fragment_ir_size;
     uint32_t binding_count = 0u, attribute_count, index, slot_index = 0u;
+    uint64_t pipeline_cookie = 0u;
+    int process_platform_required = 0;
+    int process_result = RIN_VULKAN_PRODUCT_OK;
     int translated;
     RinVkResult result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
 
@@ -19859,13 +20076,38 @@ static RinVkResult create_graphics_pipeline_one(
     fragment_ir_size = ((const RinShaderHeaderV1*)(const void*)fragment_ir)->total_size;
     if (vertex_ir_size < sizeof(RinShaderHeaderV1) || vertex_ir_size > RIN_SHADER_MAX_SOURCE_BYTES ||
         fragment_ir_size < sizeof(RinShaderHeaderV1) || fragment_ir_size > RIN_SHADER_MAX_SOURCE_BYTES) goto done;
+    process_platform =
+        acquire_process_graphics_pipeline_platform(&process_platform_required);
+    if (process_platform_required && !process_platform) {
+        result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        goto done;
+    }
+    if (process_platform &&
+        (binding_count != 0u || attribute_count != 0u ||
+         vertex_translation.input_count != 0u ||
+         fragment_translation.descriptor_count != 0u ||
+         state.primitive_topology != RIN_GPU_PRIMITIVE_TRIANGLE_LIST ||
+         state.blend_enabled != 0u ||
+         state.color_write_mask != RIN_GPU_COLOR_WRITE_ALL ||
+         state.cull_mode != RIN_GPU_CULL_NONE)) {
+        release_product();
+        process_platform = NULL;
+        result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        goto done;
+    }
     sync_lock();
     owner = device_slot(device); layout = owner ? pipeline_layout_slot(device, info->layout) : NULL;
     if (!owner || !owner->dynamic_rendering_enabled || !layout || layout->set_layout_count) {
-        sync_unlock(); result = RIN_VK_ERROR_INITIALIZATION_FAILED; goto done;
+        sync_unlock();
+        if (process_platform) release_product();
+        result = RIN_VK_ERROR_INITIALIZATION_FAILED; goto done;
     }
     pipeline = reserve_pipeline_slot(owner, &slot_index);
-    if (!pipeline) { sync_unlock(); result = RIN_VK_ERROR_OUT_OF_HOST_MEMORY; goto done; }
+    if (!pipeline) {
+        sync_unlock();
+        if (process_platform) release_product();
+        result = RIN_VK_ERROR_OUT_OF_HOST_MEMORY; goto done;
+    }
     pipeline->kind = RIN_VK_PIPELINE_KIND_GRAPHICS;
     pipeline->shader_size = (uint32_t)vertex_ir_size;
     pipeline->fragment_shader_size = (uint32_t)fragment_ir_size;
@@ -19874,9 +20116,51 @@ static RinVkResult create_graphics_pipeline_one(
     pipeline->scissor = *info->pViewportState->pScissors;
     pipeline->shader_ir = vertex_ir; pipeline->fragment_shader_ir = fragment_ir;
     vertex_ir = NULL; fragment_ir = NULL;
+    pipeline_cookie = resource_handle(RIN_VK_PIPELINE_TAG, slot_index,
+                                      pipeline->generation);
+    sync_unlock();
+    if (process_platform) {
+        process_result = process_platform->create_process_graphics_pipeline(
+            process_platform->context, pipeline_cookie, pipeline->shader_ir,
+            pipeline->shader_size, pipeline->fragment_shader_ir,
+            pipeline->fragment_shader_size, state.color_format,
+            state.primitive_topology);
+        if (process_result != RIN_VULKAN_PRODUCT_OK) {
+            sync_lock();
+            if (__atomic_load_n(&pipeline->state, __ATOMIC_ACQUIRE) == 2u &&
+                pipeline->owner == owner &&
+                resource_handle(RIN_VK_PIPELINE_TAG, slot_index,
+                                pipeline->generation) == pipeline_cookie)
+                clear_pipeline_slot(pipeline);
+            sync_unlock();
+            release_product();
+            process_platform = NULL;
+            result = map_product_result(process_result);
+            goto done;
+        }
+    }
+    sync_lock();
+    if (__atomic_load_n(&pipeline->state, __ATOMIC_ACQUIRE) != 2u ||
+        pipeline->owner != owner ||
+        pipeline_cookie != resource_handle(RIN_VK_PIPELINE_TAG, slot_index,
+                                           pipeline->generation)) {
+        sync_unlock();
+        if (process_platform) {
+            (void)process_platform->destroy_process_graphics_pipeline(
+                process_platform->context, pipeline_cookie);
+            release_product();
+            process_platform = NULL;
+        }
+        result = RIN_VK_ERROR_DEVICE_LOST;
+        goto done;
+    }
+    if (process_platform)
+        pipeline->process_graphics_pipeline_token = pipeline_cookie;
     __atomic_store_n(&pipeline->state, 1u, __ATOMIC_RELEASE);
-    *pipeline_out = resource_handle(RIN_VK_PIPELINE_TAG, slot_index, pipeline->generation);
-    sync_unlock(); result = RIN_VK_SUCCESS;
+    *pipeline_out = pipeline_cookie;
+    sync_unlock();
+    if (process_platform) release_product();
+    result = RIN_VK_SUCCESS;
 done:
     free(vertex_spirv); free(fragment_spirv); free(vertex_ir); free(fragment_ir);
     return result;
@@ -20157,7 +20441,10 @@ void RIN_VKAPI_CALL vkDestroyPipeline(RinVkDevice device,
     sync_lock();
     pipeline = pipeline_slot(device, handle);
     if (pipeline) {
-        process_result = destroy_process_compute_pipeline(pipeline);
+        process_result =
+            pipeline->process_graphics_pipeline_token != 0u
+                ? destroy_process_graphics_pipeline(pipeline)
+                : destroy_process_compute_pipeline(pipeline);
         if (process_result == RIN_VULKAN_PRODUCT_OK) {
             clear_pipeline_slot(pipeline);
         } else {

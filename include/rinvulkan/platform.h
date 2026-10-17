@@ -16,6 +16,7 @@
 #define RIN_VULKAN_PRODUCT_PLATFORM_V7_VERSION 7u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V8_VERSION 8u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V9_VERSION 9u
+#define RIN_VULKAN_PRODUCT_PLATFORM_V10_VERSION 10u
 #define RIN_VULKAN_PRODUCT_PROCESS_SUBMIT_RECEIPT_V1_VERSION 1u
 #define RIN_VULKAN_PRODUCT_MEMORY_VERSION 1u
 #define RIN_VULKAN_PRODUCT_MAX_QUEUES 8u
@@ -455,6 +456,30 @@ typedef struct RinVulkanProductPlatformV9 {
     RinVulkanProductGetProcessQueryResultV9Fn get_process_query_result;
     uint64_t reserved[2];
 } RinVulkanProductPlatformV9;
+
+/* V10 adds a process-owned, resource-free graphics-pipeline lifecycle to the
+ * V9 product chain. Shader inputs and descriptors are not inferred by this
+ * callback: callers pass translated RinShader IR and only the stable color
+ * format/topology profile represented by the process SDK ABI. */
+typedef int (*RinVulkanProductCreateProcessGraphicsPipelineV10Fn)(
+    void* context, uint64_t pipeline_token,
+    const void* vertex_shader_ir, uint64_t vertex_shader_ir_size,
+    const void* fragment_shader_ir, uint64_t fragment_shader_ir_size,
+    uint32_t color_format, uint32_t primitive_topology);
+typedef int (*RinVulkanProductDestroyProcessGraphicsPipelineV10Fn)(
+    void* context, uint64_t pipeline_token);
+
+typedef struct RinVulkanProductPlatformV10 {
+    uint32_t struct_size;
+    uint32_t version;
+    RinVulkanProductPlatformV9* base;
+    void* context;
+    RinVulkanProductCreateProcessGraphicsPipelineV10Fn
+        create_process_graphics_pipeline;
+    RinVulkanProductDestroyProcessGraphicsPipelineV10Fn
+        destroy_process_graphics_pipeline;
+    uint64_t reserved[2];
+} RinVulkanProductPlatformV10;
 
 #ifdef __cplusplus
 static_assert(sizeof(RinVulkanProductResourceV1) == 16u,

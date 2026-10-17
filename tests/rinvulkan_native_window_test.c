@@ -7,6 +7,7 @@
 #include <rinvulkan/software_platform.h>
 #include <ringpu/rin_shader.h>
 #include <rin/contract_abi.h>
+#include <rin/gpu.h>
 #include <rinruntime/window.h>
 
 #if defined(RIN_VULKAN_NATIVE_WINDOW_COMPOSITOR_TEST)
@@ -151,8 +152,9 @@ typedef struct TestProductAdapters {
     RinVulkanProductPlatformV7* v7;
     RinVulkanProductPlatformV8* v8;
     RinVulkanProductPlatformV9* v9;
+    RinVulkanProductPlatformV10* v10;
     RinVulkanProductPlatformV6 software_v6;
-    RinVulkanRinOSProcessSubmitBackendV5 process_submit_backend;
+    RinVulkanRinOSProcessSubmitBackendV6 process_submit_backend;
     TestSdkProcessQueue sdk_queues[RIN_GPU_PROCESS_MAX_QUEUES_V1];
     TestSdkProcessResource sdk_resources[
         RIN_GPU_PROCESS_MAX_COMPUTE_BINDINGS_V1];
@@ -180,8 +182,13 @@ typedef struct TestProductAdapters {
     RinGpuProcessResourceBindingV1 sdk_last_resource_binding;
     uint32_t sdk_last_shader_resource_count;
     uint64_t sdk_last_shader_module_token;
+    uint64_t sdk_previous_shader_module_token;
+    uint32_t sdk_last_shader_module_stage;
+    uint32_t sdk_previous_shader_module_stage;
     uint64_t sdk_last_pipeline_token;
     uint64_t sdk_last_pipeline_shader_token;
+    uint32_t sdk_graphics_pipeline_create_calls;
+    uint64_t sdk_last_graphics_pipeline_token;
     uint64_t sdk_last_bind_group_token;
     uint64_t sdk_last_bind_group_pipeline_token;
     uint32_t sdk_last_bind_group_count;
@@ -1973,10 +1980,17 @@ RinResult rin_gpu_process_shader_module_create_v1(
         header->version != RIN_SHADER_IR_VERSION ||
         header->header_size != sizeof(RinShaderHeaderV1) ||
         header->total_size != shader_ir_size ||
-        header->stage != RIN_SHADER_STAGE_COMPUTE ||
+        (header->stage != RIN_SHADER_STAGE_COMPUTE &&
+         header->stage != RIN_SHADER_STAGE_VERTEX &&
+         header->stage != RIN_SHADER_STAGE_FRAGMENT) ||
         header->resource_count > RIN_GPU_PROCESS_MAX_COMPUTE_BINDINGS_V1)
         return RIN_ERROR_INVALID_ARGUMENT;
+    adapters->sdk_previous_shader_module_token =
+        adapters->sdk_last_shader_module_token;
+    adapters->sdk_previous_shader_module_stage =
+        adapters->sdk_last_shader_module_stage;
     adapters->sdk_last_shader_module_token = shader_module_token;
+    adapters->sdk_last_shader_module_stage = header->stage;
     adapters->sdk_last_shader_resource_count = header->resource_count;
     ++adapters->sdk_shader_module_create_calls;
     return RIN_SUCCESS;
@@ -1995,6 +2009,37 @@ RinResult rin_gpu_process_compute_pipeline_create_v1(
     adapters->sdk_last_pipeline_token = pipeline_token;
     adapters->sdk_last_pipeline_shader_token = shader_module_token;
     ++adapters->sdk_compute_pipeline_create_calls;
+    return RIN_SUCCESS;
+}
+
+RinResult rin_gpu_process_graphics_pipeline_create_v1(
+        uint64_t device_id, uint64_t device_generation,
+        uint64_t pipeline_token, uint64_t vertex_shader_token,
+        uint64_t fragment_shader_token,
+        const RinGpuProcessGraphicsPipelineDescV1* descriptor) {
+    TestProductAdapters* adapters = g_process_submit_adapters;
+    const uint64_t expected_vertex_token =
+        ((uint64_t)RIN_VULKAN_RINOS_PROCESS_GRAPHICS_VERTEX_TOKEN_TAG << 48u) |
+        (pipeline_token & UINT64_C(0x0000FFFFFFFFFFFF));
+    const uint64_t expected_fragment_token =
+        ((uint64_t)RIN_VULKAN_RINOS_PROCESS_GRAPHICS_FRAGMENT_TOKEN_TAG << 48u) |
+        (pipeline_token & UINT64_C(0x0000FFFFFFFFFFFF));
+    if (!adapters || device_id != TEST_PROCESS_SUBMIT_DEVICE_ID ||
+        device_generation != TEST_PROCESS_SUBMIT_DEVICE_GENERATION ||
+        pipeline_token == 0u || vertex_shader_token != expected_vertex_token ||
+        fragment_shader_token != expected_fragment_token ||
+        adapters->sdk_previous_shader_module_token != vertex_shader_token ||
+        adapters->sdk_last_shader_module_token != fragment_shader_token ||
+        adapters->sdk_previous_shader_module_stage != RIN_SHADER_STAGE_VERTEX ||
+        adapters->sdk_last_shader_module_stage != RIN_SHADER_STAGE_FRAGMENT ||
+        !descriptor || descriptor->struct_size != sizeof(*descriptor) ||
+        descriptor->version !=
+            RIN_GPU_PROCESS_GRAPHICS_PIPELINE_DESC_VERSION_V1 ||
+        descriptor->color_format != RIN_GPU_FORMAT_RGBA8_UNORM ||
+        descriptor->primitive_topology != RIN_GPU_PRIMITIVE_TRIANGLE_LIST)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    adapters->sdk_last_graphics_pipeline_token = pipeline_token;
+    ++adapters->sdk_graphics_pipeline_create_calls;
     return RIN_SUCCESS;
 }
 
@@ -2835,7 +2880,7 @@ static int initialize_product_adapters(
         queue_mappings[index].logical_queue_id = index;
         queue_mappings[index].physical_queue_id = index;
     }
-    result = rin_vulkan_rinos_process_submit_backend_v5_init(
+    result = rin_vulkan_rinos_process_submit_backend_v6_init(
         &adapters->process_submit_backend, &adapters->v5,
         TEST_PROCESS_SUBMIT_DEVICE_ID,
         TEST_PROCESS_SUBMIT_DEVICE_GENERATION, queue_mappings,
@@ -2843,18 +2888,25 @@ static int initialize_product_adapters(
     if (result != RIN_VULKAN_PRODUCT_OK) return result;
     {
         adapters->v6 =
-            &adapters->process_submit_backend.submit_backend.platform_v6;
+            &adapters->process_submit_backend.submit_backend.submit_backend
+                 .platform_v6;
         adapters->v7 =
-            &adapters->process_submit_backend.submit_backend.platform_v7;
+            &adapters->process_submit_backend.submit_backend.submit_backend
+                 .platform_v7;
         adapters->v8 =
-            &adapters->process_submit_backend.submit_backend.platform_v8;
+            &adapters->process_submit_backend.submit_backend.submit_backend
+                 .platform_v8;
         adapters->v9 =
-            rin_vulkan_rinos_process_submit_backend_v5_platform_v9(
+            &adapters->process_submit_backend.submit_backend.platform_v9;
+        adapters->v10 =
+            rin_vulkan_rinos_process_submit_backend_v6_platform_v10(
                 &adapters->process_submit_backend);
         if (!adapters->v6 || !adapters->v7 || !adapters->v8 ||
-            !adapters->v9 || adapters->v7->base != adapters->v6 ||
+            !adapters->v9 || !adapters->v10 ||
+            adapters->v7->base != adapters->v6 ||
             adapters->v8->base != adapters->v7 ||
-            adapters->v9->base != adapters->v8)
+            adapters->v9->base != adapters->v8 ||
+            adapters->v10->base != adapters->v9)
             return RIN_VULKAN_PRODUCT_STATE;
     }
     return RIN_VULKAN_PRODUCT_OK;
@@ -2906,6 +2958,106 @@ static size_t make_descriptor_free_compute_module(uint32_t* words) {
     emit_test_spirv_instruction(words, &count, 54u, 5u, operands);
     operands[0] = 11u;
     emit_test_spirv_instruction(words, &count, 248u, 2u, operands);
+    emit_test_spirv_instruction(words, &count, 253u, 1u, operands);
+    emit_test_spirv_instruction(words, &count, 56u, 1u, operands);
+    return count;
+}
+
+static size_t make_resource_free_vertex_module(uint32_t* words) {
+    size_t count = 5u;
+    uint32_t operands[7];
+    words[0] = UINT32_C(0x07230203);
+    words[1] = 0x00010300u;
+    words[2] = 0u;
+    words[3] = 22u;
+    words[4] = 0u;
+    operands[0] = 1u;
+    emit_test_spirv_instruction(words, &count, 17u, 2u, operands);
+    operands[0] = 0u; operands[1] = 3u;
+    emit_test_spirv_instruction(words, &count, 14u, 3u, operands);
+    operands[0] = 0u; operands[1] = 20u;
+    operands[2] = UINT32_C(0x6e69616d); operands[3] = 0u;
+    operands[4] = 13u;
+    emit_test_spirv_instruction(words, &count, 15u, 6u, operands);
+    operands[0] = 13u; operands[1] = 11u; operands[2] = 0u;
+    emit_test_spirv_instruction(words, &count, 71u, 4u, operands);
+    operands[0] = 1u;
+    emit_test_spirv_instruction(words, &count, 19u, 2u, operands);
+    operands[0] = 2u; operands[1] = 32u;
+    emit_test_spirv_instruction(words, &count, 22u, 3u, operands);
+    operands[0] = 3u; operands[1] = 2u; operands[2] = 4u;
+    emit_test_spirv_instruction(words, &count, 23u, 4u, operands);
+    operands[0] = 4u; operands[1] = 3u; operands[2] = 3u;
+    emit_test_spirv_instruction(words, &count, 32u, 4u, operands);
+    operands[0] = 5u; operands[1] = 1u;
+    emit_test_spirv_instruction(words, &count, 33u, 3u, operands);
+    operands[0] = 2u; operands[1] = 6u; operands[2] = 0u;
+    emit_test_spirv_instruction(words, &count, 43u, 4u, operands);
+    operands[0] = 2u; operands[1] = 7u;
+    operands[2] = UINT32_C(0x3f800000);
+    emit_test_spirv_instruction(words, &count, 43u, 4u, operands);
+    operands[0] = 4u; operands[1] = 13u; operands[2] = 3u;
+    emit_test_spirv_instruction(words, &count, 59u, 4u, operands);
+    operands[0] = 3u; operands[1] = 17u;
+    operands[2] = 6u; operands[3] = 6u; operands[4] = 6u; operands[5] = 7u;
+    emit_test_spirv_instruction(words, &count, 44u, 7u, operands);
+    operands[0] = 1u; operands[1] = 20u; operands[2] = 0u; operands[3] = 5u;
+    emit_test_spirv_instruction(words, &count, 54u, 5u, operands);
+    operands[0] = 21u;
+    emit_test_spirv_instruction(words, &count, 248u, 2u, operands);
+    operands[0] = 13u; operands[1] = 17u;
+    emit_test_spirv_instruction(words, &count, 62u, 3u, operands);
+    emit_test_spirv_instruction(words, &count, 253u, 1u, operands);
+    emit_test_spirv_instruction(words, &count, 56u, 1u, operands);
+    return count;
+}
+
+static size_t make_resource_free_fragment_module(uint32_t* words) {
+    size_t count = 5u;
+    uint32_t operands[7];
+    words[0] = UINT32_C(0x07230203);
+    words[1] = 0x00010300u;
+    words[2] = 0u;
+    words[3] = 22u;
+    words[4] = 0u;
+    operands[0] = 1u;
+    emit_test_spirv_instruction(words, &count, 17u, 2u, operands);
+    operands[0] = 0u; operands[1] = 3u;
+    emit_test_spirv_instruction(words, &count, 14u, 3u, operands);
+    operands[0] = 4u; operands[1] = 20u;
+    operands[2] = UINT32_C(0x6e69616d); operands[3] = 0u;
+    operands[4] = 13u;
+    emit_test_spirv_instruction(words, &count, 15u, 6u, operands);
+    operands[0] = 20u; operands[1] = 7u;
+    emit_test_spirv_instruction(words, &count, 16u, 3u, operands);
+    operands[0] = 13u; operands[1] = 30u; operands[2] = 0u;
+    emit_test_spirv_instruction(words, &count, 71u, 4u, operands);
+    operands[0] = 1u;
+    emit_test_spirv_instruction(words, &count, 19u, 2u, operands);
+    operands[0] = 2u; operands[1] = 32u;
+    emit_test_spirv_instruction(words, &count, 22u, 3u, operands);
+    operands[0] = 3u; operands[1] = 2u; operands[2] = 4u;
+    emit_test_spirv_instruction(words, &count, 23u, 4u, operands);
+    operands[0] = 4u; operands[1] = 3u; operands[2] = 3u;
+    emit_test_spirv_instruction(words, &count, 32u, 4u, operands);
+    operands[0] = 5u; operands[1] = 1u;
+    emit_test_spirv_instruction(words, &count, 33u, 3u, operands);
+    operands[0] = 2u; operands[1] = 6u;
+    operands[2] = UINT32_C(0x3f800000);
+    emit_test_spirv_instruction(words, &count, 43u, 4u, operands);
+    operands[0] = 2u; operands[1] = 7u; operands[2] = 0u;
+    emit_test_spirv_instruction(words, &count, 43u, 4u, operands);
+    operands[0] = 4u; operands[1] = 13u; operands[2] = 3u;
+    emit_test_spirv_instruction(words, &count, 59u, 4u, operands);
+    operands[0] = 3u; operands[1] = 12u;
+    operands[2] = 6u; operands[3] = 7u; operands[4] = 7u; operands[5] = 6u;
+    emit_test_spirv_instruction(words, &count, 44u, 7u, operands);
+    operands[0] = 1u; operands[1] = 20u; operands[2] = 0u; operands[3] = 5u;
+    emit_test_spirv_instruction(words, &count, 54u, 5u, operands);
+    operands[0] = 21u;
+    emit_test_spirv_instruction(words, &count, 248u, 2u, operands);
+    operands[0] = 13u; operands[1] = 12u;
+    emit_test_spirv_instruction(words, &count, 62u, 3u, operands);
     emit_test_spirv_instruction(words, &count, 253u, 1u, operands);
     emit_test_spirv_instruction(words, &count, 56u, 1u, operands);
     return count;
@@ -3071,6 +3223,177 @@ cleanup:
         vkDestroyCommandPool(device, command_pool, NULL);
     if (query_pool != 0u) vkDestroyQueryPool(device, query_pool, NULL);
 #undef PROCESS_QUERY_CHECK
+    return ok ? 0 : -1;
+}
+
+static int test_process_graphics_pipeline_create(
+        RinVkDevice device, TestProductAdapters* adapters) {
+    uint32_t vertex_words[64], fragment_words[64];
+    const size_t vertex_word_count =
+        make_resource_free_vertex_module(vertex_words);
+    const size_t fragment_word_count =
+        make_resource_free_fragment_module(fragment_words);
+    RinVkShaderModuleCreateInfo module_info;
+    RinVkShaderModule vertex_module = 0u, fragment_module = 0u;
+    RinVkPipelineLayoutCreateInfo layout_info;
+    RinVkPipelineLayout layout = 0u;
+    RinVkPipelineShaderStageCreateInfo stages[2];
+    RinVkPipelineVertexInputStateCreateInfo vertex_input;
+    RinVkVertexInputBindingDescription unsupported_binding;
+    RinVkPipelineInputAssemblyStateCreateInfo assembly;
+    RinVkPipelineViewportStateCreateInfo viewport_state;
+    RinVkViewport viewport;
+    RinVkRect2D scissor;
+    RinVkPipelineRasterizationStateCreateInfo raster;
+    RinVkPipelineMultisampleStateCreateInfo multisample;
+    RinVkPipelineColorBlendAttachmentState blend_attachment;
+    RinVkPipelineColorBlendStateCreateInfo blend;
+    RinVkPipelineRenderingCreateInfo rendering;
+    RinVkGraphicsPipelineCreateInfo create_info;
+    RinVkPipeline pipeline = 0u;
+    uint32_t sdk_shader_before;
+    uint32_t sdk_graphics_before;
+    uint32_t sdk_destroy_before;
+    int ok = 0;
+
+#define PROCESS_GRAPHICS_CHECK(condition) do { \
+    if (!(condition)) { \
+        fprintf(stderr, "process graphics check failed at %s:%d: %s\n", \
+                __FILE__, __LINE__, #condition); \
+        ok = -1; \
+        goto cleanup; \
+    } \
+} while (0)
+
+    if (!device || !adapters || !adapters->v10) return -1;
+    sdk_shader_before = adapters->sdk_shader_module_create_calls;
+    sdk_graphics_before = adapters->sdk_graphics_pipeline_create_calls;
+    sdk_destroy_before = adapters->sdk_object_destroy_calls;
+    memset(&module_info, 0, sizeof(module_info));
+    module_info.sType = RIN_VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    module_info.codeSize = vertex_word_count * sizeof(vertex_words[0]);
+    module_info.pCode = vertex_words;
+    PROCESS_GRAPHICS_CHECK(vkCreateShaderModule(
+        device, &module_info, NULL, &vertex_module) == RIN_VK_SUCCESS);
+    module_info.codeSize = fragment_word_count * sizeof(fragment_words[0]);
+    module_info.pCode = fragment_words;
+    PROCESS_GRAPHICS_CHECK(vkCreateShaderModule(
+        device, &module_info, NULL, &fragment_module) == RIN_VK_SUCCESS);
+    memset(&layout_info, 0, sizeof(layout_info));
+    layout_info.sType = RIN_VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    PROCESS_GRAPHICS_CHECK(vkCreatePipelineLayout(
+        device, &layout_info, NULL, &layout) == RIN_VK_SUCCESS);
+    memset(stages, 0, sizeof(stages));
+    stages[0].sType = RIN_VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = RIN_VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vertex_module;
+    stages[0].pName = "main";
+    stages[1].sType = RIN_VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = RIN_VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = fragment_module;
+    stages[1].pName = "main";
+    memset(&vertex_input, 0, sizeof(vertex_input));
+    vertex_input.sType =
+        RIN_VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    memset(&assembly, 0, sizeof(assembly));
+    assembly.sType =
+        RIN_VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    assembly.topology = RIN_VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    memset(&viewport, 0, sizeof(viewport));
+    viewport.width = 4.0f;
+    viewport.height = 4.0f;
+    viewport.maxDepth = 1.0f;
+    memset(&scissor, 0, sizeof(scissor));
+    scissor.extent.width = 4u;
+    scissor.extent.height = 4u;
+    memset(&viewport_state, 0, sizeof(viewport_state));
+    viewport_state.sType =
+        RIN_VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewport_state.viewportCount = 1u;
+    viewport_state.pViewports = &viewport;
+    viewport_state.scissorCount = 1u;
+    viewport_state.pScissors = &scissor;
+    memset(&raster, 0, sizeof(raster));
+    raster.sType =
+        RIN_VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    raster.polygonMode = RIN_VK_POLYGON_MODE_FILL;
+    raster.frontFace = RIN_VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    raster.lineWidth = 1.0f;
+    memset(&multisample, 0, sizeof(multisample));
+    multisample.sType =
+        RIN_VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisample.rasterizationSamples = RIN_VK_SAMPLE_COUNT_1_BIT;
+    memset(&blend_attachment, 0, sizeof(blend_attachment));
+    blend_attachment.colorWriteMask = 15u;
+    memset(&blend, 0, sizeof(blend));
+    blend.sType =
+        RIN_VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    blend.attachmentCount = 1u;
+    blend.pAttachments = &blend_attachment;
+    memset(&rendering, 0, sizeof(rendering));
+    {
+        static const int32_t color_format = RIN_VK_FORMAT_R8G8B8A8_UNORM;
+        rendering.sType =
+            RIN_VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+        rendering.colorAttachmentCount = 1u;
+        rendering.pColorAttachmentFormats = &color_format;
+        memset(&create_info, 0, sizeof(create_info));
+        create_info.sType =
+            RIN_VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        create_info.pNext = &rendering;
+        create_info.stageCount = 2u;
+        create_info.pStages = stages;
+        create_info.pVertexInputState = &vertex_input;
+        create_info.pInputAssemblyState = &assembly;
+        create_info.pViewportState = &viewport_state;
+        create_info.pRasterizationState = &raster;
+        create_info.pMultisampleState = &multisample;
+        create_info.pColorBlendState = &blend;
+        create_info.layout = layout;
+        create_info.basePipelineIndex = -1;
+        PROCESS_GRAPHICS_CHECK(vkCreateGraphicsPipelines(
+            device, 0u, 1u, &create_info, NULL, &pipeline) == RIN_VK_SUCCESS);
+    }
+    PROCESS_GRAPHICS_CHECK(adapters->sdk_shader_module_create_calls ==
+                               sdk_shader_before + 2u &&
+                           adapters->sdk_graphics_pipeline_create_calls ==
+                               sdk_graphics_before + 1u &&
+                           adapters->sdk_last_graphics_pipeline_token ==
+                               pipeline &&
+                           adapters->sdk_previous_shader_module_stage ==
+                               RIN_SHADER_STAGE_VERTEX &&
+                           adapters->sdk_last_shader_module_stage ==
+                               RIN_SHADER_STAGE_FRAGMENT);
+    PROCESS_GRAPHICS_CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v10(
+                               adapters->v10) == RIN_GPU_VULKAN_BUSY);
+    memset(&unsupported_binding, 0, sizeof(unsupported_binding));
+    unsupported_binding.stride = 16u;
+    unsupported_binding.inputRate = RIN_VK_VERTEX_INPUT_RATE_VERTEX;
+    vertex_input.vertexBindingDescriptionCount = 1u;
+    vertex_input.pVertexBindingDescriptions = &unsupported_binding;
+    {
+        RinVkPipeline rejected_pipeline = 0u;
+        PROCESS_GRAPHICS_CHECK(vkCreateGraphicsPipelines(
+            device, 0u, 1u, &create_info, NULL, &rejected_pipeline) ==
+            RIN_VK_ERROR_FEATURE_NOT_PRESENT);
+        PROCESS_GRAPHICS_CHECK(rejected_pipeline == 0u &&
+            adapters->sdk_graphics_pipeline_create_calls ==
+                sdk_graphics_before + 1u);
+    }
+    vkDestroyPipeline(device, pipeline, NULL);
+    pipeline = 0u;
+    PROCESS_GRAPHICS_CHECK(adapters->sdk_object_destroy_calls ==
+                               sdk_destroy_before + 3u);
+    ok = 1;
+
+cleanup:
+    if (pipeline != 0u) vkDestroyPipeline(device, pipeline, NULL);
+    if (layout != 0u) vkDestroyPipelineLayout(device, layout, NULL);
+    if (fragment_module != 0u)
+        vkDestroyShaderModule(device, fragment_module, NULL);
+    if (vertex_module != 0u)
+        vkDestroyShaderModule(device, vertex_module, NULL);
+#undef PROCESS_GRAPHICS_CHECK
     return ok ? 0 : -1;
 }
 
@@ -5336,6 +5659,7 @@ int main(void) {
     uint32_t product_v7_bound = 0u;
     uint32_t product_v8_bound = 0u;
     uint32_t product_v9_bound = 0u;
+    uint32_t product_v10_bound = 0u;
     uint32_t process_backend_initialized = 0u;
     uint32_t surface_created = 0u;
     uint32_t device_created = 0u;
@@ -5450,6 +5774,9 @@ int main(void) {
     CHECK(rin_gpu_vulkan_icd_bind_product_platform_v9(
               product_adapters.v9) == RIN_GPU_VULKAN_OK);
     product_v9_bound = 1u;
+    CHECK(rin_gpu_vulkan_icd_bind_product_platform_v10(
+              product_adapters.v10) == RIN_GPU_VULKAN_OK);
+    product_v10_bound = 1u;
     memset(&physical_properties, 0, sizeof(physical_properties));
     vkGetPhysicalDeviceProperties(physical, &physical_properties);
     CHECK(physical_properties.limits.timestampComputeAndGraphics == 1u &&
@@ -5929,6 +6256,8 @@ int main(void) {
         swapchain_created = 0u;
         CHECK(test_process_compute_pipeline_dispatch(
                   device, queue, &product_adapters) == 0);
+        CHECK(test_process_graphics_pipeline_create(
+                  device, &product_adapters) == 0);
         CHECK(test_process_compute_descriptor_dispatch(
                   device, queue, physical, &product_adapters) == 0);
         CHECK(test_process_timestamp_query(
@@ -5939,6 +6268,9 @@ int main(void) {
               product_adapters.sdk_queue_release_calls == 0u &&
               product_adapters.sdk_active_queue_count ==
                   software.queue_count);
+        CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v10(
+                  product_adapters.v10) == RIN_GPU_VULKAN_OK);
+        product_v10_bound = 0u;
         CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v9(
                   product_adapters.v9) == RIN_GPU_VULKAN_OK);
         product_v9_bound = 0u;
@@ -5951,7 +6283,7 @@ int main(void) {
         CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v6(
                   product_adapters.v6) == RIN_GPU_VULKAN_OK);
         product_v6_bound = 0u;
-        CHECK(rin_vulkan_rinos_process_submit_backend_v5_detach(
+        CHECK(rin_vulkan_rinos_process_submit_backend_v6_detach(
                   &product_adapters.process_submit_backend) ==
               RIN_VULKAN_PRODUCT_OK);
         process_backend_initialized = 0u;
@@ -5985,6 +6317,18 @@ cleanup:
     if (device_created) vkDestroyDevice(device, NULL);
     if (surface_created) vkDestroySurfaceKHR(instance, surface, NULL);
     if (instance) vkDestroyInstance(instance, NULL);
+    if (product_v10_bound) {
+        const int unbind_result =
+            rin_gpu_vulkan_icd_unbind_product_platform_v10(
+                product_adapters.v10);
+        if (unbind_result == RIN_GPU_VULKAN_OK) {
+            product_v10_bound = 0u;
+        } else {
+            fprintf(stderr, "V10 graphics-pipeline unbind returned %d\n",
+                    unbind_result);
+            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
     if (product_v9_bound) {
         const int unbind_result =
             rin_gpu_vulkan_icd_unbind_product_platform_v9(
@@ -6043,7 +6387,7 @@ cleanup:
             result = RIN_VK_ERROR_INITIALIZATION_FAILED;
         } else {
             const int detach_result =
-                rin_vulkan_rinos_process_submit_backend_v5_detach(
+                rin_vulkan_rinos_process_submit_backend_v6_detach(
                     &product_adapters.process_submit_backend);
             if (detach_result != RIN_VULKAN_PRODUCT_OK) {
                 fprintf(stderr,
