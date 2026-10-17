@@ -3655,6 +3655,180 @@ static int test_sync2_queue_family_stage_validation(RinVkDevice device) {
                1);
 }
 
+static int test_sync2_barrier_rejected_in_dynamic_rendering(
+        RinVkDevice device, RinVkQueue queue) {
+    RinVkImageCreateInfo image_info;
+    RinVkImage image = 0u;
+    RinVkMemoryRequirements requirements;
+    RinVkMemoryAllocateInfo allocation_info;
+    RinVkDeviceMemory memory = 0u;
+    RinVkImageViewCreateInfo view_info;
+    RinVkImageView view = 0u;
+    RinVkCommandPoolCreateInfo pool_info;
+    RinVkCommandPool pool = 0u;
+    RinVkCommandBufferAllocateInfo allocate_info;
+    RinVkCommandBuffer command_buffers[2] = {NULL, NULL};
+    RinVkCommandBuffer command_buffer = NULL;
+    RinVkCommandBuffer render_command_buffer = NULL;
+    RinVkCommandBufferBeginInfo begin_info;
+    RinVkImageMemoryBarrier2 layout_barrier;
+    RinVkMemoryBarrier2 memory_barrier;
+    RinVkDependencyInfo dependency;
+    RinVkRenderingAttachmentInfo attachment;
+    RinVkRenderingInfo rendering;
+    RinVkSubmitInfo submit;
+    RinGpuVulkanCommandBufferV1* command_core = NULL;
+    RinVkResult result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+    const char* stage = "image creation";
+    int ok = 0;
+
+    if (!device || !queue) return 0;
+    memset(&image_info, 0, sizeof(image_info));
+    image_info.sType = RIN_VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = RIN_VK_IMAGE_TYPE_2D;
+    image_info.format = RIN_VK_FORMAT_R8G8B8A8_UNORM;
+    image_info.extent.width = 4u;
+    image_info.extent.height = 4u;
+    image_info.extent.depth = 1u;
+    image_info.mipLevels = 1u;
+    image_info.arrayLayers = 1u;
+    image_info.samples = RIN_VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = RIN_VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    image_info.sharingMode = RIN_VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateImage(device, &image_info, NULL, &image) != RIN_VK_SUCCESS)
+        goto done;
+    stage = "image memory requirements and binding";
+    vkGetImageMemoryRequirements(device, image, &requirements);
+    if ((requirements.memoryTypeBits & UINT32_C(1)) == 0u ||
+        requirements.size == 0u)
+        goto done;
+    memset(&allocation_info, 0, sizeof(allocation_info));
+    allocation_info.sType = RIN_VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocation_info.allocationSize = requirements.size;
+    allocation_info.memoryTypeIndex = 0u;
+    if (vkAllocateMemory(device, &allocation_info, NULL, &memory) !=
+            RIN_VK_SUCCESS ||
+        vkBindImageMemory(device, image, memory, 0u) != RIN_VK_SUCCESS)
+        goto done;
+
+    stage = "image view creation";
+    memset(&view_info, 0, sizeof(view_info));
+    view_info.sType = RIN_VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image = image;
+    view_info.viewType = RIN_VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = RIN_VK_FORMAT_R8G8B8A8_UNORM;
+    view_info.subresourceRange.aspectMask = RIN_VK_IMAGE_ASPECT_COLOR_BIT;
+    view_info.subresourceRange.levelCount = 1u;
+    view_info.subresourceRange.layerCount = 1u;
+    if (vkCreateImageView(device, &view_info, NULL, &view) != RIN_VK_SUCCESS)
+        goto done;
+    stage = "command pool and buffer creation";
+    memset(&pool_info, 0, sizeof(pool_info));
+    pool_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pool_info.queueFamilyIndex = 0u;
+    if (vkCreateCommandPool(device, &pool_info, NULL, &pool) != RIN_VK_SUCCESS)
+        goto done;
+    memset(&allocate_info, 0, sizeof(allocate_info));
+    allocate_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocate_info.commandPool = pool;
+    allocate_info.level = RIN_VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocate_info.commandBufferCount = 2u;
+    if (vkAllocateCommandBuffers(device, &allocate_info, command_buffers) !=
+        RIN_VK_SUCCESS)
+        goto done;
+    command_buffer = command_buffers[0];
+    render_command_buffer = command_buffers[1];
+
+    stage = "color-layout transition recording";
+    memset(&begin_info, 0, sizeof(begin_info));
+    begin_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    if (vkBeginCommandBuffer(command_buffer, &begin_info) != RIN_VK_SUCCESS)
+        goto done;
+    memset(&layout_barrier, 0, sizeof(layout_barrier));
+    layout_barrier.sType = RIN_VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    layout_barrier.dstStageMask =
+        RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    layout_barrier.srcQueueFamilyIndex = RIN_VK_QUEUE_FAMILY_IGNORED;
+    layout_barrier.dstQueueFamilyIndex = RIN_VK_QUEUE_FAMILY_IGNORED;
+    layout_barrier.oldLayout = RIN_VK_IMAGE_LAYOUT_UNDEFINED;
+    layout_barrier.newLayout = RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    layout_barrier.image = image;
+    layout_barrier.subresourceRange.aspectMask = RIN_VK_IMAGE_ASPECT_COLOR_BIT;
+    layout_barrier.subresourceRange.levelCount = 1u;
+    layout_barrier.subresourceRange.layerCount = 1u;
+    memset(&dependency, 0, sizeof(dependency));
+    dependency.sType = RIN_VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.imageMemoryBarrierCount = 1u;
+    dependency.pImageMemoryBarriers = &layout_barrier;
+    vkCmdPipelineBarrier2(command_buffer, &dependency);
+    if (vkEndCommandBuffer(command_buffer) != RIN_VK_SUCCESS) goto done;
+    memset(&submit, 0, sizeof(submit));
+    submit.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1u;
+    submit.pCommandBuffers = &command_buffer;
+    stage = "color-layout transition submit";
+    result = vkQueueSubmit(queue, 1u, &submit, 0u);
+    if (result != RIN_VK_SUCCESS) goto done;
+    stage = "color-layout transition completion";
+    result = vkQueueWaitIdle(queue);
+    if (result != RIN_VK_SUCCESS) goto done;
+    stage = "rendering command-buffer begin";
+    result = vkBeginCommandBuffer(render_command_buffer, &begin_info);
+    if (result != RIN_VK_SUCCESS) goto done;
+
+    stage = "dynamic rendering begin";
+    memset(&attachment, 0, sizeof(attachment));
+    attachment.sType = RIN_VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    attachment.imageView = view;
+    attachment.imageLayout = RIN_VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    attachment.loadOp = RIN_VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachment.storeOp = RIN_VK_ATTACHMENT_STORE_OP_STORE;
+    memset(&rendering, 0, sizeof(rendering));
+    rendering.sType = RIN_VK_STRUCTURE_TYPE_RENDERING_INFO;
+    rendering.renderArea.extent.width = 4u;
+    rendering.renderArea.extent.height = 4u;
+    rendering.layerCount = 1u;
+    rendering.colorAttachmentCount = 1u;
+    rendering.pColorAttachments = &attachment;
+    vkCmdBeginRendering(render_command_buffer, &rendering);
+    command_core = (RinGpuVulkanCommandBufferV1*)(void*)render_command_buffer;
+    if (command_core->graphics_rendering_active == 0u) goto done;
+
+    stage = "barrier rejection";
+    memset(&memory_barrier, 0, sizeof(memory_barrier));
+    memory_barrier.sType = RIN_VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    memory_barrier.srcStageMask =
+        RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    memory_barrier.srcAccessMask =
+        RIN_VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    memory_barrier.dstStageMask =
+        RIN_VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    memory_barrier.dstAccessMask =
+        RIN_VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT;
+    memset(&dependency, 0, sizeof(dependency));
+    dependency.sType = RIN_VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.memoryBarrierCount = 1u;
+    dependency.pMemoryBarriers = &memory_barrier;
+    vkCmdPipelineBarrier2(render_command_buffer, &dependency);
+    result = vkEndCommandBuffer(render_command_buffer);
+    ok = command_core->record_error != 0u &&
+         command_core->transfer_op_count == 0u &&
+         result != RIN_VK_SUCCESS;
+
+done:
+    if (!ok)
+        fprintf(stderr,
+                "dynamic-rendering barrier fixture failed at %s (record_error=%u, transfer_ops=%u, end_result=%d)\n",
+                stage, command_core ? command_core->record_error : 0u,
+                command_core ? command_core->transfer_op_count : 0u, result);
+    if (pool != 0u) vkDestroyCommandPool(device, pool, NULL);
+    if (view != 0u) vkDestroyImageView(device, view, NULL);
+    if (image != 0u) vkDestroyImage(device, image, NULL);
+    if (memory != 0u) vkFreeMemory(device, memory, NULL);
+    return ok;
+}
+
 static int record_sync2_transfer_queue_event_case(
         RinVkDevice device, uint32_t event_operation) {
     RinVkCommandPoolCreateInfo pool_info;
@@ -5115,7 +5289,8 @@ int main(void) {
     const char* device_extensions[] = {
         RIN_VK_KHR_TIMELINE_SEMAPHORE_EXTENSION,
         RIN_VK_KHR_SYNCHRONIZATION_2_EXTENSION,
-        RIN_VK_KHR_SWAPCHAIN_EXTENSION
+        RIN_VK_KHR_SWAPCHAIN_EXTENSION,
+        RIN_VK_KHR_DYNAMIC_RENDERING_EXTENSION
     };
     RinVkInstance instance = NULL;
     RinVkPhysicalDevice physical_devices[1];
@@ -5130,6 +5305,7 @@ int main(void) {
     RinVkSurfaceFormatKHR surface_format;
     RinVkDeviceQueueCreateInfo queue_infos[2];
     RinVkPhysicalDeviceVulkan12Features vulkan12;
+    RinVkPhysicalDeviceVulkan13Features vulkan13;
     RinVkPhysicalDeviceSynchronization2Features synchronization2;
     RinVkDeviceCreateInfo device_info;
     RinVkDevice device = NULL;
@@ -5369,17 +5545,22 @@ int main(void) {
     synchronization2.sType =
         RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
     synchronization2.synchronization2 = 1u;
+    memset(&vulkan13, 0, sizeof(vulkan13));
+    vulkan13.sType =
+        RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    vulkan13.pNext = &synchronization2;
+    vulkan13.dynamicRendering = 1u;
     memset(&vulkan12, 0, sizeof(vulkan12));
     vulkan12.sType =
         RIN_VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-    vulkan12.pNext = &synchronization2;
+    vulkan12.pNext = &vulkan13;
     vulkan12.timelineSemaphore = 1u;
     memset(&device_info, 0, sizeof(device_info));
     device_info.sType = RIN_VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     device_info.pNext = &vulkan12;
     device_info.queueCreateInfoCount = 2u;
     device_info.pQueueCreateInfos = queue_infos;
-    device_info.enabledExtensionCount = 3u;
+    device_info.enabledExtensionCount = 4u;
     device_info.ppEnabledExtensionNames = device_extensions;
     CHECK(vkCreateDevice(physical, &device_info, NULL, &device) ==
           RIN_VK_SUCCESS);
@@ -5776,6 +5957,7 @@ int main(void) {
         process_backend_initialized = 0u;
         CHECK(product_adapters.sdk_queue_release_calls == software.queue_count &&
               product_adapters.sdk_active_queue_count == 0u);
+        CHECK(test_sync2_barrier_rejected_in_dynamic_rendering(device, queue));
         CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v5(
                   &product_adapters.v5) == RIN_GPU_VULKAN_OK);
         product_v5_bound = 0u;

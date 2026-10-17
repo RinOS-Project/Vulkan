@@ -14211,6 +14211,9 @@ void RIN_VKAPI_CALL vkCmdPipelineBarrier2(
     if (!dependency_info ||
         !command_owner_device(core, &owner) ||
         !owner->synchronization2_enabled ||
+        /* VUID-vkCmdPipelineBarrier2-None-09553: this ICD does not expose
+         * dynamicRenderingLocalRead or shaderTileImage*ReadAccess. */
+        core->graphics_rendering_active != 0u ||
         dependency_info->sType != RIN_VK_STRUCTURE_TYPE_DEPENDENCY_INFO ||
         dependency_info->pNext ||
         !rin_vk_sync2_dependency_flags_valid(
