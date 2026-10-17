@@ -11820,6 +11820,7 @@ void RIN_VKAPI_CALL vkGetPhysicalDeviceFormatProperties(
         RIN_GPU_VULKAN_OK)
         return;
     properties->optimalTilingFeatures = rin_vk_image_format_features(format);
+    properties->bufferFeatures = rin_vk_buffer_format_features(format);
 }
 
 RinVkResult RIN_VKAPI_CALL vkGetPhysicalDeviceImageFormatProperties(

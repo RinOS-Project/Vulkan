@@ -36,6 +36,19 @@ static inline uint32_t rin_vk_image_format_features(int32_t format)
     return 0u;
 }
 
+static inline uint32_t rin_vk_buffer_format_features(int32_t format)
+{
+    switch (format) {
+    case RIN_VK_FORMAT_R32_SFLOAT:
+    case RIN_VK_FORMAT_R32G32_SFLOAT:
+    case RIN_VK_FORMAT_R32G32B32_SFLOAT:
+    case RIN_VK_FORMAT_R32G32B32A32_SFLOAT:
+        return RIN_VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT;
+    default:
+        return 0u;
+    }
+}
+
 static inline int rin_vk_image_descriptor_layout_valid(
     int32_t format, uint32_t image_usage, uint32_t descriptor_type,
     uint32_t layout)

@@ -151,6 +151,15 @@ int main(void)
              RIN_VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
              RIN_VK_FORMAT_FEATURE_TRANSFER_DST_BIT) ||
         rin_vk_image_format_features(UINT32_MAX) != 0u ||
+        rin_vk_buffer_format_features(RIN_VK_FORMAT_R32_SFLOAT) !=
+            RIN_VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT ||
+        rin_vk_buffer_format_features(RIN_VK_FORMAT_R32G32_SFLOAT) !=
+            RIN_VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT ||
+        rin_vk_buffer_format_features(RIN_VK_FORMAT_R32G32B32_SFLOAT) !=
+            RIN_VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT ||
+        rin_vk_buffer_format_features(RIN_VK_FORMAT_R32G32B32A32_SFLOAT) !=
+            RIN_VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT ||
+        rin_vk_buffer_format_features(INT32_MAX) != 0u ||
         !rin_vk_image_descriptor_layout_valid(
             RIN_VK_FORMAT_D32_SFLOAT, RIN_VK_IMAGE_USAGE_SAMPLED_BIT,
             RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,

@@ -1161,6 +1161,14 @@ int main(void) {
                RIN_VK_FORMAT_FEATURE_TRANSFER_DST_BIT) &&
           image_format_features.linearTilingFeatures == 0u &&
           image_format_features.bufferFeatures == 0u);
+    memset(&image_format_features, 0, sizeof(image_format_features));
+    vkGetPhysicalDeviceFormatProperties(
+        physical, RIN_VK_FORMAT_R32G32B32A32_SFLOAT,
+        &image_format_features);
+    CHECK(image_format_features.optimalTilingFeatures == 0u &&
+          image_format_features.linearTilingFeatures == 0u &&
+          image_format_features.bufferFeatures ==
+              RIN_VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT);
     memset(&image_format_limits, 0, sizeof(image_format_limits));
     CHECK(vkGetPhysicalDeviceImageFormatProperties(
               physical, RIN_VK_FORMAT_D32_SFLOAT, RIN_VK_IMAGE_TYPE_2D,
