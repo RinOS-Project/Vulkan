@@ -143,9 +143,13 @@ int main(void)
         return 1;
     if (rin_vk_image_format_features(RIN_VK_FORMAT_R8G8B8A8_UNORM) !=
             (RIN_VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
-             RIN_VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) ||
+             RIN_VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+             RIN_VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+             RIN_VK_FORMAT_FEATURE_TRANSFER_DST_BIT) ||
         rin_vk_image_format_features(RIN_VK_FORMAT_D32_SFLOAT) !=
-            RIN_VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT ||
+            (RIN_VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+             RIN_VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+             RIN_VK_FORMAT_FEATURE_TRANSFER_DST_BIT) ||
         rin_vk_image_format_features(UINT32_MAX) != 0u ||
         !rin_vk_image_descriptor_layout_valid(
             RIN_VK_FORMAT_D32_SFLOAT, RIN_VK_IMAGE_USAGE_SAMPLED_BIT,

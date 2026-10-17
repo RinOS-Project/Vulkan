@@ -26,9 +26,13 @@ static inline uint32_t rin_vk_image_format_features(int32_t format)
 {
     if (format == RIN_VK_FORMAT_R8G8B8A8_UNORM)
         return RIN_VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
-               RIN_VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+               RIN_VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+               RIN_VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+               RIN_VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
     if (format == RIN_VK_FORMAT_D32_SFLOAT)
-        return RIN_VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+        return RIN_VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+               RIN_VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+               RIN_VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
     return 0u;
 }
 
