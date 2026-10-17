@@ -24,8 +24,12 @@ target backend to the real `RIN_SYS_SDK_CALL` syscall, queries the authenticated
 process-local RinVk runtime before `vkCreateInstance`. Before device creation,
 it composes the SDK-backed V1–V5 memory/resource adapter with the V4
 logical-to-physical queue mapping and V6–V8 canonical process-submit adapter.
-The one-frame example uses the transfer/clear/readback operations supported by
-that canonical path; operations without a real provider remain unsupported.
+The bootstrap also binds V9 process-query and V10 resource-free graphics-
+pipeline lifecycle callbacks, and tears V10 down before its V9–V6 parents. The
+one-frame example still uses the transfer/clear/readback operations supported
+by its canonical path; graphics DRAW and operations without a real provider
+remain outside this application's live acceptance and unsupported profiles
+remain errors.
 It completes queue work before handing pixels to the ordinary Compositor
 surface rather than pretending process-submit supports native wait
 semaphores. This is not a `VK_KHR_display` direct-scanout path. The example
@@ -50,8 +54,9 @@ then releases the V5→V1 parent before the runtime. Native-window surface stays
 on RinRuntime's Compositor import path; physical-display WSI/provider
 registration and final scanout remain separate and are not claimed complete.
 
-The user-app target now has a process-local catalog/runtime and V1–V8
-SDK-backed memory/submit bootstrap for this supported transfer example. It
+The user-app target now has a process-local catalog/runtime and V1–V10
+SDK-backed memory/submit/query/graphics-pipeline bootstrap. The current frame
+remains the supported transfer example. It
 reports real SDK/Vulkan errors; it does not manufacture a device, install a
 compatibility renderer, or fall back to the software backend. Building the
 artifact verifies the application source and app-link graph, not that the
