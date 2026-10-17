@@ -1945,6 +1945,7 @@ int main(void) {
                 uint32_t acquired_image = UINT32_MAX;
                 uint32_t retained_present_base;
                 uint32_t cancel_base;
+                uint32_t polls_before_idle;
 
                 CHECK(vkCreateSwapchainKHR(device, &swapchain_create_info,
                                           NULL, &swapchain) == RIN_VK_SUCCESS);
@@ -2040,6 +2041,14 @@ int main(void) {
                           UINT64_C(1280) * 4u &&
                       provider.last_present_v2.image_layout.planes[0].size_bytes ==
                           UINT64_C(1280) * 720u * 4u);
+
+                /* Queue idleness covers command execution, not release of a
+                 * still-displayed image from the presentation engine. */
+                polls_before_idle = provider.poll_call_count;
+                CHECK(vkQueueWaitIdle(queue) == RIN_VK_SUCCESS);
+                CHECK(provider.poll_call_count == polls_before_idle);
+                CHECK(vkDeviceWaitIdle(device) == RIN_VK_SUCCESS);
+                CHECK(provider.poll_call_count == polls_before_idle);
 
                 /* A pending FIFO present must not prevent acquisition of a
                  * different, still-available swapchain image. */

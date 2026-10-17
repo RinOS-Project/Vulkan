@@ -10656,38 +10656,6 @@ static RinVkResult poll_pending_present(
     return RIN_VK_SUCCESS;
 }
 
-static RinVkResult poll_device_presentations_locked(
-        struct RinVkDevice_T* device, uint32_t queue_index) {
-    uint32_t index;
-    RinVkResult result = RIN_VK_SUCCESS;
-    for (index = 0u; index < RIN_VK_MAX_WSI_PRESENTS; ++index) {
-        RinVkPendingPresent* pending = &device->pending_presents[index];
-        RinVkResult poll_result;
-        if (pending->state != RIN_VK_PRESENT_RECORD_ACTIVE &&
-            pending->state != RIN_VK_PRESENT_RECORD_UNTRACKED)
-            continue;
-        if (queue_index != UINT32_MAX &&
-            pending->queue_index != queue_index)
-            continue;
-        poll_result = poll_pending_present(device, pending);
-        if (poll_result == RIN_VK_NOT_READY)
-            result = RIN_VK_NOT_READY;
-        else if (poll_result != RIN_VK_SUCCESS)
-            return poll_result;
-    }
-    return result;
-}
-
-static RinVkResult poll_device_presentations(
-        struct RinVkDevice_T* device, uint32_t queue_index) {
-    RinVkResult result;
-    if (!device) return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    device_wsi_lock(device);
-    result = poll_device_presentations_locked(device, queue_index);
-    device_wsi_unlock(device);
-    return result;
-}
-
 static RinVkResult poll_swapchain_presentations_locked(
         struct RinVkDevice_T* device, uint32_t presentation_display_id) {
     uint32_t index;
@@ -12404,12 +12372,8 @@ RinVkResult RIN_VKAPI_CALL vkDeviceWaitIdle(RinVkDevice device) {
         if (result != RIN_VK_SUCCESS && result != RIN_VK_NOT_READY)
             return result;
         if (result == RIN_VK_SUCCESS &&
-            !device_submission_slots_active(slot)) {
-            result = poll_device_presentations(slot, UINT32_MAX);
-            if (result != RIN_VK_SUCCESS && result != RIN_VK_NOT_READY)
-                return result;
-            if (result == RIN_VK_SUCCESS) return RIN_VK_SUCCESS;
-        }
+            !device_submission_slots_active(slot))
+            return RIN_VK_SUCCESS;
         yield_thread();
     }
 }
@@ -12424,13 +12388,8 @@ RinVkResult RIN_VKAPI_CALL vkQueueWaitIdle(RinVkQueue queue) {
             return result;
         if (result == RIN_VK_SUCCESS &&
             !queue_submission_slots_active(queue_value->device,
-                                          queue_value->queue_index)) {
-            result = poll_device_presentations(queue_value->device,
-                                               queue_value->queue_index);
-            if (result != RIN_VK_SUCCESS && result != RIN_VK_NOT_READY)
-                return result;
-            if (result == RIN_VK_SUCCESS) return RIN_VK_SUCCESS;
-        }
+                                          queue_value->queue_index))
+            return RIN_VK_SUCCESS;
         yield_thread();
     }
 }
