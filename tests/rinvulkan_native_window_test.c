@@ -3340,7 +3340,7 @@ static int test_process_graphics_pipeline_create(
     RinVkCommandPoolCreateInfo command_pool_info;
     RinVkCommandPool command_pool = 0u;
     RinVkCommandBufferAllocateInfo command_allocate_info;
-    RinVkCommandBuffer command_buffers[2] = {NULL, NULL};
+    RinVkCommandBuffer command_buffers[3] = {NULL, NULL, NULL};
     RinVkCommandBufferBeginInfo command_begin_info;
     RinVkImageMemoryBarrier2 layout_barrier;
     RinVkDependencyInfo dependency_info;
@@ -3348,12 +3348,14 @@ static int test_process_graphics_pipeline_create(
     RinVkRenderingInfo rendering_info;
     RinVkSubmitInfo submit_info;
     RinVkPipeline pipeline = 0u;
+    RinVkPipeline unsupported_viewport_pipeline = 0u;
     uint32_t sdk_shader_before;
     uint32_t sdk_graphics_before;
     uint32_t sdk_destroy_before;
     uint32_t sdk_submit_before;
     uint32_t canonical_submit_before;
     uint32_t canonical_draw_before;
+    uint64_t software_sequence_before;
     const TestResourceBinding* target_binding;
     int ok = 0;
 
@@ -3517,7 +3519,7 @@ static int test_process_graphics_pipeline_create(
         RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     command_allocate_info.commandPool = command_pool;
     command_allocate_info.level = RIN_VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    command_allocate_info.commandBufferCount = 2u;
+    command_allocate_info.commandBufferCount = 3u;
     PROCESS_GRAPHICS_CHECK(vkAllocateCommandBuffers(
         device, &command_allocate_info, command_buffers) == RIN_VK_SUCCESS);
     memset(&command_begin_info, 0, sizeof(command_begin_info));
@@ -3644,10 +3646,44 @@ static int test_process_graphics_pipeline_create(
             adapters->sdk_graphics_pipeline_create_calls ==
                 sdk_graphics_before + 1u);
     }
+    viewport.width = 2.0f;
+    PROCESS_GRAPHICS_CHECK(vkCreateGraphicsPipelines(
+        device, 0u, 1u, &create_info, NULL,
+        &unsupported_viewport_pipeline) == RIN_VK_SUCCESS);
+    viewport.width = 4.0f;
+    PROCESS_GRAPHICS_CHECK(adapters->sdk_graphics_pipeline_create_calls ==
+                           sdk_graphics_before + 2u);
+    PROCESS_GRAPHICS_CHECK(vkBeginCommandBuffer(
+        command_buffers[2], &command_begin_info) == RIN_VK_SUCCESS);
+    vkCmdBeginRendering(command_buffers[2], &rendering_info);
+    vkCmdBindPipeline(command_buffers[2],
+                      RIN_VK_PIPELINE_BIND_POINT_GRAPHICS,
+                      unsupported_viewport_pipeline);
+    vkCmdDraw(command_buffers[2], 3u, 1u, 0u, 0u);
+    vkCmdEndRendering(command_buffers[2]);
+    PROCESS_GRAPHICS_CHECK(vkEndCommandBuffer(command_buffers[2]) ==
+                           RIN_VK_SUCCESS);
+    sdk_submit_before = adapters->sdk_process_submit_calls;
+    canonical_submit_before = adapters->canonical_submit_calls;
+    canonical_draw_before = adapters->canonical_graphics_draw_calls;
+    software_sequence_before = adapters->software->next_sequence;
+    submit_info.pCommandBuffers = &command_buffers[2];
+    PROCESS_GRAPHICS_CHECK(vkQueueSubmit(queue, 1u, &submit_info, 0u) ==
+                           RIN_VK_ERROR_FEATURE_NOT_PRESENT);
+    PROCESS_GRAPHICS_CHECK(adapters->sdk_process_submit_calls ==
+                               sdk_submit_before &&
+                           adapters->canonical_submit_calls ==
+                               canonical_submit_before &&
+                           adapters->canonical_graphics_draw_calls ==
+                               canonical_draw_before &&
+                           adapters->software->next_sequence ==
+                               software_sequence_before);
+    vkDestroyPipeline(device, unsupported_viewport_pipeline, NULL);
+    unsupported_viewport_pipeline = 0u;
     vkDestroyPipeline(device, pipeline, NULL);
     pipeline = 0u;
     PROCESS_GRAPHICS_CHECK(adapters->sdk_object_destroy_calls ==
-                               sdk_destroy_before + 3u);
+                               sdk_destroy_before + 4u);
     ok = 1;
 
 cleanup:
@@ -3655,6 +3691,8 @@ cleanup:
     if (image_view != 0u) vkDestroyImageView(device, image_view, NULL);
     if (image != 0u) vkDestroyImage(device, image, NULL);
     if (image_memory != 0u) vkFreeMemory(device, image_memory, NULL);
+    if (unsupported_viewport_pipeline != 0u)
+        vkDestroyPipeline(device, unsupported_viewport_pipeline, NULL);
     if (pipeline != 0u) vkDestroyPipeline(device, pipeline, NULL);
     if (layout != 0u) vkDestroyPipelineLayout(device, layout, NULL);
     if (fragment_module != 0u)
