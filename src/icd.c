@@ -13435,6 +13435,29 @@ static int synchronization2_barrier_queue_stages_valid(
     return 1;
 }
 
+static void normalize_queue_family_transfer_scopes(
+        const RinGpuVulkanCommandBufferV1* core,
+        uint32_t src_queue_family, uint32_t dst_queue_family,
+        RinGpuVulkanTransferOpV2* operation) {
+    if (!core || !core->pool || !operation ||
+        src_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED ||
+        dst_queue_family == RIN_VK_QUEUE_FAMILY_IGNORED ||
+        src_queue_family == dst_queue_family)
+        return;
+
+    /* Without maintenance8's all-stages transfer flag, Vulkan excludes the
+     * destination scope from release operations and the source scope from
+     * acquire operations. Store those effective scopes in the backend packet
+     * so a native lowerer never has to infer or re-interpret Vulkan rules. */
+    if (core->pool->queue_family_index == src_queue_family) {
+        operation->barrier.dst_stage_mask = 0u;
+        operation->barrier.dst_access_mask = 0u;
+    } else if (core->pool->queue_family_index == dst_queue_family) {
+        operation->barrier.src_stage_mask = 0u;
+        operation->barrier.src_access_mask = 0u;
+    }
+}
+
 static int image_barrier_range_valid(
         const RinVkImageSlot* image,
         const RinVkImageSubresourceRange* range) {
@@ -13485,6 +13508,8 @@ static int build_buffer_barrier_operation(
             src_stage_mask, src_access_mask, dst_stage_mask, dst_access_mask,
             operation))
         return 0;
+    normalize_queue_family_transfer_scopes(
+        core, src_queue_family, dst_queue_family, operation);
     operation->type = RIN_GPU_VULKAN_TRANSFER_OP_BUFFER_BARRIER;
     operation->source_allocation = buffer_handle;
     operation->destination_allocation = buffer->memory->product_allocation;
@@ -13520,6 +13545,8 @@ static int build_image_barrier_operation(
             src_stage_mask, src_access_mask, dst_stage_mask, dst_access_mask,
             operation))
         return 0;
+    normalize_queue_family_transfer_scopes(
+        core, src_queue_family, dst_queue_family, operation);
     operation->type = RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER;
     operation->source_allocation = image_handle;
     operation->destination_allocation = image->memory->product_allocation;
