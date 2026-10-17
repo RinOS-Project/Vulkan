@@ -202,6 +202,33 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME rinvulkan-native-window
         COMMAND rinvulkan-native-window-test)
+    if(RINVULKAN_BUILD_RINOS_NATIVE_WINDOW_EXAMPLE)
+        add_executable(rinvulkan-native-window-runtime-integration-test
+            tests/rinvulkan_native_window_runtime_integration_test.c)
+        target_compile_features(
+            rinvulkan-native-window-runtime-integration-test
+            PRIVATE c_std_11)
+        target_include_directories(
+            rinvulkan-native-window-runtime-integration-test
+            PRIVATE ${RINRUNTIME_INCLUDE_DIR})
+        target_link_libraries(
+            rinvulkan-native-window-runtime-integration-test
+            PRIVATE RinVulkan::RinVulkan
+                    RinVulkan::RinOSProcessBackend
+                    RinRuntime::RinRuntime
+                    Threads::Threads)
+        if(MSVC)
+            target_compile_options(
+                rinvulkan-native-window-runtime-integration-test
+                PRIVATE /W4)
+        else()
+            target_compile_options(
+                rinvulkan-native-window-runtime-integration-test
+                PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+        add_test(NAME rinvulkan-native-window-runtime-integration
+            COMMAND rinvulkan-native-window-runtime-integration-test)
+    endif()
     add_executable(rinvulkan-sdk-target-backend-test
         tests/rinvulkan_sdk_target_backend_test.c)
     target_compile_features(rinvulkan-sdk-target-backend-test

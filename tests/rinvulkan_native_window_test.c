@@ -3817,7 +3817,8 @@ static int test_process_graphics_pipeline_create(
     ok = 1;
 
 cleanup:
-    if (command_pool != 0u) vkDestroyCommandPool(device, command_pool, NULL);
+    if (command_pool != NULL)
+        vkDestroyCommandPool(device, command_pool, NULL);
     if (image_view != 0u) vkDestroyImageView(device, image_view, NULL);
     if (image != 0u) vkDestroyImage(device, image, NULL);
     if (image_memory != 0u) vkFreeMemory(device, image_memory, NULL);
@@ -4581,7 +4582,7 @@ done:
                 "dynamic-rendering barrier fixture failed at %s (record_error=%u, transfer_ops=%u, end_result=%d)\n",
                 stage, command_core ? command_core->record_error : 0u,
                 command_core ? command_core->transfer_op_count : 0u, result);
-    if (pool != 0u) vkDestroyCommandPool(device, pool, NULL);
+    if (pool != NULL) vkDestroyCommandPool(device, pool, NULL);
     if (view != 0u) vkDestroyImageView(device, view, NULL);
     if (image != 0u) vkDestroyImage(device, image, NULL);
     if (memory != 0u) vkFreeMemory(device, memory, NULL);
