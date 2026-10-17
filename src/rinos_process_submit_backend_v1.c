@@ -2,6 +2,7 @@
 #include "atomic_compat.h"
 
 #include <rin/gpu_graphics_pipeline_owner_v1.h>
+#include <rin/gpu_sampler_owner_v1.h>
 #include <rinvulkan/rinos_process_submit_backend_v1.h>
 #include <ringpu/rin_shader.h>
 
@@ -2351,13 +2352,19 @@ static uint64_t rinos_v7_device_generation(
 static int rinos_v7_destroy_sampler_locked(
         RinVulkanRinOSProcessSubmitBackendV7* backend,
         RinVulkanRinOSProcessSamplerV7* sampler) {
+    RinGpuProcessSamplerOwnerV1 owner;
     RinResult sdk_result;
     if (!backend || !sampler || sampler->sampler_token == 0u ||
         sampler->active != 1u)
         return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
-    sdk_result = rin_gpu_process_object_destroy_v1(
-        rinos_v7_device_id(backend), rinos_v7_device_generation(backend),
-        sampler->sampler_token);
+    rin_gpu_process_sampler_owner_v1_init(&owner);
+    owner.device_id = rinos_v7_device_id(backend);
+    owner.device_generation = rinos_v7_device_generation(backend);
+    owner.sampler_token = sampler->sampler_token;
+    owner.phase = RIN_GPU_PROCESS_SAMPLER_OWNER_PHASE_ACTIVE;
+    if (!rin_gpu_process_sampler_owner_v1_valid(&owner))
+        return RIN_VULKAN_PRODUCT_PROTOCOL;
+    sdk_result = rin_gpu_process_sampler_owner_v1_destroy(&owner);
     if (sdk_result != RIN_SUCCESS) return rinos_map_sdk_result(sdk_result);
     memset(sampler, 0, sizeof(*sampler));
     return RIN_VULKAN_PRODUCT_OK;
@@ -2371,6 +2378,7 @@ static int rinos_v7_create_sampler(
     RinVulkanRinOSProcessSamplerV7* slot = NULL;
     RinVulkanProductSamplerDescV11 source_copy;
     RinGpuProcessSamplerDescV1 descriptor;
+    RinGpuProcessSamplerOwnerV1 owner;
     uint32_t address_u;
     uint32_t address_v;
     uint32_t address_w;
@@ -2439,9 +2447,10 @@ static int rinos_v7_create_sampler(
     descriptor.max_anisotropy = 1u;
     descriptor.flags = 0u;
     descriptor.compare_op = compare_op;
-    sdk_result = rin_gpu_process_sampler_create_v1(
+    rin_gpu_process_sampler_owner_v1_init(&owner);
+    sdk_result = rin_gpu_process_sampler_owner_v1_create(
         rinos_v7_device_id(backend), rinos_v7_device_generation(backend),
-        sampler_token, &descriptor);
+        sampler_token, &descriptor, &owner);
     result = rinos_map_sdk_result(sdk_result);
     if (result == RIN_VULKAN_PRODUCT_OK) {
         slot->sampler_token = sampler_token;
