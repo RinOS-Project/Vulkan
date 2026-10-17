@@ -888,23 +888,38 @@ int main(void) {
           backend_v6.graphics_pipelines[0].pipeline_token == 0u);
 
     graphics_pipeline_create_result = RIN_ERROR_NOT_SUPPORTED;
+    object_destroy_result = RIN_ERROR_BUSY;
     CHECK(platform_v10->create_process_graphics_pipeline(
               platform_v10->context, pipeline_cookie + 1u, shader_ir,
               sizeof(shader_ir), shader_ir, sizeof(shader_ir),
               RIN_GPU_FORMAT_RGBA8_UNORM,
-              RIN_GPU_PRIMITIVE_TRIANGLE_LIST) ==
-          RIN_VULKAN_PRODUCT_UNSUPPORTED);
+              RIN_GPU_PRIMITIVE_TRIANGLE_LIST) == RIN_VULKAN_PRODUCT_BUSY);
     CHECK(graphics_pipeline_create_calls == 2u &&
-          backend_v6.graphics_pipelines[0].pipeline_token == 0u &&
+          backend_v6.graphics_pipelines[0].pipeline_token ==
+              pipeline_cookie + 1u &&
+          backend_v6.graphics_pipelines[0].pipeline_active == 0u &&
+          backend_v6.graphics_pipelines[0].fragment_shader_active == 1u &&
+          backend_v6.graphics_pipelines[0].vertex_shader_active == 1u &&
+          rin_vulkan_rinos_process_submit_backend_v6_valid(&backend_v6) &&
           observed_destroy_tokens[4] != 0u &&
           observed_destroy_tokens[5] != 0u);
 
     graphics_pipeline_create_result = RIN_SUCCESS;
+    object_destroy_result = RIN_SUCCESS;
     CHECK(platform_v10->create_process_graphics_pipeline(
               platform_v10->context, pipeline_cookie + 2u, shader_ir,
               sizeof(shader_ir), shader_ir, sizeof(shader_ir),
               RIN_GPU_FORMAT_RGBA8_UNORM,
               RIN_GPU_PRIMITIVE_TRIANGLE_LIST) == RIN_VULKAN_PRODUCT_OK);
+    CHECK(backend_v6.graphics_pipelines[0].pipeline_token ==
+              pipeline_cookie + 2u &&
+          backend_v6.graphics_pipelines[0].pipeline_active == 1u &&
+          observed_destroy_tokens[6] ==
+              ((RIN_VULKAN_RINOS_PROCESS_GRAPHICS_FRAGMENT_TOKEN_TAG << 48u) |
+               ((pipeline_cookie + 1u) & UINT64_C(0x0000FFFFFFFFFFFF))) &&
+          observed_destroy_tokens[7] ==
+              ((RIN_VULKAN_RINOS_PROCESS_GRAPHICS_VERTEX_TOKEN_TAG << 48u) |
+               ((pipeline_cookie + 1u) & UINT64_C(0x0000FFFFFFFFFFFF))));
     object_destroy_result = RIN_ERROR_BUSY;
     CHECK(rin_vulkan_rinos_process_submit_backend_v6_detach(&backend_v6) ==
           RIN_VULKAN_PRODUCT_BUSY);

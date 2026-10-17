@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "atomic_compat.h"
 
+#include <rin/gpu_graphics_pipeline_owner_v1.h>
 #include <rinvulkan/rinos_process_submit_backend_v1.h>
 #include <ringpu/rin_shader.h>
 
@@ -1896,7 +1897,13 @@ static int rinos_v6_header_valid(
             pipeline->fragment_shader_token == 0u ||
             pipeline->pipeline_token == pipeline->vertex_shader_token ||
             pipeline->pipeline_token == pipeline->fragment_shader_token ||
-            pipeline->vertex_shader_token == pipeline->fragment_shader_token)
+            pipeline->vertex_shader_token == pipeline->fragment_shader_token ||
+            (pipeline->pipeline_active == 0u &&
+             pipeline->vertex_shader_active == 0u &&
+             pipeline->fragment_shader_active == 0u) ||
+            (pipeline->pipeline_active != 0u &&
+             (pipeline->vertex_shader_active == 0u ||
+              pipeline->fragment_shader_active == 0u)))
             return 0;
         for (prior = 0u; prior < index; ++prior)
             if (backend->graphics_pipelines[prior].pipeline_token ==
@@ -1910,43 +1917,86 @@ static int rinos_v6_header_valid(
     return 1;
 }
 
+static uint32_t rinos_v6_graphics_pipeline_owned_objects(
+        const RinVulkanRinOSProcessGraphicsPipelineV6* pipeline) {
+    uint32_t owned_objects = 0u;
+    if (pipeline->pipeline_active != 0u)
+        owned_objects |= RIN_GPU_PROCESS_GRAPHICS_PIPELINE_OWNER_HAS_PIPELINE;
+    if (pipeline->vertex_shader_active != 0u)
+        owned_objects |=
+            RIN_GPU_PROCESS_GRAPHICS_PIPELINE_OWNER_HAS_VERTEX_MODULE;
+    if (pipeline->fragment_shader_active != 0u)
+        owned_objects |=
+            RIN_GPU_PROCESS_GRAPHICS_PIPELINE_OWNER_HAS_FRAGMENT_MODULE;
+    return owned_objects;
+}
+
+static void rinos_v6_graphics_pipeline_owner_from_slot(
+        RinVulkanRinOSProcessSubmitBackendV6* backend,
+        const RinVulkanRinOSProcessGraphicsPipelineV6* pipeline,
+        RinGpuProcessGraphicsPipelineOwnerV1* owner) {
+    rin_gpu_process_graphics_pipeline_owner_v1_init(owner);
+    owner->owned_objects =
+        rinos_v6_graphics_pipeline_owned_objects(pipeline);
+    if (owner->owned_objects == 0u) return;
+    owner->device_id = backend->submit_backend.submit_backend
+                           .compute_backend.compute_backend
+                           .submit_backend.device_id;
+    owner->device_generation = backend->submit_backend.submit_backend
+                                  .compute_backend.compute_backend
+                                  .submit_backend.device_generation;
+    owner->pipeline_token = pipeline->pipeline_token;
+    owner->vertex_shader_token = pipeline->vertex_shader_token;
+    owner->fragment_shader_token = pipeline->fragment_shader_token;
+    owner->phase = owner->owned_objects ==
+                           RIN_GPU_PROCESS_GRAPHICS_PIPELINE_OWNER_ALL_OBJECTS
+                       ? RIN_GPU_PROCESS_GRAPHICS_PIPELINE_OWNER_PHASE_ACTIVE
+                       : RIN_GPU_PROCESS_GRAPHICS_PIPELINE_OWNER_PHASE_CLEANUP_PENDING;
+}
+
+static void rinos_v6_graphics_pipeline_slot_from_owner(
+        RinVulkanRinOSProcessGraphicsPipelineV6* pipeline,
+        const RinGpuProcessGraphicsPipelineOwnerV1* owner) {
+    if (owner->phase == RIN_GPU_PROCESS_GRAPHICS_PIPELINE_OWNER_PHASE_EMPTY) {
+        memset(pipeline, 0, sizeof(*pipeline));
+        return;
+    }
+    pipeline->pipeline_token = owner->pipeline_token;
+    pipeline->vertex_shader_token = owner->vertex_shader_token;
+    pipeline->fragment_shader_token = owner->fragment_shader_token;
+    pipeline->pipeline_active =
+        (owner->owned_objects &
+         RIN_GPU_PROCESS_GRAPHICS_PIPELINE_OWNER_HAS_PIPELINE) != 0u;
+    pipeline->vertex_shader_active =
+        (owner->owned_objects &
+         RIN_GPU_PROCESS_GRAPHICS_PIPELINE_OWNER_HAS_VERTEX_MODULE) != 0u;
+    pipeline->fragment_shader_active =
+        (owner->owned_objects &
+         RIN_GPU_PROCESS_GRAPHICS_PIPELINE_OWNER_HAS_FRAGMENT_MODULE) != 0u;
+    pipeline->reserved = 0u;
+}
+
 static int rinos_v6_destroy_pipeline_locked(
         RinVulkanRinOSProcessSubmitBackendV6* backend,
         RinVulkanRinOSProcessGraphicsPipelineV6* pipeline) {
-    uint64_t device_id;
-    uint64_t device_generation;
+    RinGpuProcessGraphicsPipelineOwnerV1 owner;
     RinResult sdk_result;
-    if (!backend || !pipeline || pipeline->pipeline_token == 0u)
+    if (!backend || !pipeline)
         return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
-    device_id = backend->submit_backend.submit_backend
-                    .compute_backend.compute_backend
-                    .submit_backend.device_id;
-    device_generation = backend->submit_backend.submit_backend
-                            .compute_backend.compute_backend
-                            .submit_backend.device_generation;
-    if (pipeline->pipeline_active != 0u) {
-        sdk_result = rin_gpu_process_object_destroy_v1(
-            device_id, device_generation, pipeline->pipeline_token);
-        if (sdk_result != RIN_SUCCESS)
-            return rinos_map_sdk_result(sdk_result);
-        pipeline->pipeline_active = 0u;
+    if (pipeline->pipeline_token == 0u &&
+        pipeline->vertex_shader_token == 0u &&
+        pipeline->fragment_shader_token == 0u)
+        return rinos_v6_graphics_pipeline_owned_objects(pipeline) == 0u
+                   ? RIN_VULKAN_PRODUCT_OK
+                   : RIN_VULKAN_PRODUCT_PROTOCOL;
+    rinos_v6_graphics_pipeline_owner_from_slot(backend, pipeline, &owner);
+    if (owner.phase == RIN_GPU_PROCESS_GRAPHICS_PIPELINE_OWNER_PHASE_EMPTY) {
+        memset(pipeline, 0, sizeof(*pipeline));
+        return RIN_VULKAN_PRODUCT_OK;
     }
-    if (pipeline->fragment_shader_active != 0u) {
-        sdk_result = rin_gpu_process_object_destroy_v1(
-            device_id, device_generation, pipeline->fragment_shader_token);
-        if (sdk_result != RIN_SUCCESS)
-            return rinos_map_sdk_result(sdk_result);
-        pipeline->fragment_shader_active = 0u;
-    }
-    if (pipeline->vertex_shader_active != 0u) {
-        sdk_result = rin_gpu_process_object_destroy_v1(
-            device_id, device_generation, pipeline->vertex_shader_token);
-        if (sdk_result != RIN_SUCCESS)
-            return rinos_map_sdk_result(sdk_result);
-        pipeline->vertex_shader_active = 0u;
-    }
-    memset(pipeline, 0, sizeof(*pipeline));
-    return RIN_VULKAN_PRODUCT_OK;
+    sdk_result = rin_gpu_process_graphics_pipeline_owner_v1_destroy(&owner);
+    rinos_v6_graphics_pipeline_slot_from_owner(pipeline, &owner);
+    return rinos_map_sdk_result(sdk_result);
 }
 
 static int rinos_v6_retry_pending_locked(
@@ -1979,6 +2029,7 @@ static int rinos_v6_create_graphics_pipeline(
         (RinVulkanRinOSProcessSubmitBackendV6*)context;
     RinVulkanRinOSProcessGraphicsPipelineV6* slot = NULL;
     RinGpuProcessGraphicsPipelineDescV1 descriptor;
+    RinGpuProcessGraphicsPipelineOwnerV1 owner;
     uint64_t vertex_token;
     uint64_t fragment_token;
     uint64_t device_id;
@@ -2054,46 +2105,31 @@ static int rinos_v6_create_graphics_pipeline(
     device_generation = backend->submit_backend.submit_backend
                             .compute_backend.compute_backend
                             .submit_backend.device_generation;
-    memset(slot, 0, sizeof(*slot));
-    slot->pipeline_token = pipeline_token;
-    slot->vertex_shader_token = vertex_token;
-    slot->fragment_shader_token = fragment_token;
-    sdk_result = rin_gpu_process_shader_module_create_v1(
-        device_id, device_generation, vertex_token, vertex_shader_ir,
-        vertex_shader_ir_size);
-    result = rinos_map_sdk_result(sdk_result);
-    if (result != RIN_VULKAN_PRODUCT_OK) goto rollback;
-    slot->vertex_shader_active = 1u;
-    sdk_result = rin_gpu_process_shader_module_create_v1(
-        device_id, device_generation, fragment_token, fragment_shader_ir,
-        fragment_shader_ir_size);
-    result = rinos_map_sdk_result(sdk_result);
-    if (result != RIN_VULKAN_PRODUCT_OK) goto rollback;
-    slot->fragment_shader_active = 1u;
     memset(&descriptor, 0, sizeof(descriptor));
     descriptor.struct_size = sizeof(descriptor);
     descriptor.version = RIN_GPU_PROCESS_GRAPHICS_PIPELINE_DESC_VERSION_V1;
     descriptor.color_format = color_format;
     descriptor.primitive_topology = primitive_topology;
-    sdk_result = rin_gpu_process_graphics_pipeline_create_v1(
+    rin_gpu_process_graphics_pipeline_owner_v1_init(&owner);
+    sdk_result = rin_gpu_process_graphics_pipeline_owner_v1_create(
         device_id, device_generation, pipeline_token, vertex_token,
-        fragment_token, &descriptor);
+        fragment_token, vertex_shader_ir, vertex_shader_ir_size,
+        fragment_shader_ir, fragment_shader_ir_size, &descriptor, &owner);
     result = rinos_map_sdk_result(sdk_result);
     if (result == RIN_VULKAN_PRODUCT_OK) {
-        slot->pipeline_active = 1u;
+        rinos_v6_graphics_pipeline_slot_from_owner(slot, &owner);
         __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
         return RIN_VULKAN_PRODUCT_OK;
     }
-
-rollback:
-    {
-        const int original_result = result;
-        const int cleanup_result =
-            rinos_v6_destroy_pipeline_locked(backend, slot);
-        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
-        return cleanup_result == RIN_VULKAN_PRODUCT_OK ? original_result
-                                                       : cleanup_result;
+    if (owner.phase ==
+        RIN_GPU_PROCESS_GRAPHICS_PIPELINE_OWNER_PHASE_CLEANUP_PENDING) {
+        rinos_v6_graphics_pipeline_slot_from_owner(slot, &owner);
+        result = RIN_VULKAN_PRODUCT_BUSY;
+    } else {
+        memset(slot, 0, sizeof(*slot));
     }
+    __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+    return result;
 }
 
 static int rinos_v6_destroy_graphics_pipeline(
