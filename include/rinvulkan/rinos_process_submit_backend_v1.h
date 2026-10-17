@@ -30,6 +30,8 @@ extern "C" {
 #define RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V6_VERSION UINT32_C(6)
 #define RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V6_MAX_GRAPHICS_PIPELINES \
     UINT32_C(64)
+#define RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V7_VERSION UINT32_C(7)
+#define RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V7_MAX_SAMPLERS UINT32_C(128)
 #define RIN_VULKAN_RINOS_PROCESS_RESOURCE_COOKIE_TAG UINT64_C(0x5261)
 /* Reserved process-token tag for the private shader-module child associated
  * with a RinVk pipeline token. */
@@ -37,6 +39,7 @@ extern "C" {
 #define RIN_VULKAN_RINOS_PROCESS_GRAPHICS_VERTEX_TOKEN_TAG UINT64_C(0x5262)
 #define RIN_VULKAN_RINOS_PROCESS_GRAPHICS_FRAGMENT_TOKEN_TAG \
     UINT64_C(0x5263)
+#define RIN_VULKAN_RINOS_PROCESS_SAMPLER_TOKEN_TAG UINT64_C(0x5264)
 
 typedef struct RinVulkanRinOSProcessQueueV1 {
     uint32_t queue_id;
@@ -182,6 +185,27 @@ typedef struct RinVulkanRinOSProcessSubmitBackendV6 {
     uint64_t reserved[2];
 } RinVulkanRinOSProcessSubmitBackendV6;
 
+typedef struct RinVulkanRinOSProcessSamplerV7 {
+    uint64_t sampler_token;
+    uint32_t active;
+    uint32_t reserved;
+} RinVulkanRinOSProcessSamplerV7;
+
+/* V7 preserves V6 submission, query, and graphics-pipeline ownership while
+ * adding retryable process-owned sampler create/destroy through the RinOS
+ * SDK. The V10 graphics-pipeline platform remains embedded and unchanged. */
+typedef struct RinVulkanRinOSProcessSubmitBackendV7 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint32_t state;
+    volatile uint32_t lock;
+    RinVulkanRinOSProcessSubmitBackendV6 submit_backend;
+    RinVulkanProductPlatformV11 platform_v11;
+    RinVulkanRinOSProcessSamplerV7 samplers[
+        RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V7_MAX_SAMPLERS];
+    uint64_t reserved[2];
+} RinVulkanRinOSProcessSubmitBackendV7;
+
 /* Initialize caller-zeroed storage for the current RinOS process. Each queue
  * ID is bound through the authenticated RinOS SDK; the returned V6 callback
  * submits canonical RinGPU records through the process-submit syscall. The
@@ -283,6 +307,20 @@ rin_vulkan_rinos_process_submit_backend_v6_platform_v10(
     RinVulkanRinOSProcessSubmitBackendV6* backend);
 int rin_vulkan_rinos_process_submit_backend_v6_detach(
     RinVulkanRinOSProcessSubmitBackendV6* backend);
+
+int rin_vulkan_rinos_process_submit_backend_v7_init(
+    RinVulkanRinOSProcessSubmitBackendV7* backend,
+    RinVulkanProductPlatformV5* parent, uint64_t device_id,
+    uint64_t device_generation,
+    const RinVulkanRinOSProcessQueueMapV4* mappings,
+    uint32_t mapping_count);
+int rin_vulkan_rinos_process_submit_backend_v7_valid(
+    const RinVulkanRinOSProcessSubmitBackendV7* backend);
+RinVulkanProductPlatformV11*
+rin_vulkan_rinos_process_submit_backend_v7_platform_v11(
+    RinVulkanRinOSProcessSubmitBackendV7* backend);
+int rin_vulkan_rinos_process_submit_backend_v7_detach(
+    RinVulkanRinOSProcessSubmitBackendV7* backend);
 
 #ifdef __cplusplus
 }

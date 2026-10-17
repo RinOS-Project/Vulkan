@@ -11,6 +11,7 @@ static RinResult submit_result;
 static RinResult shader_create_result;
 static RinResult pipeline_create_result;
 static RinResult graphics_pipeline_create_result;
+static RinResult sampler_create_result;
 static RinResult object_destroy_result;
 static RinResult resource_bind_result;
 static RinResult resource_unbind_result;
@@ -35,6 +36,7 @@ static uint32_t observed_resource_count;
 static uint32_t shader_create_calls;
 static uint32_t pipeline_create_calls;
 static uint32_t graphics_pipeline_create_calls;
+static uint32_t sampler_create_calls;
 static uint32_t object_destroy_calls;
 static uint32_t resource_bind_calls;
 static uint32_t resource_unbind_calls;
@@ -52,6 +54,8 @@ static uint64_t observed_graphics_pipeline_token;
 static uint64_t observed_graphics_vertex_token;
 static uint64_t observed_graphics_fragment_token;
 static RinGpuProcessGraphicsPipelineDescV1 observed_graphics_pipeline_desc;
+static uint64_t observed_sampler_token;
+static RinGpuProcessSamplerDescV1 observed_sampler_desc;
 static uint64_t observed_destroy_tokens[8];
 static uint32_t query_create_calls;
 static uint32_t query_read_calls;
@@ -183,6 +187,20 @@ RinResult rin_gpu_process_graphics_pipeline_create_v1(
     observed_graphics_fragment_token = fragment_shader_token;
     observed_graphics_pipeline_desc = *descriptor;
     return graphics_pipeline_create_result;
+}
+
+RinResult rin_gpu_process_sampler_create_v1(
+    uint64_t device_id, uint64_t device_generation, uint64_t sampler_token,
+    const RinGpuProcessSamplerDescV1* descriptor) {
+    ++sampler_create_calls;
+    if (device_id != UINT64_C(0x1111) ||
+        device_generation != UINT64_C(0x2222) || sampler_token == 0u ||
+        !descriptor || descriptor->struct_size != sizeof(*descriptor) ||
+        descriptor->version != RIN_GPU_PROCESS_SAMPLER_DESC_VERSION_V1)
+        return RIN_ERROR_INVALID_ARGUMENT;
+    observed_sampler_token = sampler_token;
+    observed_sampler_desc = *descriptor;
+    return sampler_create_result;
 }
 
 RinResult rin_gpu_process_resource_bind_v1(
@@ -319,6 +337,7 @@ static void reset_mocks(void) {
     shader_create_result = RIN_SUCCESS;
     pipeline_create_result = RIN_SUCCESS;
     graphics_pipeline_create_result = RIN_SUCCESS;
+    sampler_create_result = RIN_SUCCESS;
     object_destroy_result = RIN_SUCCESS;
     resource_bind_result = RIN_SUCCESS;
     resource_unbind_result = RIN_SUCCESS;
@@ -347,6 +366,7 @@ static void reset_mocks(void) {
     shader_create_calls = 0u;
     pipeline_create_calls = 0u;
     graphics_pipeline_create_calls = 0u;
+    sampler_create_calls = 0u;
     object_destroy_calls = 0u;
     resource_bind_calls = 0u;
     resource_unbind_calls = 0u;
@@ -366,6 +386,8 @@ static void reset_mocks(void) {
     observed_graphics_fragment_token = 0u;
     memset(&observed_graphics_pipeline_desc, 0,
            sizeof(observed_graphics_pipeline_desc));
+    observed_sampler_token = 0u;
+    memset(&observed_sampler_desc, 0, sizeof(observed_sampler_desc));
     memset(observed_destroy_tokens, 0, sizeof(observed_destroy_tokens));
     query_create_calls = 0u;
     query_read_calls = 0u;
@@ -384,6 +406,7 @@ int main(void) {
     RinVulkanRinOSProcessSubmitBackendV4 backend_v4 = {0};
     RinVulkanRinOSProcessSubmitBackendV5 backend_v5 = {0};
     RinVulkanRinOSProcessSubmitBackendV6 backend_v6 = {0};
+    RinVulkanRinOSProcessSubmitBackendV7 backend_v7 = {0};
     RinVulkanProductPlatformV5 parent = {0};
     uint32_t queue_ids[2] = {0u, 2u};
     RinVulkanRinOSProcessQueueMapV4 queue_mappings[3] = {
@@ -401,6 +424,7 @@ int main(void) {
     RinVulkanProductPlatformV8* platform_v8_v4;
     RinVulkanProductPlatformV9* platform_v9;
     RinVulkanProductPlatformV10* platform_v10;
+    RinVulkanProductPlatformV11* platform_v11;
     RinVulkanProductProcessComputeBindingV8 process_bindings[2] = {{0}};
     uint8_t shader_ir[sizeof(RinShaderHeaderV1)] = {0};
     uint64_t process_pipeline_token = 0u;
@@ -891,6 +915,93 @@ int main(void) {
           RIN_VULKAN_PRODUCT_OK);
     CHECK(backend_v6.state == 0u && release_calls == 2u);
 
-    puts("RinVulkan RinOS process-submit/compute/graphics adapter: PASS");
+    reset_mocks();
+    CHECK(rin_vulkan_rinos_process_submit_backend_v7_init(
+              &backend_v7, &parent, 0x1111u, 0x2222u, queue_mappings, 3u) ==
+          RIN_VULKAN_PRODUCT_OK);
+    CHECK(rin_vulkan_rinos_process_submit_backend_v7_valid(&backend_v7));
+    platform_v11 =
+        rin_vulkan_rinos_process_submit_backend_v7_platform_v11(&backend_v7);
+    CHECK(platform_v11 &&
+          platform_v11->base ==
+              &backend_v7.submit_backend.platform_v10 &&
+          platform_v11->create_process_sampler &&
+          platform_v11->destroy_process_sampler);
+    {
+        RinVulkanProductSamplerDescV11 sampler_desc = {0};
+        const uint64_t sampler_token = UINT64_C(0x5264000100000101);
+        sampler_desc.struct_size = sizeof(sampler_desc);
+        sampler_desc.version =
+            RIN_VULKAN_PRODUCT_PROCESS_SAMPLER_DESC_V11_VERSION;
+        sampler_desc.min_filter = 0u;
+        sampler_desc.mag_filter = 1u;
+        sampler_desc.mipmap_mode = 1u;
+        sampler_desc.address_mode_u = 0u;
+        sampler_desc.address_mode_v = 1u;
+        sampler_desc.address_mode_w = 2u;
+        sampler_desc.compare_enable = 1u;
+        sampler_desc.compare_op = 6u;
+        CHECK(platform_v11->create_process_sampler(
+                  platform_v11->context, sampler_token, &sampler_desc) ==
+              RIN_VULKAN_PRODUCT_OK);
+        CHECK(sampler_create_calls == 1u &&
+              observed_sampler_token == sampler_token &&
+              observed_sampler_desc.min_filter ==
+                  RIN_GPU_PROCESS_SAMPLER_FILTER_NEAREST_V1 &&
+              observed_sampler_desc.mag_filter ==
+                  RIN_GPU_PROCESS_SAMPLER_FILTER_LINEAR_V1 &&
+              observed_sampler_desc.mip_filter ==
+                  RIN_GPU_PROCESS_SAMPLER_FILTER_LINEAR_V1 &&
+              observed_sampler_desc.address_u ==
+                  RIN_GPU_PROCESS_SAMPLER_ADDRESS_REPEAT_V1 &&
+              observed_sampler_desc.address_v ==
+                  RIN_GPU_PROCESS_SAMPLER_ADDRESS_MIRRORED_REPEAT_V1 &&
+              observed_sampler_desc.address_w ==
+                  RIN_GPU_PROCESS_SAMPLER_ADDRESS_CLAMP_TO_EDGE_V1 &&
+              observed_sampler_desc.compare_op ==
+                  RIN_GPU_PROCESS_SAMPLER_COMPARE_GREATER_EQUAL_V1 &&
+              observed_sampler_desc.max_anisotropy == 1u &&
+              observed_sampler_desc.min_lod == 0.0f &&
+              observed_sampler_desc.max_lod == 32.0f &&
+              backend_v7.samplers[0].active == 1u);
+        sampler_desc.address_mode_u = 3u;
+        CHECK(platform_v11->create_process_sampler(
+                  platform_v11->context, sampler_token + 1u,
+                  &sampler_desc) == RIN_VULKAN_PRODUCT_UNSUPPORTED);
+        CHECK(sampler_create_calls == 1u &&
+              backend_v7.samplers[0].sampler_token == sampler_token);
+        object_destroy_result = RIN_ERROR_BUSY;
+        CHECK(platform_v11->destroy_process_sampler(
+                  platform_v11->context, sampler_token) ==
+              RIN_VULKAN_PRODUCT_BUSY);
+        CHECK(backend_v7.samplers[0].active == 1u &&
+              backend_v7.samplers[0].sampler_token == sampler_token);
+        object_destroy_result = RIN_SUCCESS;
+        CHECK(platform_v11->destroy_process_sampler(
+                  platform_v11->context, sampler_token) ==
+              RIN_VULKAN_PRODUCT_OK);
+        CHECK(backend_v7.samplers[0].sampler_token == 0u);
+
+        sampler_desc.address_mode_u = 0u;
+        sampler_create_result = RIN_ERROR_NOT_SUPPORTED;
+        CHECK(platform_v11->create_process_sampler(
+                  platform_v11->context, sampler_token + 2u,
+                  &sampler_desc) == RIN_VULKAN_PRODUCT_UNSUPPORTED);
+        CHECK(backend_v7.samplers[0].sampler_token == 0u);
+        sampler_create_result = RIN_SUCCESS;
+        CHECK(platform_v11->create_process_sampler(
+                  platform_v11->context, sampler_token + 3u,
+                  &sampler_desc) == RIN_VULKAN_PRODUCT_OK);
+        object_destroy_result = RIN_ERROR_BUSY;
+        CHECK(rin_vulkan_rinos_process_submit_backend_v7_detach(&backend_v7) ==
+              RIN_VULKAN_PRODUCT_BUSY);
+        CHECK(backend_v7.state == 2u && backend_v7.samplers[0].active == 1u);
+        object_destroy_result = RIN_SUCCESS;
+        CHECK(rin_vulkan_rinos_process_submit_backend_v7_detach(&backend_v7) ==
+              RIN_VULKAN_PRODUCT_OK);
+        CHECK(backend_v7.state == 0u && release_calls == 2u);
+    }
+
+    puts("RinVulkan RinOS process-submit/compute/graphics/sampler adapter: PASS");
     return 0;
 }

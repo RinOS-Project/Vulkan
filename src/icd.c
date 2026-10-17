@@ -85,6 +85,7 @@
 #define RIN_VK_SEMAPHORE_TAG UINT64_C(0x5253)
 #define RIN_VK_IMAGE_VIEW_TAG UINT64_C(0x5256)
 #define RIN_VK_SAMPLER_TAG UINT64_C(0x5254)
+#define RIN_VK_PROCESS_SAMPLER_TOKEN_TAG UINT64_C(0x5264)
 #define RIN_VK_PIPELINE_LAYOUT_TAG UINT64_C(0x5250)
 #define RIN_VK_PIPELINE_CACHE_TAG UINT64_C(0x5243)
 #define RIN_VK_PIPELINE_TAG UINT64_C(0x5258)
@@ -393,6 +394,7 @@ typedef struct RinVkSamplerSlot {
     uint32_t state;
     uint32_t generation;
     struct RinVkDevice_T* owner;
+    uint64_t process_sampler_token;
     uint32_t mag_filter;
     uint32_t min_filter;
     uint32_t mipmap_mode;
@@ -651,6 +653,7 @@ static uintptr_t g_product_binding_v7;
 static uintptr_t g_product_binding_v8;
 static uintptr_t g_product_binding_v9;
 static uintptr_t g_product_binding_v10;
+static uintptr_t g_product_binding_v11;
 static uint32_t g_active_product_calls;
 static volatile uint64_t g_next_process_bind_group_token = UINT64_C(1);
 static volatile uint64_t g_next_process_query_token = UINT64_C(1);
@@ -1477,6 +1480,17 @@ static RinVulkanProductPlatformV10* product_v10_for_base(
     return platform->base == base ? platform : NULL;
 }
 
+static RinVulkanProductPlatformV11* product_v11_for_base(
+        const RinVulkanProductPlatformV10* base) {
+    const uintptr_t binding =
+        __atomic_load_n(&g_product_binding_v11, __ATOMIC_ACQUIRE);
+    RinVulkanProductPlatformV11* platform;
+    if (binding == 0u || binding == RIN_VK_ICD_BINDING_TRANSITION)
+        return NULL;
+    platform = (RinVulkanProductPlatformV11*)binding;
+    return platform->base == base ? platform : NULL;
+}
+
 /* Keep the V10 adapter pinned by the same product-call lease used by the
  * callback. A V7 process pipeline chain without V10 is reported to the caller
  * as a missing process graphics provider, never silently downgraded. */
@@ -1510,6 +1524,44 @@ static RinVulkanProductPlatformV10* acquire_process_graphics_pipeline_platform(
     product_v10 = product_v9 ? product_v10_for_base(product_v9) : NULL;
     if (!product_v10) release_product();
     return product_v10;
+}
+
+/* A RinOS process backend requires the V11 sampler lifecycle once the V7
+ * process-submit chain is present. Older non-process product providers keep
+ * their existing local sampler representation; the RinOS process route never
+ * silently substitutes it for a missing SDK object provider. */
+static RinVulkanProductPlatformV11* acquire_process_sampler_platform(
+        int* process_platform_required) {
+    RinVulkanProductPlatformV1* product = acquire_product();
+    RinVulkanProductPlatformV2* product_v2;
+    RinVulkanProductPlatformV3* product_v3;
+    RinVulkanProductPlatformV4* product_v4;
+    RinVulkanProductPlatformV5* product_v5;
+    RinVulkanProductPlatformV6* product_v6;
+    RinVulkanProductPlatformV7* product_v7;
+    RinVulkanProductPlatformV8* product_v8;
+    RinVulkanProductPlatformV9* product_v9;
+    RinVulkanProductPlatformV10* product_v10;
+    RinVulkanProductPlatformV11* product_v11;
+    if (process_platform_required) *process_platform_required = 0;
+    if (!product) return NULL;
+    product_v2 = product_v2_for_base(product);
+    product_v3 = product_v2 ? product_v3_for_base(product_v2) : NULL;
+    product_v4 = product_v3 ? product_v4_for_base(product_v3) : NULL;
+    product_v5 = product_v4 ? product_v5_for_base(product_v4) : NULL;
+    product_v6 = product_v5 ? product_v6_for_base(product_v5) : NULL;
+    product_v7 = product_v6 ? product_v7_for_base(product_v6) : NULL;
+    if (!product_v7) {
+        release_product();
+        return NULL;
+    }
+    if (process_platform_required) *process_platform_required = 1;
+    product_v8 = product_v8_for_base(product_v7);
+    product_v9 = product_v8 ? product_v9_for_base(product_v8) : NULL;
+    product_v10 = product_v9 ? product_v10_for_base(product_v9) : NULL;
+    product_v11 = product_v10 ? product_v11_for_base(product_v10) : NULL;
+    if (!product_v11) release_product();
+    return product_v11;
 }
 
 /* Holds one active product call until the returned V9 query callback finishes.
@@ -3224,6 +3276,18 @@ static int process_graphics_pipeline_slots_active(void) {
     for (index = 0u; index < RIN_VK_MAX_PIPELINES; ++index)
         if (g_pipelines[index].process_graphics_pipeline_token != 0u)
             return 1;
+    return 0;
+}
+
+static int process_sampler_slots_active(void) {
+    uint32_t index;
+    for (index = 0u; index < RIN_VK_MAX_SAMPLERS; ++index) {
+        const uint32_t state =
+            __atomic_load_n(&g_samplers[index].state, __ATOMIC_ACQUIRE);
+        if ((state == 1u || state == 2u) &&
+            g_samplers[index].process_sampler_token != 0u)
+            return 1;
+    }
     return 0;
 }
 
@@ -6078,6 +6142,7 @@ static void clear_image_view_slot(RinVkImageViewSlot* slot) {
 static void clear_sampler_slot(RinVkSamplerSlot* slot) {
     if (!slot) return;
     slot->owner = NULL;
+    slot->process_sampler_token = 0u;
     slot->mag_filter = 0u;
     slot->min_filter = 0u;
     slot->mipmap_mode = 0u;
@@ -8229,6 +8294,7 @@ int rin_gpu_vulkan_icd_unbind_product_platform_v10(
     if (platform->struct_size != sizeof(*platform) ||
         platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V10_VERSION ||
         !platform->base ||
+        __atomic_load_n(&g_product_binding_v11, __ATOMIC_ACQUIRE) != 0u ||
         __atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
         process_graphics_pipeline_slots_active()) {
         __atomic_store_n(&g_product_binding_v10, (uintptr_t)platform,
@@ -8236,6 +8302,62 @@ int rin_gpu_vulkan_icd_unbind_product_platform_v10(
         return RIN_GPU_VULKAN_BUSY;
     }
     __atomic_store_n(&g_product_binding_v10, 0u, __ATOMIC_RELEASE);
+    return RIN_GPU_VULKAN_OK;
+}
+
+int rin_gpu_vulkan_icd_bind_product_platform_v11(
+        RinVulkanProductPlatformV11* platform) {
+    uintptr_t expected = 0u;
+    uintptr_t v10_binding;
+    if (!platform || (uintptr_t)platform == RIN_VK_ICD_BINDING_TRANSITION ||
+        platform->struct_size != sizeof(*platform) ||
+        platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V11_VERSION ||
+        !platform->base || !platform->context ||
+        !platform->create_process_sampler ||
+        !platform->destroy_process_sampler ||
+        !wsi_zero_words(platform->reserved, 2u))
+        return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    if (!__atomic_compare_exchange_n(&g_product_binding_v11, &expected,
+                                     RIN_VK_ICD_BINDING_TRANSITION, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        return RIN_GPU_VULKAN_BUSY;
+    v10_binding =
+        __atomic_load_n(&g_product_binding_v10, __ATOMIC_ACQUIRE);
+    if (v10_binding == 0u ||
+        v10_binding == RIN_VK_ICD_BINDING_TRANSITION ||
+        v10_binding != (uintptr_t)platform->base ||
+        !platform->base->base ||
+        __atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
+        process_sampler_slots_active()) {
+        __atomic_store_n(&g_product_binding_v11, 0u, __ATOMIC_RELEASE);
+        return RIN_GPU_VULKAN_BUSY;
+    }
+    __atomic_store_n(&g_product_binding_v11, (uintptr_t)platform,
+                     __ATOMIC_RELEASE);
+    return RIN_GPU_VULKAN_OK;
+}
+
+int rin_gpu_vulkan_icd_unbind_product_platform_v11(
+        RinVulkanProductPlatformV11* platform) {
+    uintptr_t expected;
+    if (!platform) return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    expected = (uintptr_t)platform;
+    if (!__atomic_compare_exchange_n(
+            &g_product_binding_v11, &expected,
+            RIN_VK_ICD_BINDING_TRANSITION, 0, __ATOMIC_ACQ_REL,
+            __ATOMIC_RELAXED))
+        return expected == 0u ? RIN_GPU_VULKAN_NOT_INITIALIZED
+                              : RIN_GPU_VULKAN_BUSY;
+    if (platform->struct_size != sizeof(*platform) ||
+        platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V11_VERSION ||
+        !platform->base ||
+        __atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
+        process_sampler_slots_active()) {
+        __atomic_store_n(&g_product_binding_v11, (uintptr_t)platform,
+                         __ATOMIC_RELEASE);
+        return RIN_GPU_VULKAN_BUSY;
+    }
+    __atomic_store_n(&g_product_binding_v11, 0u, __ATOMIC_RELEASE);
     return RIN_GPU_VULKAN_OK;
 }
 
@@ -19010,12 +19132,16 @@ void RIN_VKAPI_CALL vkDestroyImageView(RinVkDevice device, RinVkImageView view,
 RinVkResult RIN_VKAPI_CALL vkCreateSampler(
         RinVkDevice device, const RinVkSamplerCreateInfo* create_info,
         const void* allocator, RinVkSampler* sampler_out) {
+    struct RinVkDevice_T* owner = device_slot(device);
     RinVkSamplerSlot* sampler;
+    RinVulkanProductSamplerDescV11 process_descriptor;
+    RinVulkanProductPlatformV11* process_platform;
     uint32_t index;
+    int process_platform_required = 0;
     (void)allocator;
     if (!sampler_out) return RIN_VK_ERROR_INITIALIZATION_FAILED;
     *sampler_out = 0u;
-    if (!device || !create_info ||
+    if (!owner || !create_info ||
         create_info->sType != RIN_VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO ||
         create_info->pNext || create_info->flags != 0u ||
         create_info->magFilter > RIN_VK_FILTER_LINEAR ||
@@ -19023,10 +19149,46 @@ RinVkResult RIN_VKAPI_CALL vkCreateSampler(
         create_info->mipmapMode > RIN_VK_FILTER_LINEAR ||
         create_info->addressModeU > 4u || create_info->addressModeV > 4u ||
         create_info->addressModeW > 4u || create_info->compareEnable > 1u ||
-        create_info->compareOp > 8u)
+        create_info->compareOp > 7u)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
-    sampler = reserve_sampler_slot(device_slot(device), &index);
+    sampler = reserve_sampler_slot(owner, &index);
     if (!sampler) return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+
+    process_platform = acquire_process_sampler_platform(
+        &process_platform_required);
+    if (!process_platform && process_platform_required) {
+        clear_sampler_slot(sampler);
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    }
+    if (process_platform) {
+        int result;
+        memset(&process_descriptor, 0, sizeof(process_descriptor));
+        process_descriptor.struct_size = sizeof(process_descriptor);
+        process_descriptor.version =
+            RIN_VULKAN_PRODUCT_PROCESS_SAMPLER_DESC_V11_VERSION;
+        process_descriptor.min_filter = create_info->minFilter;
+        process_descriptor.mag_filter = create_info->magFilter;
+        process_descriptor.mipmap_mode = create_info->mipmapMode;
+        process_descriptor.address_mode_u = create_info->addressModeU;
+        process_descriptor.address_mode_v = create_info->addressModeV;
+        process_descriptor.address_mode_w = create_info->addressModeW;
+        process_descriptor.compare_enable = create_info->compareEnable;
+        process_descriptor.compare_op = create_info->compareOp;
+        sampler->process_sampler_token =
+            (RIN_VK_PROCESS_SAMPLER_TOKEN_TAG << 48u) |
+            ((uint64_t)sampler->generation << 16u) |
+            (uint64_t)(index + 1u);
+        result = process_platform->create_process_sampler(
+            process_platform->context, sampler->process_sampler_token,
+            &process_descriptor);
+        release_product();
+        if (result != RIN_VULKAN_PRODUCT_OK) {
+            clear_sampler_slot(sampler);
+            if (result == RIN_VULKAN_PRODUCT_UNSUPPORTED)
+                return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+            return map_product_result(result);
+        }
+    }
     sampler->mag_filter = create_info->magFilter;
     sampler->min_filter = create_info->minFilter;
     sampler->mipmap_mode = create_info->mipmapMode;
@@ -19046,7 +19208,21 @@ void RIN_VKAPI_CALL vkDestroySampler(RinVkDevice device, RinVkSampler sampler,
     RinVkSamplerSlot* slot;
     (void)allocator;
     slot = sampler_slot(device, sampler);
-    if (slot) clear_sampler_slot(slot);
+    if (!slot) return;
+    if (slot->process_sampler_token != 0u) {
+        RinVulkanProductPlatformV11* process_platform;
+        int process_platform_required = 0;
+        int result;
+        process_platform = acquire_process_sampler_platform(
+            &process_platform_required);
+        if (!process_platform) return;
+        result = process_platform->destroy_process_sampler(
+            process_platform->context, slot->process_sampler_token);
+        release_product();
+        if (result != RIN_VULKAN_PRODUCT_OK) return;
+        slot->process_sampler_token = 0u;
+    }
+    clear_sampler_slot(slot);
 }
 
 RinVkResult RIN_VKAPI_CALL vkCreateDescriptorSetLayout(

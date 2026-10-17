@@ -25,8 +25,9 @@ target backend to the real `RIN_SYS_SDK_CALL` syscall, queries the authenticated
 process-local RinVk runtime before `vkCreateInstance`. Before device creation,
 it composes the SDK-backed V1–V5 memory/resource adapter with the V4
 logical-to-physical queue mapping and V6–V8 canonical process-submit adapter.
-The bootstrap also binds V9 process-query and V10 resource-free graphics-
-pipeline lifecycle callbacks, and tears V10 down before its V9–V6 parents. The
+The bootstrap also binds V9 process-query, V10 resource-free graphics-pipeline,
+and V11 process-owned sampler lifecycle callbacks, then tears them down in
+reverse dependency order before the V9–V6 parents. The
 example explicitly queries/enables synchronization2 and dynamic rendering,
 creates a resource-free RGBA8 triangle-list pipeline, records CLEAR/STORE plus
 three-vertex DRAW, then transitions the application-owned image for the normal
@@ -55,8 +56,8 @@ then releases the V5→V1 parent before the runtime. Native-window surface stays
 on RinRuntime's Compositor import path; physical-display WSI/provider
 registration and final scanout remain separate and are not claimed complete.
 
-The user-app target now has a process-local catalog/runtime and V1–V10
-SDK-backed memory/submit/query/graphics-pipeline bootstrap. Its source records
+The user-app target now has a process-local catalog/runtime and V1–V11
+SDK-backed memory/submit/query/graphics-pipeline/sampler bootstrap. Its source records
 a single triangle frame, but the host example fixture uses fake Vulkan entry
 points and does not demonstrate execution through the SDK/OS-Core backend. It
 reports real SDK/Vulkan errors; it does not manufacture a device, install a

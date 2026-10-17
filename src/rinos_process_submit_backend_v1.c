@@ -19,6 +19,10 @@ static int rinos_v6_create_graphics_pipeline(
     uint32_t color_format, uint32_t primitive_topology);
 static int rinos_v6_destroy_graphics_pipeline(
     void* context, uint64_t pipeline_token);
+static int rinos_v7_create_sampler(
+    void* context, uint64_t sampler_token,
+    const RinVulkanProductSamplerDescV11* descriptor);
+static int rinos_v7_destroy_sampler(void* context, uint64_t sampler_token);
 
 static int rinos_range_valid(const void* pointer, size_t size) {
     uintptr_t start;
@@ -2206,6 +2210,314 @@ int rin_vulkan_rinos_process_submit_backend_v6_detach(
     __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
     if (first_error != RIN_VULKAN_PRODUCT_OK) return first_error;
     result = rin_vulkan_rinos_process_submit_backend_v5_detach(
+        &backend->submit_backend);
+    if (result != RIN_VULKAN_PRODUCT_OK) return result;
+    memset(backend, 0, sizeof(*backend));
+    return RIN_VULKAN_PRODUCT_OK;
+}
+
+static int rinos_v7_filter_valid(uint32_t filter) {
+    return filter <= 1u;
+}
+
+static uint32_t rinos_v7_sampler_filter(uint32_t filter) {
+    return filter == 0u ? RIN_GPU_PROCESS_SAMPLER_FILTER_NEAREST_V1
+                        : RIN_GPU_PROCESS_SAMPLER_FILTER_LINEAR_V1;
+}
+
+static int rinos_v7_sampler_address(uint32_t address, uint32_t* out) {
+    if (!out) return 0;
+    switch (address) {
+        case 0u: /* VK_SAMPLER_ADDRESS_MODE_REPEAT */
+            *out = RIN_GPU_PROCESS_SAMPLER_ADDRESS_REPEAT_V1;
+            return 1;
+        case 1u: /* VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT */
+            *out = RIN_GPU_PROCESS_SAMPLER_ADDRESS_MIRRORED_REPEAT_V1;
+            return 1;
+        case 2u: /* VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE */
+            *out = RIN_GPU_PROCESS_SAMPLER_ADDRESS_CLAMP_TO_EDGE_V1;
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int rinos_v7_sampler_compare(uint32_t compare_op, uint32_t* out) {
+    if (!out) return 0;
+    switch (compare_op) {
+        case 0u: *out = RIN_GPU_PROCESS_SAMPLER_COMPARE_NEVER_V1; return 1;
+        case 1u: *out = RIN_GPU_PROCESS_SAMPLER_COMPARE_LESS_V1; return 1;
+        case 2u: *out = RIN_GPU_PROCESS_SAMPLER_COMPARE_EQUAL_V1; return 1;
+        case 3u: *out = RIN_GPU_PROCESS_SAMPLER_COMPARE_LESS_EQUAL_V1; return 1;
+        case 4u: *out = RIN_GPU_PROCESS_SAMPLER_COMPARE_GREATER_V1; return 1;
+        case 5u: *out = RIN_GPU_PROCESS_SAMPLER_COMPARE_NOT_EQUAL_V1; return 1;
+        case 6u: *out = RIN_GPU_PROCESS_SAMPLER_COMPARE_GREATER_EQUAL_V1; return 1;
+        case 7u: *out = RIN_GPU_PROCESS_SAMPLER_COMPARE_ALWAYS_V1; return 1;
+        default: return 0;
+    }
+}
+
+static int rinos_v7_header_valid(
+        const RinVulkanRinOSProcessSubmitBackendV7* backend) {
+    uint32_t index;
+    if (!backend || backend->struct_size != sizeof(*backend) ||
+        backend->version != RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V7_VERSION ||
+        backend->state != RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_ACTIVE ||
+        backend->reserved[0] != 0u || backend->reserved[1] != 0u ||
+        !rin_vulkan_rinos_process_submit_backend_v6_valid(
+            &backend->submit_backend) ||
+        backend->platform_v11.struct_size != sizeof(backend->platform_v11) ||
+        backend->platform_v11.version !=
+            RIN_VULKAN_PRODUCT_PLATFORM_V11_VERSION ||
+        backend->platform_v11.base != &backend->submit_backend.platform_v10 ||
+        backend->platform_v11.context != backend ||
+        backend->platform_v11.create_process_sampler !=
+            rinos_v7_create_sampler ||
+        backend->platform_v11.destroy_process_sampler !=
+            rinos_v7_destroy_sampler ||
+        backend->platform_v11.reserved[0] != 0u ||
+        backend->platform_v11.reserved[1] != 0u)
+        return 0;
+    for (index = 0u;
+         index < RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V7_MAX_SAMPLERS;
+         ++index) {
+        const RinVulkanRinOSProcessSamplerV7* sampler =
+            &backend->samplers[index];
+        uint32_t prior;
+        if (sampler->reserved != 0u || sampler->active > 1u ||
+            ((sampler->sampler_token == 0u) != (sampler->active == 0u)))
+            return 0;
+        if (sampler->sampler_token == 0u) continue;
+        if ((sampler->sampler_token >> 48u) !=
+                RIN_VULKAN_RINOS_PROCESS_SAMPLER_TOKEN_TAG ||
+            (sampler->sampler_token & UINT64_C(0x0000FFFFFFFFFFFF)) == 0u)
+            return 0;
+        for (prior = 0u; prior < index; ++prior)
+            if (backend->samplers[prior].sampler_token ==
+                sampler->sampler_token)
+                return 0;
+    }
+    return 1;
+}
+
+static uint64_t rinos_v7_device_id(
+        const RinVulkanRinOSProcessSubmitBackendV7* backend) {
+    return backend->submit_backend.submit_backend.submit_backend
+        .compute_backend.compute_backend.submit_backend.device_id;
+}
+
+static uint64_t rinos_v7_device_generation(
+        const RinVulkanRinOSProcessSubmitBackendV7* backend) {
+    return backend->submit_backend.submit_backend.submit_backend
+        .compute_backend.compute_backend.submit_backend.device_generation;
+}
+
+static int rinos_v7_destroy_sampler_locked(
+        RinVulkanRinOSProcessSubmitBackendV7* backend,
+        RinVulkanRinOSProcessSamplerV7* sampler) {
+    RinResult sdk_result;
+    if (!backend || !sampler || sampler->sampler_token == 0u ||
+        sampler->active != 1u)
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    sdk_result = rin_gpu_process_object_destroy_v1(
+        rinos_v7_device_id(backend), rinos_v7_device_generation(backend),
+        sampler->sampler_token);
+    if (sdk_result != RIN_SUCCESS) return rinos_map_sdk_result(sdk_result);
+    memset(sampler, 0, sizeof(*sampler));
+    return RIN_VULKAN_PRODUCT_OK;
+}
+
+static int rinos_v7_create_sampler(
+        void* context, uint64_t sampler_token,
+        const RinVulkanProductSamplerDescV11* source) {
+    RinVulkanRinOSProcessSubmitBackendV7* backend =
+        (RinVulkanRinOSProcessSubmitBackendV7*)context;
+    RinVulkanRinOSProcessSamplerV7* slot = NULL;
+    RinVulkanProductSamplerDescV11 source_copy;
+    RinGpuProcessSamplerDescV1 descriptor;
+    uint32_t address_u;
+    uint32_t address_v;
+    uint32_t address_w;
+    uint32_t compare_op = RIN_GPU_PROCESS_SAMPLER_COMPARE_NONE_V1;
+    uint32_t index;
+    int result;
+    RinResult sdk_result;
+    if (!backend || !source || !rinos_range_valid(source, sizeof(*source)) ||
+        rinos_ranges_overlap(backend, sizeof(*backend), source,
+                            sizeof(*source)))
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    memcpy(&source_copy, source, sizeof(source_copy));
+    source = &source_copy;
+    if (source->struct_size != sizeof(*source) ||
+        source->version !=
+            RIN_VULKAN_PRODUCT_PROCESS_SAMPLER_DESC_V11_VERSION ||
+        sampler_token == 0u ||
+        (sampler_token >> 48u) !=
+            RIN_VULKAN_RINOS_PROCESS_SAMPLER_TOKEN_TAG ||
+        (sampler_token & UINT64_C(0x0000FFFFFFFFFFFF)) == 0u ||
+        !rinos_v7_filter_valid(source->min_filter) ||
+        !rinos_v7_filter_valid(source->mag_filter) ||
+        !rinos_v7_filter_valid(source->mipmap_mode) ||
+        source->compare_enable > 1u)
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    if (!rinos_v7_sampler_address(source->address_mode_u, &address_u) ||
+        !rinos_v7_sampler_address(source->address_mode_v, &address_v) ||
+        !rinos_v7_sampler_address(source->address_mode_w, &address_w) ||
+        (source->compare_enable != 0u &&
+         !rinos_v7_sampler_compare(source->compare_op, &compare_op)))
+        return RIN_VULKAN_PRODUCT_UNSUPPORTED;
+    if (!rinos_try_lock(&backend->lock)) return RIN_VULKAN_PRODUCT_BUSY;
+    if (!rinos_v7_header_valid(backend)) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_STATE;
+    }
+    for (index = 0u;
+         index < RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V7_MAX_SAMPLERS;
+         ++index) {
+        RinVulkanRinOSProcessSamplerV7* candidate =
+            &backend->samplers[index];
+        if (candidate->sampler_token == 0u && !slot) slot = candidate;
+        if (candidate->sampler_token == sampler_token) {
+            __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+            return RIN_VULKAN_PRODUCT_BUSY;
+        }
+    }
+    if (!slot) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_LIMIT;
+    }
+    memset(&descriptor, 0, sizeof(descriptor));
+    descriptor.struct_size = sizeof(descriptor);
+    descriptor.version = RIN_GPU_PROCESS_SAMPLER_DESC_VERSION_V1;
+    descriptor.min_filter = rinos_v7_sampler_filter(source->min_filter);
+    descriptor.mag_filter = rinos_v7_sampler_filter(source->mag_filter);
+    descriptor.mip_filter = source->mipmap_mode == 0u
+                                ? RIN_GPU_PROCESS_SAMPLER_FILTER_NEAREST_V1
+                                : RIN_GPU_PROCESS_SAMPLER_FILTER_LINEAR_V1;
+    descriptor.address_u = address_u;
+    descriptor.address_v = address_v;
+    descriptor.address_w = address_w;
+    descriptor.mip_lod_bias = 0.0f;
+    descriptor.min_lod = 0.0f;
+    descriptor.max_lod = 32.0f;
+    descriptor.max_anisotropy = 1u;
+    descriptor.flags = 0u;
+    descriptor.compare_op = compare_op;
+    sdk_result = rin_gpu_process_sampler_create_v1(
+        rinos_v7_device_id(backend), rinos_v7_device_generation(backend),
+        sampler_token, &descriptor);
+    result = rinos_map_sdk_result(sdk_result);
+    if (result == RIN_VULKAN_PRODUCT_OK) {
+        slot->sampler_token = sampler_token;
+        slot->active = 1u;
+    }
+    __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+    return result;
+}
+
+static int rinos_v7_destroy_sampler(void* context, uint64_t sampler_token) {
+    RinVulkanRinOSProcessSubmitBackendV7* backend =
+        (RinVulkanRinOSProcessSubmitBackendV7*)context;
+    uint32_t index;
+    int result = RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    if (!backend || sampler_token == 0u)
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    if (!rinos_try_lock(&backend->lock)) return RIN_VULKAN_PRODUCT_BUSY;
+    if (!rinos_v7_header_valid(backend)) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_STATE;
+    }
+    for (index = 0u;
+         index < RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V7_MAX_SAMPLERS;
+         ++index) {
+        RinVulkanRinOSProcessSamplerV7* sampler =
+            &backend->samplers[index];
+        if (sampler->sampler_token != sampler_token) continue;
+        result = rinos_v7_destroy_sampler_locked(backend, sampler);
+        break;
+    }
+    __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+    return result;
+}
+
+int rin_vulkan_rinos_process_submit_backend_v7_init(
+        RinVulkanRinOSProcessSubmitBackendV7* backend,
+        RinVulkanProductPlatformV5* parent, uint64_t device_id,
+        uint64_t device_generation,
+        const RinVulkanRinOSProcessQueueMapV4* mappings,
+        uint32_t mapping_count) {
+    int result;
+    if (!backend || !parent || device_id == 0u || device_generation == 0u ||
+        !rinos_range_valid(backend, sizeof(*backend)))
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    memset(backend, 0, sizeof(*backend));
+    __atomic_store_n(&backend->lock, 1u, __ATOMIC_RELAXED);
+    backend->struct_size = sizeof(*backend);
+    backend->version = RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V7_VERSION;
+    backend->state = RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_CLEANUP_PENDING;
+    __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+    result = rin_vulkan_rinos_process_submit_backend_v6_init(
+        &backend->submit_backend, parent, device_id, device_generation,
+        mappings, mapping_count);
+    if (result != RIN_VULKAN_PRODUCT_OK) return result;
+    backend->platform_v11.struct_size = sizeof(backend->platform_v11);
+    backend->platform_v11.version = RIN_VULKAN_PRODUCT_PLATFORM_V11_VERSION;
+    backend->platform_v11.base = &backend->submit_backend.platform_v10;
+    backend->platform_v11.context = backend;
+    backend->platform_v11.create_process_sampler = rinos_v7_create_sampler;
+    backend->platform_v11.destroy_process_sampler = rinos_v7_destroy_sampler;
+    backend->state = RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_ACTIVE;
+    return rin_vulkan_rinos_process_submit_backend_v7_valid(backend)
+               ? RIN_VULKAN_PRODUCT_OK
+               : RIN_VULKAN_PRODUCT_PROTOCOL;
+}
+
+int rin_vulkan_rinos_process_submit_backend_v7_valid(
+        const RinVulkanRinOSProcessSubmitBackendV7* backend) {
+    return backend && __atomic_load_n(&backend->lock, __ATOMIC_ACQUIRE) == 0u &&
+           rinos_v7_header_valid(backend);
+}
+
+RinVulkanProductPlatformV11*
+rin_vulkan_rinos_process_submit_backend_v7_platform_v11(
+        RinVulkanRinOSProcessSubmitBackendV7* backend) {
+    return rin_vulkan_rinos_process_submit_backend_v7_valid(backend)
+               ? &backend->platform_v11
+               : NULL;
+}
+
+int rin_vulkan_rinos_process_submit_backend_v7_detach(
+        RinVulkanRinOSProcessSubmitBackendV7* backend) {
+    uint32_t index;
+    int first_error = RIN_VULKAN_PRODUCT_OK;
+    int result;
+    if (!backend || !rinos_try_lock(&backend->lock))
+        return backend ? RIN_VULKAN_PRODUCT_BUSY
+                       : RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    if (backend->struct_size != sizeof(*backend) ||
+        backend->version != RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V7_VERSION ||
+        (backend->state != RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_ACTIVE &&
+         backend->state !=
+             RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_CLEANUP_PENDING) ||
+        backend->reserved[0] != 0u || backend->reserved[1] != 0u) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_STATE;
+    }
+    backend->state = RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_CLEANUP_PENDING;
+    for (index = 0u;
+         index < RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V7_MAX_SAMPLERS;
+         ++index) {
+        RinVulkanRinOSProcessSamplerV7* sampler = &backend->samplers[index];
+        int cleanup_result;
+        if (sampler->sampler_token == 0u) continue;
+        cleanup_result = rinos_v7_destroy_sampler_locked(backend, sampler);
+        if (cleanup_result != RIN_VULKAN_PRODUCT_OK &&
+            first_error == RIN_VULKAN_PRODUCT_OK)
+            first_error = cleanup_result;
+    }
+    __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+    if (first_error != RIN_VULKAN_PRODUCT_OK) return first_error;
+    result = rin_vulkan_rinos_process_submit_backend_v6_detach(
         &backend->submit_backend);
     if (result != RIN_VULKAN_PRODUCT_OK) return result;
     memset(backend, 0, sizeof(*backend));

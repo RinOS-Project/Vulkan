@@ -17,6 +17,8 @@
 #define RIN_VULKAN_PRODUCT_PLATFORM_V8_VERSION 8u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V9_VERSION 9u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V10_VERSION 10u
+#define RIN_VULKAN_PRODUCT_PLATFORM_V11_VERSION 11u
+#define RIN_VULKAN_PRODUCT_PROCESS_SAMPLER_DESC_V11_VERSION 1u
 #define RIN_VULKAN_PRODUCT_PROCESS_SUBMIT_RECEIPT_V1_VERSION 1u
 #define RIN_VULKAN_PRODUCT_MEMORY_VERSION 1u
 #define RIN_VULKAN_PRODUCT_MAX_QUEUES 8u
@@ -480,6 +482,38 @@ typedef struct RinVulkanProductPlatformV10 {
         destroy_process_graphics_pipeline;
     uint64_t reserved[2];
 } RinVulkanProductPlatformV10;
+
+/* V11 adds process-owned sampler lifecycle. Values use this RinVk ABI's
+ * stable Vulkan enum values; the RinOS process adapter performs the explicit
+ * conversion to the API-neutral RinGPU sampler descriptor. */
+typedef struct RinVulkanProductSamplerDescV11 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint32_t min_filter;
+    uint32_t mag_filter;
+    uint32_t mipmap_mode;
+    uint32_t address_mode_u;
+    uint32_t address_mode_v;
+    uint32_t address_mode_w;
+    uint32_t compare_enable;
+    uint32_t compare_op;
+} RinVulkanProductSamplerDescV11;
+
+typedef int (*RinVulkanProductCreateProcessSamplerV11Fn)(
+    void* context, uint64_t sampler_token,
+    const RinVulkanProductSamplerDescV11* descriptor);
+typedef int (*RinVulkanProductDestroyProcessSamplerV11Fn)(
+    void* context, uint64_t sampler_token);
+
+typedef struct RinVulkanProductPlatformV11 {
+    uint32_t struct_size;
+    uint32_t version;
+    RinVulkanProductPlatformV10* base;
+    void* context;
+    RinVulkanProductCreateProcessSamplerV11Fn create_process_sampler;
+    RinVulkanProductDestroyProcessSamplerV11Fn destroy_process_sampler;
+    uint64_t reserved[2];
+} RinVulkanProductPlatformV11;
 
 #ifdef __cplusplus
 static_assert(sizeof(RinVulkanProductResourceV1) == 16u,

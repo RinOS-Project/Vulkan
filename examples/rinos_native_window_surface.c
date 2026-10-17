@@ -23,7 +23,7 @@
 static RinVulkanRinOSCatalogV1 g_rinos_vulkan_catalog;
 static RinGpuVulkanRuntimeV1 g_rinos_vulkan_runtime;
 static RinVulkanRinOSProcessProductPlatformV1 g_rinos_product_platform;
-static RinVulkanRinOSProcessSubmitBackendV6 g_rinos_process_submit_backend;
+static RinVulkanRinOSProcessSubmitBackendV7 g_rinos_process_submit_backend;
 static uint32_t g_rinos_product_binding_mask;
 static RinVulkanExampleRuntimeLifecycleV1 g_rinos_vulkan_lifecycle = {
     sizeof(RinVulkanExampleRuntimeLifecycleV1),
@@ -39,7 +39,8 @@ enum {
     RINOS_PRODUCT_BIND_V7 = 1u << 6,
     RINOS_PRODUCT_BIND_V8 = 1u << 7,
     RINOS_PRODUCT_BIND_V9 = 1u << 8,
-    RINOS_PRODUCT_BIND_V10 = 1u << 9
+    RINOS_PRODUCT_BIND_V10 = 1u << 9,
+    RINOS_PRODUCT_BIND_V11 = 1u << 10
 };
 
 static int bind_rinos_product_platform(uint64_t device_id,
@@ -116,7 +117,7 @@ static int bind_rinos_product_platform(uint64_t device_id,
             &g_rinos_product_platform.platform_v5),
         "bind product platform V5");
 
-    result = rin_vulkan_rinos_process_submit_backend_v6_init(
+    result = rin_vulkan_rinos_process_submit_backend_v7_init(
         &g_rinos_process_submit_backend,
         &g_rinos_product_platform.platform_v5, device_id, device_generation,
         mappings, mapping_count);
@@ -129,31 +130,38 @@ static int bind_rinos_product_platform(uint64_t device_id,
         RINOS_PRODUCT_BIND_V6,
         rin_gpu_vulkan_icd_bind_product_platform_v6(
             &g_rinos_process_submit_backend.submit_backend
-                 .submit_backend.platform_v6),
+                 .submit_backend.submit_backend.platform_v6),
         "bind product platform V6");
     RINOS_BIND_PRODUCT(
         RINOS_PRODUCT_BIND_V7,
         rin_gpu_vulkan_icd_bind_product_platform_v7(
             &g_rinos_process_submit_backend.submit_backend
-                 .submit_backend.platform_v7),
+                 .submit_backend.submit_backend.platform_v7),
         "bind product platform V7");
     RINOS_BIND_PRODUCT(
         RINOS_PRODUCT_BIND_V8,
         rin_gpu_vulkan_icd_bind_product_platform_v8(
             &g_rinos_process_submit_backend.submit_backend
-                 .submit_backend.platform_v8),
+                 .submit_backend.submit_backend.platform_v8),
         "bind product platform V8");
     RINOS_BIND_PRODUCT(
         RINOS_PRODUCT_BIND_V9,
         rin_gpu_vulkan_icd_bind_product_platform_v9(
-            &g_rinos_process_submit_backend.submit_backend.platform_v9),
+            &g_rinos_process_submit_backend.submit_backend
+                 .submit_backend.platform_v9),
         "bind product platform V9");
     RINOS_BIND_PRODUCT(
         RINOS_PRODUCT_BIND_V10,
         rin_gpu_vulkan_icd_bind_product_platform_v10(
             rin_vulkan_rinos_process_submit_backend_v6_platform_v10(
-                &g_rinos_process_submit_backend)),
+                &g_rinos_process_submit_backend.submit_backend)),
         "bind product platform V10");
+    RINOS_BIND_PRODUCT(
+        RINOS_PRODUCT_BIND_V11,
+        rin_gpu_vulkan_icd_bind_product_platform_v11(
+            rin_vulkan_rinos_process_submit_backend_v7_platform_v11(
+                &g_rinos_process_submit_backend)),
+        "bind product platform V11");
 #undef RINOS_BIND_PRODUCT
     return 1;
 }
@@ -175,36 +183,43 @@ static int cleanup_rinos_product_platform(void) {
     } while (0)
 
     RINOS_UNBIND_PRODUCT(
+        RINOS_PRODUCT_BIND_V11,
+        rin_gpu_vulkan_icd_unbind_product_platform_v11(
+            rin_vulkan_rinos_process_submit_backend_v7_platform_v11(
+                &g_rinos_process_submit_backend)),
+        "unbind product platform V11");
+    RINOS_UNBIND_PRODUCT(
         RINOS_PRODUCT_BIND_V10,
         rin_gpu_vulkan_icd_unbind_product_platform_v10(
             rin_vulkan_rinos_process_submit_backend_v6_platform_v10(
-                &g_rinos_process_submit_backend)),
+                &g_rinos_process_submit_backend.submit_backend)),
         "unbind product platform V10");
     RINOS_UNBIND_PRODUCT(
         RINOS_PRODUCT_BIND_V9,
         rin_gpu_vulkan_icd_unbind_product_platform_v9(
-            &g_rinos_process_submit_backend.submit_backend.platform_v9),
+            &g_rinos_process_submit_backend.submit_backend
+                 .submit_backend.platform_v9),
         "unbind product platform V9");
     RINOS_UNBIND_PRODUCT(
         RINOS_PRODUCT_BIND_V8,
         rin_gpu_vulkan_icd_unbind_product_platform_v8(
             &g_rinos_process_submit_backend.submit_backend
-                 .submit_backend.platform_v8),
+                 .submit_backend.submit_backend.platform_v8),
         "unbind product platform V8");
     RINOS_UNBIND_PRODUCT(
         RINOS_PRODUCT_BIND_V7,
         rin_gpu_vulkan_icd_unbind_product_platform_v7(
             &g_rinos_process_submit_backend.submit_backend
-                 .submit_backend.platform_v7),
+                 .submit_backend.submit_backend.platform_v7),
         "unbind product platform V7");
     RINOS_UNBIND_PRODUCT(
         RINOS_PRODUCT_BIND_V6,
         rin_gpu_vulkan_icd_unbind_product_platform_v6(
             &g_rinos_process_submit_backend.submit_backend
-                 .submit_backend.platform_v6),
+                 .submit_backend.submit_backend.platform_v6),
         "unbind product platform V6");
     if (g_rinos_process_submit_backend.struct_size != 0u) {
-        result = rin_vulkan_rinos_process_submit_backend_v6_detach(
+        result = rin_vulkan_rinos_process_submit_backend_v7_detach(
             &g_rinos_process_submit_backend);
         if (result != RIN_VULKAN_PRODUCT_OK) {
             fprintf(stderr,
