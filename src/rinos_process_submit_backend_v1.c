@@ -38,6 +38,12 @@ static int rinos_v9_create_process_image(
     const RinVulkanProductProcessImageV13* descriptor);
 static int rinos_v9_destroy_process_image(
     void* context, uint64_t image_token);
+static int rinos_v10_create_graphics_bind_group(
+    void* context, uint64_t bind_group_token, uint64_t pipeline_token,
+    const RinVulkanProductProcessGraphicsBindingV14* bindings,
+    uint32_t binding_count);
+static int rinos_v10_destroy_graphics_bind_group(
+    void* context, uint64_t bind_group_token);
 
 static int rinos_range_valid(const void* pointer, size_t size) {
     uintptr_t start;
@@ -3380,6 +3386,550 @@ int rin_vulkan_rinos_process_submit_backend_v9_detach(
     __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
     if (first_error != RIN_VULKAN_PRODUCT_OK) return first_error;
     result = rin_vulkan_rinos_process_submit_backend_v8_detach(
+        &backend->submit_backend);
+    if (result != RIN_VULKAN_PRODUCT_OK) return result;
+    memset(backend, 0, sizeof(*backend));
+    return RIN_VULKAN_PRODUCT_OK;
+}
+
+static int rinos_v10_bytes_zero(const void* source, size_t size) {
+    const unsigned char* bytes = (const unsigned char*)source;
+    size_t index;
+    if (!source) return 0;
+    for (index = 0u; index < size; ++index)
+        if (bytes[index] != 0u) return 0;
+    return 1;
+}
+
+static RinVulkanRinOSProcessSamplerV7* rinos_v10_find_sampler(
+        RinVulkanRinOSProcessSubmitBackendV10* backend,
+        uint64_t sampler_token) {
+    RinVulkanRinOSProcessSubmitBackendV7* v7;
+    uint32_t index;
+    if (!backend || sampler_token == 0u) return NULL;
+    v7 = &backend->submit_backend.submit_backend.submit_backend;
+    for (index = 0u;
+         index < RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V7_MAX_SAMPLERS;
+         ++index)
+        if (v7->samplers[index].sampler_token == sampler_token &&
+            v7->samplers[index].active == 1u)
+            return &v7->samplers[index];
+    return NULL;
+}
+
+static int rinos_v10_pipeline_exists(
+        const RinVulkanRinOSProcessSubmitBackendV10* backend,
+        uint64_t pipeline_token) {
+    const RinVulkanRinOSProcessSubmitBackendV6* v6;
+    uint32_t index;
+    if (!backend || pipeline_token == 0u) return 0;
+    v6 = &backend->submit_backend.submit_backend.submit_backend
+              .submit_backend;
+    for (index = 0u;
+         index <
+             RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V6_MAX_GRAPHICS_PIPELINES;
+         ++index)
+        if (v6->graphics_pipelines[index].pipeline_token == pipeline_token &&
+            v6->graphics_pipelines[index].pipeline_active == 1u)
+            return 1;
+    return 0;
+}
+
+static int rinos_v10_image_binding_matches(
+        const RinVulkanRinOSProcessSubmitBackendV10* backend,
+        const RinGpuProcessGraphicsBindingV2* binding) {
+    const RinVulkanRinOSProcessImageV9* image = NULL;
+    uint32_t index;
+    if (!backend || !binding || binding->image_view.image_token == 0u)
+        return 0;
+    for (index = 0u;
+         index < RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V9_MAX_IMAGES;
+         ++index)
+        if (backend->submit_backend.images[index].image_token ==
+                binding->image_view.image_token &&
+            backend->submit_backend.images[index].active == 1u) {
+            image = &backend->submit_backend.images[index];
+            break;
+        }
+    if (!image) return 0;
+    return binding->image_view.resource_cookie ==
+               image->image.resource_cookie &&
+           binding->image_view.allocation_offset ==
+               image->image.allocation_offset &&
+           binding->image_view.allocation_size_bytes ==
+               image->image.allocation_size_bytes &&
+           binding->image_view.format == image->image.format &&
+           binding->image_view.dimension == image->image.dimension &&
+           binding->image_view.width == image->image.width &&
+           binding->image_view.height == image->image.height &&
+           binding->image_view.depth == image->image.depth &&
+           binding->image_view.mip_levels == image->image.mip_levels &&
+           binding->image_view.array_layers == image->image.array_layers &&
+           binding->image_view.sample_count == image->image.sample_count &&
+           binding->image_view.usage == image->image.usage &&
+           (binding->image_view.aspect_mask & image->image.aspect_mask) ==
+               binding->image_view.aspect_mask;
+}
+
+static int rinos_v10_group_valid(
+        const RinVulkanRinOSProcessSubmitBackendV10* backend,
+        const RinVulkanRinOSProcessGraphicsBindGroupV10* group) {
+    uint32_t index;
+    if (!group) return 0;
+    if (group->active == 0u)
+        return rinos_v10_bytes_zero(group, sizeof(*group));
+    if (group->active != 1u || group->bind_group_token == 0u ||
+        (group->bind_group_token >> 48u) !=
+            RIN_VULKAN_PRODUCT_PROCESS_GRAPHICS_BIND_GROUP_TOKEN_TAG ||
+        (group->bind_group_token & UINT64_C(0x0000FFFFFFFFFFFF)) == 0u ||
+        group->pipeline_token == 0u || group->binding_count == 0u ||
+        group->binding_count > RIN_GPU_PROCESS_GRAPHICS_BINDING_V2_MAX_COUNT ||
+        !rinos_v10_pipeline_exists(backend, group->pipeline_token) ||
+        !rin_gpu_process_graphics_bind_group_owner_v2_valid(&group->owner))
+        return 0;
+    if (group->owner.phase ==
+            RIN_GPU_PROCESS_GRAPHICS_BIND_GROUP_OWNER_PHASE_ACTIVE_V2 &&
+        (group->owner.device_id != rinos_v7_device_id(
+             &backend->submit_backend.submit_backend.submit_backend) ||
+         group->owner.device_generation != rinos_v7_device_generation(
+             &backend->submit_backend.submit_backend.submit_backend) ||
+         group->owner.bind_group_token != group->bind_group_token ||
+         group->owner.pipeline_token != group->pipeline_token ||
+         group->owner.binding_count != group->binding_count))
+        return 0;
+    for (index = 0u;
+         index < RIN_GPU_PROCESS_GRAPHICS_BINDING_V2_MAX_COUNT; ++index) {
+        const RinVulkanRinOSProcessGraphicsBindingV10* binding =
+            &group->bindings[index];
+        if (binding->reserved != 0u || binding->active > 1u ||
+            ((binding->resource_cookie == 0u) != (binding->active == 0u)))
+            return 0;
+    }
+    return 1;
+}
+
+static int rinos_v10_header_valid(
+        const RinVulkanRinOSProcessSubmitBackendV10* backend) {
+    uint32_t index;
+    if (!backend || backend->struct_size != sizeof(*backend) ||
+        backend->version !=
+            RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V10_VERSION ||
+        backend->state != RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_ACTIVE ||
+        backend->reserved[0] != 0u || backend->reserved[1] != 0u ||
+        !rinos_v9_header_valid(&backend->submit_backend) ||
+        backend->platform_v14.struct_size != sizeof(backend->platform_v14) ||
+        backend->platform_v14.version !=
+            RIN_VULKAN_PRODUCT_PLATFORM_V14_VERSION ||
+        backend->platform_v14.base !=
+            &backend->submit_backend.platform_v13 ||
+        backend->platform_v14.context != backend ||
+        backend->platform_v14.create_process_graphics_bind_group !=
+            rinos_v10_create_graphics_bind_group ||
+        backend->platform_v14.destroy_process_graphics_bind_group !=
+            rinos_v10_destroy_graphics_bind_group ||
+        backend->platform_v14.reserved[0] != 0u ||
+        backend->platform_v14.reserved[1] != 0u)
+        return 0;
+    for (index = 0u;
+         index <
+             RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V10_MAX_GRAPHICS_BIND_GROUPS;
+         ++index) {
+        uint32_t prior;
+        if (!rinos_v10_group_valid(backend,
+                                   &backend->graphics_bind_groups[index]))
+            return 0;
+        if (backend->graphics_bind_groups[index].active == 0u) continue;
+        for (prior = 0u; prior < index; ++prior)
+            if (backend->graphics_bind_groups[prior].bind_group_token ==
+                backend->graphics_bind_groups[index].bind_group_token)
+                return 0;
+    }
+    return 1;
+}
+
+static int rinos_v10_destroy_graphics_bind_group_locked(
+        RinVulkanRinOSProcessSubmitBackendV10* backend,
+        RinVulkanRinOSProcessGraphicsBindGroupV10* group) {
+    uint32_t index;
+    int result;
+    if (!backend || !group || !rinos_v10_group_valid(backend, group) ||
+        group->active != 1u)
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    if (group->owner.phase ==
+        RIN_GPU_PROCESS_GRAPHICS_BIND_GROUP_OWNER_PHASE_ACTIVE_V2) {
+        result = rinos_map_sdk_result(
+            rin_gpu_process_graphics_bind_group_owner_v2_destroy(
+                &group->owner));
+        if (result != RIN_VULKAN_PRODUCT_OK) return result;
+    }
+    for (index = 0u; index < group->binding_count; ++index) {
+        RinVulkanRinOSProcessGraphicsBindingV10* binding =
+            &group->bindings[index];
+        if (binding->active == 0u) continue;
+        result = rinos_map_sdk_result(rin_gpu_process_resource_unbind_v1(
+            rinos_v7_device_id(
+                &backend->submit_backend.submit_backend.submit_backend),
+            rinos_v7_device_generation(
+                &backend->submit_backend.submit_backend.submit_backend),
+            binding->resource_cookie));
+        if (result != RIN_VULKAN_PRODUCT_OK) return result;
+        memset(binding, 0, sizeof(*binding));
+    }
+    memset(group, 0, sizeof(*group));
+    return RIN_VULKAN_PRODUCT_OK;
+}
+
+static int rinos_v10_retry_pending_graphics_bind_groups_locked(
+        RinVulkanRinOSProcessSubmitBackendV10* backend) {
+    uint32_t index;
+    for (index = 0u;
+         index <
+             RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V10_MAX_GRAPHICS_BIND_GROUPS;
+         ++index) {
+        RinVulkanRinOSProcessGraphicsBindGroupV10* group =
+            &backend->graphics_bind_groups[index];
+        int result;
+        if (group->active == 0u ||
+            group->owner.phase ==
+                RIN_GPU_PROCESS_GRAPHICS_BIND_GROUP_OWNER_PHASE_ACTIVE_V2)
+            continue;
+        result = rinos_v10_destroy_graphics_bind_group_locked(backend, group);
+        if (result != RIN_VULKAN_PRODUCT_OK) return result;
+    }
+    return RIN_VULKAN_PRODUCT_OK;
+}
+
+static int rinos_v10_create_graphics_bind_group(
+        void* context, uint64_t bind_group_token, uint64_t pipeline_token,
+        const RinVulkanProductProcessGraphicsBindingV14* bindings,
+        uint32_t binding_count) {
+    RinVulkanRinOSProcessSubmitBackendV10* backend =
+        (RinVulkanRinOSProcessSubmitBackendV10*)context;
+    RinVulkanProductProcessGraphicsBindingV14 binding_copy[
+        RIN_GPU_PROCESS_GRAPHICS_BINDING_V2_MAX_COUNT];
+    RinGpuProcessGraphicsBindingV2 sdk_bindings[
+        RIN_GPU_PROCESS_GRAPHICS_BINDING_V2_MAX_COUNT];
+    RinVulkanRinOSProcessGraphicsBindGroupV10* free_slot = NULL;
+    uint64_t seen = 0u;
+    uint32_t index;
+    int result;
+    if (!backend || !bindings || binding_count == 0u ||
+        binding_count > RIN_GPU_PROCESS_GRAPHICS_BINDING_V2_MAX_COUNT ||
+        bind_group_token == 0u ||
+        (bind_group_token >> 48u) !=
+            RIN_VULKAN_PRODUCT_PROCESS_GRAPHICS_BIND_GROUP_TOKEN_TAG ||
+        (bind_group_token & UINT64_C(0x0000FFFFFFFFFFFF)) == 0u ||
+        pipeline_token == 0u || bind_group_token == pipeline_token ||
+        !rinos_range_valid(bindings,
+                           sizeof(binding_copy[0]) * (size_t)binding_count) ||
+        rinos_ranges_overlap(backend, sizeof(*backend), bindings,
+                            sizeof(binding_copy[0]) * (size_t)binding_count))
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    memcpy(binding_copy, bindings,
+           sizeof(binding_copy[0]) * (size_t)binding_count);
+    memset(sdk_bindings, 0, sizeof(sdk_bindings));
+    for (index = 0u; index < binding_count; ++index) {
+        const RinVulkanProductProcessGraphicsBindingV14* source =
+            &binding_copy[index];
+        RinGpuProcessGraphicsBindingV2* target = &sdk_bindings[index];
+        const RinGpuProcessGraphicsBindingV2* input = &source->binding;
+        if (source->struct_size != sizeof(*source) ||
+            source->version !=
+                RIN_VULKAN_PRODUCT_PROCESS_GRAPHICS_BINDING_V14_VERSION ||
+            input->struct_size != sizeof(*input) ||
+            input->version != RIN_GPU_PROCESS_GRAPHICS_BINDING_V2_VERSION ||
+            input->binding >= binding_count ||
+            (seen & (UINT64_C(1) << input->binding)) != 0u ||
+            input->flags != 0u || input->reserved[0] != 0u ||
+            input->reserved[1] != 0u)
+            return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+        seen |= UINT64_C(1) << input->binding;
+        *target = *input;
+        if (input->kind ==
+            RIN_GPU_PROCESS_GRAPHICS_RESOURCE_STORAGE_BUFFER_V2) {
+            if (!rin_gpu_process_graphics_binding_v2_valid(input) ||
+                input->resource_cookie == 0u ||
+                source->allocation_handle == 0u ||
+                source->resource_size_bytes == 0u ||
+                source->allocation_offset >
+                    UINT64_MAX - source->resource_size_bytes ||
+                input->offset > source->resource_size_bytes ||
+                input->size_bytes == 0u ||
+                input->size_bytes > source->resource_size_bytes - input->offset ||
+                input->sampler_token != 0u ||
+                !rinos_v10_bytes_zero(&input->image_view,
+                                      sizeof(input->image_view)) ||
+                input->access == 0u ||
+                (input->access &
+                 ~(RIN_GPU_PROCESS_GRAPHICS_ACCESS_READ |
+                   RIN_GPU_PROCESS_GRAPHICS_ACCESS_WRITE)) != 0u)
+                return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+        } else if (input->kind ==
+                       RIN_GPU_PROCESS_GRAPHICS_RESOURCE_SAMPLED_IMAGE_V2 ||
+                   input->kind ==
+                       RIN_GPU_PROCESS_GRAPHICS_RESOURCE_SAMPLED_DEPTH_IMAGE_V2 ||
+                   input->kind ==
+                       RIN_GPU_PROCESS_GRAPHICS_RESOURCE_STORAGE_IMAGE_V2) {
+            if (source->allocation_handle != 0u ||
+                source->allocation_offset != 0u ||
+                source->resource_size_bytes != 0u ||
+                !rin_gpu_process_graphics_binding_v2_valid(input))
+                return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+        } else if (input->kind ==
+                       RIN_GPU_PROCESS_GRAPHICS_RESOURCE_SAMPLER_V2 ||
+                   input->kind ==
+                       RIN_GPU_PROCESS_GRAPHICS_RESOURCE_COMPARISON_SAMPLER_V2) {
+            if (source->allocation_handle != 0u ||
+                source->allocation_offset != 0u ||
+                source->resource_size_bytes != 0u ||
+                !rin_gpu_process_graphics_binding_v2_valid(input))
+                return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+        } else {
+            return RIN_VULKAN_PRODUCT_UNSUPPORTED;
+        }
+    }
+    if (seen != (binding_count == 64u
+                     ? UINT64_MAX
+                     : (UINT64_C(1) << binding_count) - UINT64_C(1)))
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    if (!rinos_try_lock(&backend->lock)) return RIN_VULKAN_PRODUCT_BUSY;
+    if (!rinos_v10_header_valid(backend)) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_STATE;
+    }
+    result = rinos_v10_retry_pending_graphics_bind_groups_locked(backend);
+    if (result != RIN_VULKAN_PRODUCT_OK) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return result;
+    }
+    if (!rinos_v10_pipeline_exists(backend, pipeline_token)) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_BUSY;
+    }
+    for (index = 0u;
+         index <
+             RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V10_MAX_GRAPHICS_BIND_GROUPS;
+         ++index) {
+        RinVulkanRinOSProcessGraphicsBindGroupV10* candidate =
+            &backend->graphics_bind_groups[index];
+        if (candidate->bind_group_token == bind_group_token) {
+            __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+            return RIN_VULKAN_PRODUCT_BUSY;
+        }
+        if (!free_slot && candidate->active == 0u) free_slot = candidate;
+    }
+    if (!free_slot) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_LIMIT;
+    }
+    memset(free_slot, 0, sizeof(*free_slot));
+    free_slot->bind_group_token = bind_group_token;
+    free_slot->pipeline_token = pipeline_token;
+    free_slot->binding_count = binding_count;
+    free_slot->active = 1u;
+    rin_gpu_process_graphics_bind_group_owner_v2_init(&free_slot->owner);
+    /* Establish buffer resource bindings only after a durable cleanup record
+     * exists, then publish the SDK group over those exact bound resources. */
+    for (index = 0u; index < binding_count; ++index) {
+        RinVulkanProductProcessGraphicsBindingV14* source =
+            &binding_copy[index];
+        RinGpuProcessGraphicsBindingV2* target = &sdk_bindings[index];
+        if (source->binding.kind ==
+                RIN_GPU_PROCESS_GRAPHICS_RESOURCE_SAMPLED_IMAGE_V2 ||
+            source->binding.kind ==
+                RIN_GPU_PROCESS_GRAPHICS_RESOURCE_SAMPLED_DEPTH_IMAGE_V2 ||
+            source->binding.kind ==
+                RIN_GPU_PROCESS_GRAPHICS_RESOURCE_STORAGE_IMAGE_V2) {
+            if (!rinos_v10_image_binding_matches(backend,
+                                                  &source->binding)) {
+                result = RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+                goto v10_create_rollback;
+            }
+            continue;
+        }
+        if (source->binding.kind ==
+                RIN_GPU_PROCESS_GRAPHICS_RESOURCE_SAMPLER_V2 ||
+            source->binding.kind ==
+                RIN_GPU_PROCESS_GRAPHICS_RESOURCE_COMPARISON_SAMPLER_V2) {
+            if (!rinos_v10_find_sampler(backend,
+                                        source->binding.sampler_token)) {
+                result = RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+                goto v10_create_rollback;
+            }
+            continue;
+        }
+        if (source->binding.kind !=
+            RIN_GPU_PROCESS_GRAPHICS_RESOURCE_STORAGE_BUFFER_V2)
+            continue;
+        RinGpuProcessResourceBindingV1 resource_binding;
+        uint32_t access = 0u;
+        uint64_t resource_cookie = rinos_process_v3_allocate_resource_cookie();
+        if (resource_cookie == 0u) {
+            result = RIN_VULKAN_PRODUCT_LIMIT;
+            goto v10_create_rollback;
+        }
+        if ((source->binding.access &
+             RIN_GPU_PROCESS_GRAPHICS_ACCESS_READ) != 0u)
+            access |= RIN_GPU_MEMORY_GPU_READ;
+        if ((source->binding.access &
+             RIN_GPU_PROCESS_GRAPHICS_ACCESS_WRITE) != 0u)
+            access |= RIN_GPU_MEMORY_GPU_WRITE;
+        memset(&resource_binding, 0, sizeof(resource_binding));
+        resource_binding.struct_size = sizeof(resource_binding);
+        resource_binding.version = RIN_GPU_PROCESS_RESOURCE_BINDING_VERSION_V1;
+        resource_binding.resource_cookie = resource_cookie;
+        resource_binding.allocation = source->allocation_handle;
+        resource_binding.allocation_offset = source->allocation_offset;
+        resource_binding.size_bytes = source->resource_size_bytes;
+        resource_binding.required_gpu_access = access;
+        result = rinos_map_sdk_result(rin_gpu_process_resource_bind_v1(
+            rinos_v7_device_id(
+                &backend->submit_backend.submit_backend.submit_backend),
+            rinos_v7_device_generation(
+                &backend->submit_backend.submit_backend.submit_backend),
+            &resource_binding));
+        if (result != RIN_VULKAN_PRODUCT_OK) goto v10_create_rollback;
+        free_slot->bindings[source->binding.binding].resource_cookie =
+            resource_cookie;
+        free_slot->bindings[source->binding.binding].active = 1u;
+        target->resource_cookie = resource_cookie;
+    }
+    result = rinos_map_sdk_result(
+        rin_gpu_process_graphics_bind_group_owner_v2_create(
+            rinos_v7_device_id(
+                &backend->submit_backend.submit_backend.submit_backend),
+            rinos_v7_device_generation(
+                &backend->submit_backend.submit_backend.submit_backend),
+            bind_group_token, pipeline_token, sdk_bindings, binding_count,
+            &free_slot->owner));
+    if (result == RIN_VULKAN_PRODUCT_OK) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_OK;
+    }
+v10_create_rollback:
+    {
+        const int original_result = result;
+        const int cleanup_result =
+            rinos_v10_destroy_graphics_bind_group_locked(backend, free_slot);
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return cleanup_result == RIN_VULKAN_PRODUCT_OK ? original_result
+                                                       : cleanup_result;
+    }
+}
+
+static int rinos_v10_destroy_graphics_bind_group(
+        void* context, uint64_t bind_group_token) {
+    RinVulkanRinOSProcessSubmitBackendV10* backend =
+        (RinVulkanRinOSProcessSubmitBackendV10*)context;
+    uint32_t index;
+    int result = RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    if (!backend || bind_group_token == 0u)
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    if (!rinos_try_lock(&backend->lock)) return RIN_VULKAN_PRODUCT_BUSY;
+    if (!rinos_v10_header_valid(backend)) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_STATE;
+    }
+    for (index = 0u;
+         index <
+             RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V10_MAX_GRAPHICS_BIND_GROUPS;
+         ++index)
+        if (backend->graphics_bind_groups[index].bind_group_token ==
+            bind_group_token) {
+            result = rinos_v10_destroy_graphics_bind_group_locked(
+                backend, &backend->graphics_bind_groups[index]);
+            break;
+        }
+    __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+    return result;
+}
+
+int rin_vulkan_rinos_process_submit_backend_v10_init(
+        RinVulkanRinOSProcessSubmitBackendV10* backend,
+        RinVulkanProductPlatformV5* parent, uint64_t device_id,
+        uint64_t device_generation,
+        const RinVulkanRinOSProcessQueueMapV4* mappings,
+        uint32_t mapping_count) {
+    const unsigned char* bytes;
+    size_t index;
+    int result;
+    if (!backend || !parent || device_id == 0u || device_generation == 0u ||
+        !rinos_range_valid(backend, sizeof(*backend)))
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    bytes = (const unsigned char*)backend;
+    for (index = 0u; index < sizeof(*backend); ++index)
+        if (bytes[index] != 0u) return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    result = rin_vulkan_rinos_process_submit_backend_v9_init(
+        &backend->submit_backend, parent, device_id, device_generation,
+        mappings, mapping_count);
+    if (result != RIN_VULKAN_PRODUCT_OK) return result;
+    backend->struct_size = sizeof(*backend);
+    backend->version = RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V10_VERSION;
+    backend->state = RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_ACTIVE;
+    backend->platform_v14.struct_size = sizeof(backend->platform_v14);
+    backend->platform_v14.version =
+        RIN_VULKAN_PRODUCT_PLATFORM_V14_VERSION;
+    backend->platform_v14.base = &backend->submit_backend.platform_v13;
+    backend->platform_v14.context = backend;
+    backend->platform_v14.create_process_graphics_bind_group =
+        rinos_v10_create_graphics_bind_group;
+    backend->platform_v14.destroy_process_graphics_bind_group =
+        rinos_v10_destroy_graphics_bind_group;
+    return rin_vulkan_rinos_process_submit_backend_v10_valid(backend)
+               ? RIN_VULKAN_PRODUCT_OK
+               : RIN_VULKAN_PRODUCT_PROTOCOL;
+}
+
+int rin_vulkan_rinos_process_submit_backend_v10_valid(
+        const RinVulkanRinOSProcessSubmitBackendV10* backend) {
+    return backend && __atomic_load_n(&backend->lock, __ATOMIC_ACQUIRE) == 0u &&
+           rinos_v10_header_valid(backend);
+}
+
+RinVulkanProductPlatformV14*
+rin_vulkan_rinos_process_submit_backend_v10_platform_v14(
+        RinVulkanRinOSProcessSubmitBackendV10* backend) {
+    return rin_vulkan_rinos_process_submit_backend_v10_valid(backend)
+               ? &backend->platform_v14
+               : NULL;
+}
+
+int rin_vulkan_rinos_process_submit_backend_v10_detach(
+        RinVulkanRinOSProcessSubmitBackendV10* backend) {
+    uint32_t index;
+    int first_error = RIN_VULKAN_PRODUCT_OK;
+    int result;
+    if (!backend || !rinos_try_lock(&backend->lock))
+        return backend ? RIN_VULKAN_PRODUCT_BUSY
+                       : RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    if (backend->struct_size != sizeof(*backend) ||
+        backend->version !=
+            RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V10_VERSION ||
+        (backend->state != RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_ACTIVE &&
+         backend->state !=
+             RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_CLEANUP_PENDING) ||
+        backend->reserved[0] != 0u || backend->reserved[1] != 0u) {
+        __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+        return RIN_VULKAN_PRODUCT_STATE;
+    }
+    backend->state = RIN_VULKAN_RINOS_PROCESS_BACKEND_STATE_CLEANUP_PENDING;
+    for (index = 0u;
+         index <
+             RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V10_MAX_GRAPHICS_BIND_GROUPS;
+         ++index) {
+        RinVulkanRinOSProcessGraphicsBindGroupV10* group =
+            &backend->graphics_bind_groups[index];
+        int cleanup_result;
+        if (group->active == 0u) continue;
+        cleanup_result = rinos_v10_destroy_graphics_bind_group_locked(
+            backend, group);
+        if (cleanup_result != RIN_VULKAN_PRODUCT_OK &&
+            first_error == RIN_VULKAN_PRODUCT_OK)
+            first_error = cleanup_result;
+    }
+    __atomic_store_n(&backend->lock, 0u, __ATOMIC_RELEASE);
+    if (first_error != RIN_VULKAN_PRODUCT_OK) return first_error;
+    result = rin_vulkan_rinos_process_submit_backend_v9_detach(
         &backend->submit_backend);
     if (result != RIN_VULKAN_PRODUCT_OK) return result;
     memset(backend, 0, sizeof(*backend));

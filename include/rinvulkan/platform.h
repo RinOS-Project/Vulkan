@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 
+#include <rin/gpu_process_graphics_binding_v2.h>
 #include <ringpu/compatibility.h>
 #include <ringpu/backend_command_v1.h>
 
@@ -20,9 +21,11 @@
 #define RIN_VULKAN_PRODUCT_PLATFORM_V11_VERSION 11u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V12_VERSION 12u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V13_VERSION 13u
+#define RIN_VULKAN_PRODUCT_PLATFORM_V14_VERSION 14u
 #define RIN_VULKAN_PRODUCT_PROCESS_SAMPLER_DESC_V11_VERSION 1u
 #define RIN_VULKAN_PRODUCT_PROCESS_GRAPHICS_BINDING_V12_VERSION 1u
 #define RIN_VULKAN_PRODUCT_PROCESS_IMAGE_V13_VERSION 1u
+#define RIN_VULKAN_PRODUCT_PROCESS_GRAPHICS_BINDING_V14_VERSION 1u
 #define RIN_VULKAN_PRODUCT_PROCESS_IMAGE_TOKEN_TAG UINT64_C(0x5266)
 #define RIN_VULKAN_PRODUCT_PROCESS_GRAPHICS_BIND_GROUP_TOKEN_TAG \
     UINT64_C(0x5265)
@@ -623,6 +626,38 @@ typedef struct RinVulkanProductPlatformV13 {
     uint64_t reserved[2];
 } RinVulkanProductPlatformV13;
 
+/* V14 adds process-owned graphics bindings using the canonical API-neutral
+ * RinGPU V2 descriptor. Buffer entries additionally carry the allocation
+ * identity/range needed to establish the SDK resource binding; image and
+ * sampler entries carry process-owned tokens and exact logical metadata. */
+typedef struct RinVulkanProductProcessGraphicsBindingV14 {
+    uint32_t struct_size;
+    uint32_t version;
+    RinGpuProcessGraphicsBindingV2 binding;
+    uint64_t allocation_handle;
+    uint64_t allocation_offset;
+    uint64_t resource_size_bytes;
+} RinVulkanProductProcessGraphicsBindingV14;
+
+typedef int (*RinVulkanProductCreateProcessGraphicsBindGroupV14Fn)(
+    void* context, uint64_t bind_group_token, uint64_t pipeline_token,
+    const RinVulkanProductProcessGraphicsBindingV14* bindings,
+    uint32_t binding_count);
+typedef int (*RinVulkanProductDestroyProcessGraphicsBindGroupV14Fn)(
+    void* context, uint64_t bind_group_token);
+
+typedef struct RinVulkanProductPlatformV14 {
+    uint32_t struct_size;
+    uint32_t version;
+    RinVulkanProductPlatformV13* base;
+    void* context;
+    RinVulkanProductCreateProcessGraphicsBindGroupV14Fn
+        create_process_graphics_bind_group;
+    RinVulkanProductDestroyProcessGraphicsBindGroupV14Fn
+        destroy_process_graphics_bind_group;
+    uint64_t reserved[2];
+} RinVulkanProductPlatformV14;
+
 #ifdef __cplusplus
 static_assert(sizeof(RinVulkanProductResourceV1) == 16u,
               "Vulkan product resource ABI drift");
@@ -634,6 +669,8 @@ static_assert(sizeof(RinVulkanProductProcessGraphicsBindingV12) == 72u,
               "Vulkan process graphics binding V12 ABI drift");
 static_assert(sizeof(RinVulkanProductProcessImageV13) == 120u,
               "Vulkan process image descriptor V13 ABI drift");
+static_assert(sizeof(RinVulkanProductProcessGraphicsBindingV14) == 224u,
+              "Vulkan process graphics binding V14 ABI drift");
 static_assert(sizeof(RinVulkanProductReportV1) == 128u,
               "Vulkan product report ABI drift");
 static_assert(sizeof(RinVulkanProductStatusV1) == 128u,
@@ -657,6 +694,8 @@ _Static_assert(sizeof(RinVulkanProductProcessGraphicsBindingV12) == 72u,
                "Vulkan process graphics binding V12 ABI drift");
 _Static_assert(sizeof(RinVulkanProductProcessImageV13) == 120u,
                "Vulkan process image descriptor V13 ABI drift");
+_Static_assert(sizeof(RinVulkanProductProcessGraphicsBindingV14) == 224u,
+               "Vulkan process graphics binding V14 ABI drift");
 _Static_assert(sizeof(RinVulkanProductReportV1) == 128u,
                "Vulkan product report ABI drift");
 _Static_assert(sizeof(RinVulkanProductStatusV1) == 128u,
