@@ -595,7 +595,7 @@ static int emit_example_spirv_instruction(
 static size_t build_triangle_vertex_spirv(uint32_t* words,
                                           size_t word_capacity) {
     size_t count = 5u;
-    uint32_t op[7];
+    uint32_t op[8];
 #define EXAMPLE_SPIRV_EMIT(opcode, words_count) \
     do { \
         if (!emit_example_spirv_instruction( \
@@ -606,21 +606,23 @@ static size_t build_triangle_vertex_spirv(uint32_t* words,
     words[0] = UINT32_C(0x07230203);
     words[1] = UINT32_C(0x00010300);
     words[2] = 0u;
-    words[3] = 24u;
+    words[3] = 26u;
     words[4] = 0u;
     op[0] = 1u;
     EXAMPLE_SPIRV_EMIT(17u, 2u);                    /* Shader capability */
     op[0] = 0u; op[1] = 3u;
     EXAMPLE_SPIRV_EMIT(14u, 3u);                    /* Vulkan memory model */
     op[0] = 0u; op[1] = 13u; op[2] = UINT32_C(0x6e69616d);
-    op[3] = 0u; op[4] = 11u; op[5] = 12u; op[6] = 23u;
-    EXAMPLE_SPIRV_EMIT(15u, 8u);                    /* Vertex main */
+    op[3] = 0u; op[4] = 11u; op[5] = 12u; op[6] = 23u; op[7] = 25u;
+    EXAMPLE_SPIRV_EMIT(15u, 9u);                    /* Vertex main */
     op[0] = 11u; op[1] = 11u; op[2] = 0u;
     EXAMPLE_SPIRV_EMIT(71u, 4u);                    /* Position builtin */
     op[0] = 12u; op[1] = 11u; op[2] = 42u;
     EXAMPLE_SPIRV_EMIT(71u, 4u);                    /* VertexIndex builtin */
     op[0] = 23u; op[1] = 30u; op[2] = 3u;
     EXAMPLE_SPIRV_EMIT(71u, 4u);                    /* varying location 3 */
+    op[0] = 25u; op[1] = 30u; op[2] = 5u;
+    EXAMPLE_SPIRV_EMIT(71u, 4u);                    /* integer location 5 */
     op[0] = 1u;
     EXAMPLE_SPIRV_EMIT(19u, 2u);                    /* void */
     op[0] = 2u; op[1] = 32u;
@@ -635,6 +637,8 @@ static size_t build_triangle_vertex_spirv(uint32_t* words,
     EXAMPLE_SPIRV_EMIT(32u, 4u);                    /* input pointer */
     op[0] = 22u; op[1] = 3u; op[2] = 2u;
     EXAMPLE_SPIRV_EMIT(32u, 4u);                    /* scalar output pointer */
+    op[0] = 24u; op[1] = 3u; op[2] = 3u;
+    EXAMPLE_SPIRV_EMIT(32u, 4u);                    /* integer output pointer */
     op[0] = 7u; op[1] = 1u;
     EXAMPLE_SPIRV_EMIT(33u, 3u);                    /* function type */
     op[0] = 2u; op[1] = 8u; op[2] = UINT32_C(0xbf800000);
@@ -649,6 +653,8 @@ static size_t build_triangle_vertex_spirv(uint32_t* words,
     EXAMPLE_SPIRV_EMIT(59u, 4u);                    /* vertex index */
     op[0] = 22u; op[1] = 23u; op[2] = 3u;
     EXAMPLE_SPIRV_EMIT(59u, 4u);                    /* varying output */
+    op[0] = 24u; op[1] = 25u; op[2] = 3u;
+    EXAMPLE_SPIRV_EMIT(59u, 4u);                    /* integer varying output */
     op[0] = 1u; op[1] = 13u; op[2] = 0u; op[3] = 7u;
     EXAMPLE_SPIRV_EMIT(54u, 5u);                    /* function */
     op[0] = 14u;
@@ -672,6 +678,8 @@ static size_t build_triangle_vertex_spirv(uint32_t* words,
     EXAMPLE_SPIRV_EMIT(62u, 3u);                    /* store position */
     op[0] = 23u; op[1] = 17u;
     EXAMPLE_SPIRV_EMIT(62u, 3u);                    /* store varying */
+    op[0] = 25u; op[1] = 15u;
+    EXAMPLE_SPIRV_EMIT(62u, 3u);                    /* store integer varying */
     EXAMPLE_SPIRV_EMIT(253u, 1u);                   /* return */
     EXAMPLE_SPIRV_EMIT(56u, 1u);                    /* function end */
 #undef EXAMPLE_SPIRV_EMIT
@@ -681,7 +689,7 @@ static size_t build_triangle_vertex_spirv(uint32_t* words,
 static size_t build_triangle_fragment_spirv(uint32_t* words,
                                             size_t word_capacity) {
     size_t count = 5u;
-    uint32_t op[7];
+    uint32_t op[8];
 #define EXAMPLE_SPIRV_EMIT(opcode, words_count) \
     do { \
         if (!emit_example_spirv_instruction( \
@@ -692,31 +700,37 @@ static size_t build_triangle_fragment_spirv(uint32_t* words,
     words[0] = UINT32_C(0x07230203);
     words[1] = UINT32_C(0x00010300);
     words[2] = 0u;
-    words[3] = 18u;
+    words[3] = 23u;
     words[4] = 0u;
     op[0] = 1u;
     EXAMPLE_SPIRV_EMIT(17u, 2u);                    /* Shader capability */
     op[0] = 0u; op[1] = 3u;
     EXAMPLE_SPIRV_EMIT(14u, 3u);                    /* Vulkan memory model */
     op[0] = 4u; op[1] = 12u; op[2] = UINT32_C(0x6e69616d);
-    op[3] = 0u; op[4] = 10u; op[5] = 16u;
-    EXAMPLE_SPIRV_EMIT(15u, 7u);                    /* Fragment main */
+    op[3] = 0u; op[4] = 10u; op[5] = 16u; op[6] = 20u;
+    EXAMPLE_SPIRV_EMIT(15u, 8u);                    /* Fragment main */
     op[0] = 12u; op[1] = 7u;
     EXAMPLE_SPIRV_EMIT(16u, 3u);                    /* OriginUpperLeft */
     op[0] = 10u; op[1] = 30u; op[2] = 0u;
     EXAMPLE_SPIRV_EMIT(71u, 4u);                    /* output location 0 */
     op[0] = 16u; op[1] = 30u; op[2] = 3u;
     EXAMPLE_SPIRV_EMIT(71u, 4u);                    /* input location 3 */
+    op[0] = 20u; op[1] = 30u; op[2] = 5u;
+    EXAMPLE_SPIRV_EMIT(71u, 4u);                    /* integer input location 5 */
     op[0] = 1u;
     EXAMPLE_SPIRV_EMIT(19u, 2u);                    /* void */
     op[0] = 2u; op[1] = 32u;
     EXAMPLE_SPIRV_EMIT(22u, 3u);                    /* float */
+    op[0] = 18u; op[1] = 32u; op[2] = 1u;
+    EXAMPLE_SPIRV_EMIT(21u, 4u);                    /* signed i32 */
     op[0] = 3u; op[1] = 2u; op[2] = 4u;
     EXAMPLE_SPIRV_EMIT(23u, 4u);                    /* vec4 */
     op[0] = 4u; op[1] = 3u; op[2] = 3u;
     EXAMPLE_SPIRV_EMIT(32u, 4u);                    /* output pointer */
     op[0] = 15u; op[1] = 1u; op[2] = 2u;
     EXAMPLE_SPIRV_EMIT(32u, 4u);                    /* scalar input pointer */
+    op[0] = 19u; op[1] = 1u; op[2] = 18u;
+    EXAMPLE_SPIRV_EMIT(32u, 4u);                    /* integer input pointer */
     op[0] = 5u; op[1] = 1u;
     EXAMPLE_SPIRV_EMIT(33u, 3u);                    /* function type */
     op[0] = 2u; op[1] = 6u; op[2] = UINT32_C(0x3f000000);
@@ -731,13 +745,19 @@ static size_t build_triangle_fragment_spirv(uint32_t* words,
     EXAMPLE_SPIRV_EMIT(59u, 4u);                    /* output variable */
     op[0] = 15u; op[1] = 16u; op[2] = 1u;
     EXAMPLE_SPIRV_EMIT(59u, 4u);                    /* varying input */
+    op[0] = 19u; op[1] = 20u; op[2] = 1u;
+    EXAMPLE_SPIRV_EMIT(59u, 4u);                    /* integer varying input */
     op[0] = 1u; op[1] = 12u; op[2] = 0u; op[3] = 5u;
     EXAMPLE_SPIRV_EMIT(54u, 5u);                    /* function */
     op[0] = 13u;
     EXAMPLE_SPIRV_EMIT(248u, 2u);                   /* label */
     op[0] = 2u; op[1] = 17u; op[2] = 16u;
     EXAMPLE_SPIRV_EMIT(61u, 4u);                    /* load varying */
-    op[0] = 3u; op[1] = 14u; op[2] = 17u; op[3] = 8u;
+    op[0] = 18u; op[1] = 21u; op[2] = 20u;
+    EXAMPLE_SPIRV_EMIT(61u, 4u);                    /* load integer varying */
+    op[0] = 2u; op[1] = 22u; op[2] = 21u;
+    EXAMPLE_SPIRV_EMIT(111u, 4u);                   /* signed i32 to f32 */
+    op[0] = 3u; op[1] = 14u; op[2] = 17u; op[3] = 22u;
     op[4] = 6u; op[5] = 7u;
     EXAMPLE_SPIRV_EMIT(80u, 7u);                    /* color vector */
     op[0] = 10u; op[1] = 14u;
