@@ -11,6 +11,7 @@ static RinResult submit_result;
 static RinResult shader_create_result;
 static RinResult pipeline_create_result;
 static RinResult graphics_pipeline_create_result;
+static RinResult graphics_pipeline_v2_create_result;
 static RinResult sampler_create_result;
 static RinResult object_destroy_result;
 static RinResult resource_bind_result;
@@ -40,6 +41,7 @@ static uint32_t observed_resource_count;
 static uint32_t shader_create_calls;
 static uint32_t pipeline_create_calls;
 static uint32_t graphics_pipeline_create_calls;
+static uint32_t graphics_pipeline_v2_create_calls;
 static uint32_t sampler_create_calls;
 static uint32_t object_destroy_calls;
 static uint32_t resource_bind_calls;
@@ -69,6 +71,8 @@ static uint64_t observed_graphics_pipeline_token;
 static uint64_t observed_graphics_vertex_token;
 static uint64_t observed_graphics_fragment_token;
 static RinGpuProcessGraphicsPipelineDescV1 observed_graphics_pipeline_desc;
+static RinGpuProcessGraphicsPipelineDescV2
+    observed_graphics_pipeline_desc_v2;
 static uint64_t observed_sampler_token;
 static RinGpuProcessSamplerDescV1 observed_sampler_desc;
 static uint64_t observed_destroy_tokens[8];
@@ -205,6 +209,27 @@ RinResult rin_gpu_process_graphics_pipeline_create_v1(
     observed_graphics_fragment_token = fragment_shader_token;
     observed_graphics_pipeline_desc = *descriptor;
     return graphics_pipeline_create_result;
+}
+
+RinResult rin_gpu_process_graphics_pipeline_create_v2(
+    uint64_t device_id, uint64_t device_generation,
+    uint64_t pipeline_token, uint64_t vertex_shader_token,
+    uint64_t fragment_shader_token,
+    const RinGpuProcessGraphicsPipelineDescV2* descriptor) {
+    ++graphics_pipeline_v2_create_calls;
+    if (device_id != UINT64_C(0x1111) ||
+        device_generation != UINT64_C(0x2222) || pipeline_token == 0u ||
+        vertex_shader_token == 0u || fragment_shader_token == 0u ||
+        pipeline_token == vertex_shader_token ||
+        pipeline_token == fragment_shader_token ||
+        vertex_shader_token == fragment_shader_token ||
+        !rin_gpu_process_graphics_pipeline_desc_v2_valid(descriptor))
+        return RIN_ERROR_INVALID_ARGUMENT;
+    observed_graphics_pipeline_token = pipeline_token;
+    observed_graphics_vertex_token = vertex_shader_token;
+    observed_graphics_fragment_token = fragment_shader_token;
+    observed_graphics_pipeline_desc_v2 = *descriptor;
+    return graphics_pipeline_v2_create_result;
 }
 
 RinResult rin_gpu_process_sampler_create_v1(
@@ -463,6 +488,7 @@ static void reset_mocks(void) {
     shader_create_result = RIN_SUCCESS;
     pipeline_create_result = RIN_SUCCESS;
     graphics_pipeline_create_result = RIN_SUCCESS;
+    graphics_pipeline_v2_create_result = RIN_SUCCESS;
     sampler_create_result = RIN_SUCCESS;
     object_destroy_result = RIN_SUCCESS;
     resource_bind_result = RIN_SUCCESS;
@@ -495,6 +521,7 @@ static void reset_mocks(void) {
     shader_create_calls = 0u;
     pipeline_create_calls = 0u;
     graphics_pipeline_create_calls = 0u;
+    graphics_pipeline_v2_create_calls = 0u;
     sampler_create_calls = 0u;
     object_destroy_calls = 0u;
     resource_bind_calls = 0u;
@@ -526,6 +553,8 @@ static void reset_mocks(void) {
     observed_graphics_fragment_token = 0u;
     memset(&observed_graphics_pipeline_desc, 0,
            sizeof(observed_graphics_pipeline_desc));
+    memset(&observed_graphics_pipeline_desc_v2, 0,
+           sizeof(observed_graphics_pipeline_desc_v2));
     observed_sampler_token = 0u;
     memset(&observed_sampler_desc, 0, sizeof(observed_sampler_desc));
     memset(observed_destroy_tokens, 0, sizeof(observed_destroy_tokens));
@@ -567,6 +596,7 @@ int main(void) {
     RinVulkanRinOSProcessSubmitBackendV8 backend_v8 = {0};
     RinVulkanRinOSProcessSubmitBackendV9 backend_v9 = {0};
     RinVulkanRinOSProcessSubmitBackendV10 backend_v10 = {0};
+    RinVulkanRinOSProcessSubmitBackendV11 backend_v11 = {0};
     RinVulkanProductPlatformV5 parent = {0};
     uint32_t queue_ids[2] = {0u, 2u};
     RinVulkanRinOSProcessQueueMapV4 queue_mappings[3] = {
@@ -588,6 +618,7 @@ int main(void) {
     RinVulkanProductPlatformV12* platform_v12;
     RinVulkanProductPlatformV13* platform_v13;
     RinVulkanProductPlatformV14* platform_v14;
+    RinVulkanProductPlatformV15* platform_v15;
     RinVulkanProductProcessComputeBindingV8 process_bindings[2] = {{0}};
     uint8_t shader_ir[sizeof(RinShaderHeaderV1)] = {0};
     uint64_t process_pipeline_token = 0u;
@@ -1699,6 +1730,77 @@ int main(void) {
           RIN_VULKAN_PRODUCT_OK);
     CHECK(backend_v10.state == 0u && release_calls == 2u);
 
-    puts("RinVulkan RinOS process-submit/compute/graphics/sampler/image/bind-group adapter: PASS");
+    reset_mocks();
+    CHECK(rin_vulkan_rinos_process_submit_backend_v11_init(
+              &backend_v11, &parent, 0x1111u, 0x2222u, queue_mappings, 3u) ==
+          RIN_VULKAN_PRODUCT_OK);
+    platform_v15 =
+        rin_vulkan_rinos_process_submit_backend_v11_platform_v15(&backend_v11);
+    CHECK(platform_v15 && platform_v15->base ==
+              &backend_v11.submit_backend.platform_v14 &&
+          platform_v15->create_process_graphics_pipeline_v2 &&
+          rin_vulkan_rinos_process_submit_backend_v11_valid(&backend_v11));
+    platform_v14 = platform_v15->base;
+    platform_v13 = platform_v14->base;
+    platform_v12 = platform_v13->base;
+    platform_v11 = platform_v12->base;
+    platform_v10 = platform_v11->base;
+    {
+        const uint64_t graphics_pipeline_token = pipeline_cookie + 0x90u;
+        RinGpuBackendVaryingV1 varyings[2] = {
+            {7u, 3u, RIN_GPU_VARYING_FLOAT32,
+             RIN_GPU_INTERPOLATION_NO_PERSPECTIVE},
+            {9u, 5u, RIN_GPU_VARYING_SINT32,
+             RIN_GPU_INTERPOLATION_FLAT}};
+
+        CHECK(platform_v10->create_process_graphics_pipeline &&
+              platform_v10->destroy_process_graphics_pipeline);
+        varyings[1].interpolation = RIN_GPU_INTERPOLATION_PERSPECTIVE;
+        CHECK(platform_v15->create_process_graphics_pipeline_v2(
+                  platform_v15->context, graphics_pipeline_token, shader_ir,
+                  sizeof(shader_ir), shader_ir, sizeof(shader_ir),
+                  RIN_GPU_FORMAT_RGBA8_UNORM,
+                  RIN_GPU_PRIMITIVE_TRIANGLE_LIST, varyings, 2u) ==
+              RIN_VULKAN_PRODUCT_INVALID_ARGUMENT);
+        CHECK(graphics_pipeline_v2_create_calls == 0u &&
+              shader_create_calls == 0u);
+
+        varyings[1].interpolation = RIN_GPU_INTERPOLATION_FLAT;
+        CHECK(platform_v15->create_process_graphics_pipeline_v2(
+                  platform_v15->context, graphics_pipeline_token, shader_ir,
+                  sizeof(shader_ir), shader_ir, sizeof(shader_ir),
+                  RIN_GPU_FORMAT_RGBA8_UNORM,
+                  RIN_GPU_PRIMITIVE_TRIANGLE_LIST, varyings, 2u) ==
+              RIN_VULKAN_PRODUCT_OK);
+        CHECK(graphics_pipeline_v2_create_calls == 1u &&
+              graphics_pipeline_create_calls == 0u &&
+              shader_create_calls == 2u &&
+              observed_graphics_pipeline_desc_v2.varying_count == 2u &&
+              observed_graphics_pipeline_desc_v2.varyings[0]
+                      .vertex_output_location == 7u &&
+              observed_graphics_pipeline_desc_v2.varyings[0]
+                      .fragment_input_location == 3u &&
+              observed_graphics_pipeline_desc_v2.varyings[0].type ==
+                  RIN_GPU_PROCESS_GRAPHICS_VARYING_FLOAT32_V2 &&
+              observed_graphics_pipeline_desc_v2.varyings[0].interpolation ==
+                  RIN_GPU_PROCESS_GRAPHICS_INTERPOLATION_NO_PERSPECTIVE_V2 &&
+              observed_graphics_pipeline_desc_v2.varyings[1]
+                      .vertex_output_location == 9u &&
+              observed_graphics_pipeline_desc_v2.varyings[1]
+                      .fragment_input_location == 5u &&
+              observed_graphics_pipeline_desc_v2.varyings[1].type ==
+                  RIN_GPU_PROCESS_GRAPHICS_VARYING_SINT32_V2 &&
+              observed_graphics_pipeline_desc_v2.varyings[1].interpolation ==
+                  RIN_GPU_PROCESS_GRAPHICS_INTERPOLATION_FLAT_V2);
+        CHECK(platform_v10->destroy_process_graphics_pipeline(
+                  platform_v10->context, graphics_pipeline_token) ==
+              RIN_VULKAN_PRODUCT_OK);
+        CHECK(object_destroy_calls == 3u);
+    }
+    CHECK(rin_vulkan_rinos_process_submit_backend_v11_detach(&backend_v11) ==
+          RIN_VULKAN_PRODUCT_OK);
+    CHECK(backend_v11.state == 0u && release_calls == 2u);
+
+    puts("RinVulkan RinOS process-submit/compute/graphics/sampler/image/bind-group/pipeline-v2 adapter: PASS");
     return 0;
 }

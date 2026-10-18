@@ -22,6 +22,7 @@
 #define RIN_VULKAN_PRODUCT_PLATFORM_V12_VERSION 12u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V13_VERSION 13u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V14_VERSION 14u
+#define RIN_VULKAN_PRODUCT_PLATFORM_V15_VERSION 15u
 #define RIN_VULKAN_PRODUCT_PROCESS_SAMPLER_DESC_V11_VERSION 1u
 #define RIN_VULKAN_PRODUCT_PROCESS_GRAPHICS_BINDING_V12_VERSION 1u
 #define RIN_VULKAN_PRODUCT_PROCESS_IMAGE_V13_VERSION 1u
@@ -657,6 +658,26 @@ typedef struct RinVulkanProductPlatformV14 {
         destroy_process_graphics_bind_group;
     uint64_t reserved[2];
 } RinVulkanProductPlatformV14;
+
+/* V15 adds an additive process graphics-pipeline path with explicit scalar
+ * varying slots and interpolation. V10 remains the exact V1 lifecycle ABI;
+ * adapters must use this callback when V1 cannot represent the planned map. */
+typedef int (*RinVulkanProductCreateProcessGraphicsPipelineV15Fn)(
+    void* context, uint64_t pipeline_token,
+    const void* vertex_shader_ir, uint64_t vertex_shader_ir_size,
+    const void* fragment_shader_ir, uint64_t fragment_shader_ir_size,
+    uint32_t color_format, uint32_t primitive_topology,
+    const RinGpuBackendVaryingV1* varyings, uint32_t varying_count);
+
+typedef struct RinVulkanProductPlatformV15 {
+    uint32_t struct_size;
+    uint32_t version;
+    RinVulkanProductPlatformV14* base;
+    void* context;
+    RinVulkanProductCreateProcessGraphicsPipelineV15Fn
+        create_process_graphics_pipeline_v2;
+    uint64_t reserved[2];
+} RinVulkanProductPlatformV15;
 
 #ifdef __cplusplus
 static_assert(sizeof(RinVulkanProductResourceV1) == 16u,

@@ -226,6 +226,8 @@ typedef struct TestProductAdapters {
     uint64_t sdk_last_sampler_token;
     RinGpuProcessSamplerDescV1 sdk_last_sampler_desc;
     uint64_t sdk_last_graphics_pipeline_token;
+    uint32_t sdk_graphics_pipeline_v2_create_calls;
+    RinGpuProcessGraphicsPipelineDescV2 sdk_last_graphics_pipeline_desc_v2;
     uint64_t sdk_last_bind_group_token;
     uint64_t sdk_last_bind_group_pipeline_token;
     uint32_t sdk_last_bind_group_count;
@@ -2460,6 +2462,34 @@ RinResult rin_gpu_process_graphics_pipeline_create_v1(
         return RIN_ERROR_INVALID_ARGUMENT;
     adapters->sdk_last_graphics_pipeline_token = pipeline_token;
     ++adapters->sdk_graphics_pipeline_create_calls;
+    return RIN_SUCCESS;
+}
+
+RinResult rin_gpu_process_graphics_pipeline_create_v2(
+        uint64_t device_id, uint64_t device_generation,
+        uint64_t pipeline_token, uint64_t vertex_shader_token,
+        uint64_t fragment_shader_token,
+        const RinGpuProcessGraphicsPipelineDescV2* descriptor) {
+    TestProductAdapters* adapters = g_process_submit_adapters;
+    const uint64_t expected_vertex_token =
+        ((uint64_t)RIN_VULKAN_RINOS_PROCESS_GRAPHICS_VERTEX_TOKEN_TAG << 48u) |
+        (pipeline_token & UINT64_C(0x0000FFFFFFFFFFFF));
+    const uint64_t expected_fragment_token =
+        ((uint64_t)RIN_VULKAN_RINOS_PROCESS_GRAPHICS_FRAGMENT_TOKEN_TAG << 48u) |
+        (pipeline_token & UINT64_C(0x0000FFFFFFFFFFFF));
+    if (!adapters || device_id != TEST_PROCESS_SUBMIT_DEVICE_ID ||
+        device_generation != TEST_PROCESS_SUBMIT_DEVICE_GENERATION ||
+        pipeline_token == 0u || vertex_shader_token != expected_vertex_token ||
+        fragment_shader_token != expected_fragment_token ||
+        adapters->sdk_previous_shader_module_token != vertex_shader_token ||
+        adapters->sdk_last_shader_module_token != fragment_shader_token ||
+        adapters->sdk_previous_shader_module_stage != RIN_SHADER_STAGE_VERTEX ||
+        adapters->sdk_last_shader_module_stage != RIN_SHADER_STAGE_FRAGMENT ||
+        !rin_gpu_process_graphics_pipeline_desc_v2_valid(descriptor))
+        return RIN_ERROR_INVALID_ARGUMENT;
+    adapters->sdk_last_graphics_pipeline_token = pipeline_token;
+    adapters->sdk_last_graphics_pipeline_desc_v2 = *descriptor;
+    ++adapters->sdk_graphics_pipeline_v2_create_calls;
     return RIN_SUCCESS;
 }
 
@@ -8109,6 +8139,27 @@ int main(void) {
           g_native_window_app_surface.window_close_calls == 1u &&
           g_native_window_app_surface.completion_callback == NULL &&
           g_native_window_app_surface.completion_context == NULL);
+        CHECK(product_adapters.sdk_graphics_pipeline_v2_create_calls == 1u &&
+              product_adapters.sdk_last_graphics_pipeline_desc_v2.varying_count ==
+                  2u &&
+              product_adapters.sdk_last_graphics_pipeline_desc_v2.varyings[0]
+                      .vertex_output_location == 7u &&
+              product_adapters.sdk_last_graphics_pipeline_desc_v2.varyings[0]
+                      .fragment_input_location == 3u &&
+              product_adapters.sdk_last_graphics_pipeline_desc_v2.varyings[0]
+                      .type == RIN_GPU_PROCESS_GRAPHICS_VARYING_FLOAT32_V2 &&
+              product_adapters.sdk_last_graphics_pipeline_desc_v2.varyings[0]
+                      .interpolation ==
+                  RIN_GPU_PROCESS_GRAPHICS_INTERPOLATION_NO_PERSPECTIVE_V2 &&
+              product_adapters.sdk_last_graphics_pipeline_desc_v2.varyings[1]
+                      .vertex_output_location == 9u &&
+              product_adapters.sdk_last_graphics_pipeline_desc_v2.varyings[1]
+                      .fragment_input_location == 5u &&
+              product_adapters.sdk_last_graphics_pipeline_desc_v2.varyings[1]
+                      .type == RIN_GPU_PROCESS_GRAPHICS_VARYING_SINT32_V2 &&
+              product_adapters.sdk_last_graphics_pipeline_desc_v2.varyings[1]
+                      .interpolation ==
+                  RIN_GPU_PROCESS_GRAPHICS_INTERPOLATION_FLAT_V2);
         imported_buffer_slot =
             g_native_window_app_surface.compositor_buffer_slot;
         CHECK(compositor_gpu_readback_runtime_core_observe(

@@ -41,6 +41,7 @@ extern "C" {
 #define RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V10_VERSION UINT32_C(10)
 #define RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V10_MAX_GRAPHICS_BIND_GROUPS \
     RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V8_MAX_GRAPHICS_BIND_GROUPS
+#define RIN_VULKAN_RINOS_PROCESS_SUBMIT_BACKEND_V11_VERSION UINT32_C(11)
 #define RIN_VULKAN_RINOS_PROCESS_RESOURCE_COOKIE_TAG UINT64_C(0x5261)
 #define RIN_VULKAN_RINOS_PROCESS_IMAGE_RESOURCE_COOKIE_TAG UINT64_C(0x5249)
 /* Reserved process-token tag for the private shader-module child associated
@@ -304,6 +305,19 @@ typedef struct RinVulkanRinOSProcessSubmitBackendV10 {
     uint64_t reserved[2];
 } RinVulkanRinOSProcessSubmitBackendV10;
 
+/* V11 preserves all V10 ownership and adds explicit process graphics
+ * pipeline varying metadata. The V10 callback and destroy path remain valid
+ * for pipelines whose plan contains no inter-stage varyings. */
+typedef struct RinVulkanRinOSProcessSubmitBackendV11 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint32_t state;
+    volatile uint32_t lock;
+    RinVulkanRinOSProcessSubmitBackendV10 submit_backend;
+    RinVulkanProductPlatformV15 platform_v15;
+    uint64_t reserved[2];
+} RinVulkanRinOSProcessSubmitBackendV11;
+
 /* Initialize caller-zeroed storage for the current RinOS process. Each queue
  * ID is bound through the authenticated RinOS SDK; the returned V6 callback
  * submits canonical RinGPU records through the process-submit syscall. The
@@ -461,6 +475,20 @@ rin_vulkan_rinos_process_submit_backend_v10_platform_v14(
     RinVulkanRinOSProcessSubmitBackendV10* backend);
 int rin_vulkan_rinos_process_submit_backend_v10_detach(
     RinVulkanRinOSProcessSubmitBackendV10* backend);
+
+int rin_vulkan_rinos_process_submit_backend_v11_init(
+    RinVulkanRinOSProcessSubmitBackendV11* backend,
+    RinVulkanProductPlatformV5* parent, uint64_t device_id,
+    uint64_t device_generation,
+    const RinVulkanRinOSProcessQueueMapV4* mappings,
+    uint32_t mapping_count);
+int rin_vulkan_rinos_process_submit_backend_v11_valid(
+    const RinVulkanRinOSProcessSubmitBackendV11* backend);
+RinVulkanProductPlatformV15*
+rin_vulkan_rinos_process_submit_backend_v11_platform_v15(
+    RinVulkanRinOSProcessSubmitBackendV11* backend);
+int rin_vulkan_rinos_process_submit_backend_v11_detach(
+    RinVulkanRinOSProcessSubmitBackendV11* backend);
 
 #ifdef __cplusplus
 }

@@ -689,6 +689,7 @@ static uintptr_t g_product_binding_v11;
 static uintptr_t g_product_binding_v12;
 static uintptr_t g_product_binding_v13;
 static uintptr_t g_product_binding_v14;
+static uintptr_t g_product_binding_v15;
 static uint32_t g_active_product_calls;
 static volatile uint64_t g_next_process_bind_group_token = UINT64_C(1);
 static volatile uint64_t g_next_process_graphics_bind_group_token =
@@ -1562,6 +1563,17 @@ static RinVulkanProductPlatformV14* product_v14_for_base(
     return platform->base == base ? platform : NULL;
 }
 
+static RinVulkanProductPlatformV15* product_v15_for_base(
+        const RinVulkanProductPlatformV14* base) {
+    const uintptr_t binding =
+        __atomic_load_n(&g_product_binding_v15, __ATOMIC_ACQUIRE);
+    RinVulkanProductPlatformV15* platform;
+    if (binding == 0u || binding == RIN_VK_ICD_BINDING_TRANSITION)
+        return NULL;
+    platform = (RinVulkanProductPlatformV15*)binding;
+    return platform->base == base ? platform : NULL;
+}
+
 /* Keep the V10 adapter pinned by the same product-call lease used by the
  * callback. A V7 process pipeline chain without V10 is reported to the caller
  * as a missing process graphics provider, never silently downgraded. */
@@ -1595,6 +1607,49 @@ static RinVulkanProductPlatformV10* acquire_process_graphics_pipeline_platform(
     product_v10 = product_v9 ? product_v10_for_base(product_v9) : NULL;
     if (!product_v10) release_product();
     return product_v10;
+}
+
+static RinVulkanProductPlatformV15*
+acquire_process_graphics_pipeline_platform_v15(
+        int* process_platform_required) {
+    RinVulkanProductPlatformV1* product = acquire_product();
+    RinVulkanProductPlatformV2* product_v2;
+    RinVulkanProductPlatformV3* product_v3;
+    RinVulkanProductPlatformV4* product_v4;
+    RinVulkanProductPlatformV5* product_v5;
+    RinVulkanProductPlatformV6* product_v6;
+    RinVulkanProductPlatformV7* product_v7;
+    RinVulkanProductPlatformV8* product_v8;
+    RinVulkanProductPlatformV9* product_v9;
+    RinVulkanProductPlatformV10* product_v10;
+    RinVulkanProductPlatformV11* product_v11;
+    RinVulkanProductPlatformV12* product_v12;
+    RinVulkanProductPlatformV13* product_v13;
+    RinVulkanProductPlatformV14* product_v14;
+    RinVulkanProductPlatformV15* product_v15;
+    if (process_platform_required) *process_platform_required = 0;
+    if (!product) return NULL;
+    product_v2 = product_v2_for_base(product);
+    product_v3 = product_v2 ? product_v3_for_base(product_v2) : NULL;
+    product_v4 = product_v3 ? product_v4_for_base(product_v3) : NULL;
+    product_v5 = product_v4 ? product_v5_for_base(product_v4) : NULL;
+    product_v6 = product_v5 ? product_v6_for_base(product_v5) : NULL;
+    product_v7 = product_v6 ? product_v7_for_base(product_v6) : NULL;
+    if (!product_v7) {
+        release_product();
+        return NULL;
+    }
+    if (process_platform_required) *process_platform_required = 1;
+    product_v8 = product_v8_for_base(product_v7);
+    product_v9 = product_v8 ? product_v9_for_base(product_v8) : NULL;
+    product_v10 = product_v9 ? product_v10_for_base(product_v9) : NULL;
+    product_v11 = product_v10 ? product_v11_for_base(product_v10) : NULL;
+    product_v12 = product_v11 ? product_v12_for_base(product_v11) : NULL;
+    product_v13 = product_v12 ? product_v13_for_base(product_v12) : NULL;
+    product_v14 = product_v13 ? product_v14_for_base(product_v13) : NULL;
+    product_v15 = product_v14 ? product_v15_for_base(product_v14) : NULL;
+    if (!product_v15) release_product();
+    return product_v15;
 }
 
 /* A RinOS process backend requires the V11 sampler lifecycle once the V7
@@ -9269,6 +9324,7 @@ int rin_gpu_vulkan_icd_unbind_product_platform_v14(
     if (platform->struct_size != sizeof(*platform) ||
         platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V14_VERSION ||
         !platform->base ||
+        __atomic_load_n(&g_product_binding_v15, __ATOMIC_ACQUIRE) != 0u ||
         __atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
         process_graphics_bind_group_slots_active()) {
         __atomic_store_n(&g_product_binding_v14, (uintptr_t)platform,
@@ -9276,6 +9332,59 @@ int rin_gpu_vulkan_icd_unbind_product_platform_v14(
         return RIN_GPU_VULKAN_BUSY;
     }
     __atomic_store_n(&g_product_binding_v14, 0u, __ATOMIC_RELEASE);
+    return RIN_GPU_VULKAN_OK;
+}
+
+int rin_gpu_vulkan_icd_bind_product_platform_v15(
+        RinVulkanProductPlatformV15* platform) {
+    uintptr_t expected = 0u;
+    uintptr_t v14_binding;
+    if (!platform || (uintptr_t)platform == RIN_VK_ICD_BINDING_TRANSITION ||
+        platform->struct_size != sizeof(*platform) ||
+        platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V15_VERSION ||
+        !platform->base || !platform->context ||
+        !platform->create_process_graphics_pipeline_v2 ||
+        !wsi_zero_words(platform->reserved, 2u))
+        return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    if (!__atomic_compare_exchange_n(&g_product_binding_v15, &expected,
+                                     RIN_VK_ICD_BINDING_TRANSITION, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        return RIN_GPU_VULKAN_BUSY;
+    v14_binding =
+        __atomic_load_n(&g_product_binding_v14, __ATOMIC_ACQUIRE);
+    if (v14_binding == 0u ||
+        v14_binding == RIN_VK_ICD_BINDING_TRANSITION ||
+        v14_binding != (uintptr_t)platform->base ||
+        !platform->base->base ||
+        __atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u) {
+        __atomic_store_n(&g_product_binding_v15, 0u, __ATOMIC_RELEASE);
+        return RIN_GPU_VULKAN_BUSY;
+    }
+    __atomic_store_n(&g_product_binding_v15, (uintptr_t)platform,
+                     __ATOMIC_RELEASE);
+    return RIN_GPU_VULKAN_OK;
+}
+
+int rin_gpu_vulkan_icd_unbind_product_platform_v15(
+        RinVulkanProductPlatformV15* platform) {
+    uintptr_t expected;
+    if (!platform) return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    expected = (uintptr_t)platform;
+    if (!__atomic_compare_exchange_n(
+            &g_product_binding_v15, &expected,
+            RIN_VK_ICD_BINDING_TRANSITION, 0, __ATOMIC_ACQ_REL,
+            __ATOMIC_RELAXED))
+        return expected == 0u ? RIN_GPU_VULKAN_NOT_INITIALIZED
+                              : RIN_GPU_VULKAN_BUSY;
+    if (platform->struct_size != sizeof(*platform) ||
+        platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V15_VERSION ||
+        !platform->base ||
+        __atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u) {
+        __atomic_store_n(&g_product_binding_v15, (uintptr_t)platform,
+                         __ATOMIC_RELEASE);
+        return RIN_GPU_VULKAN_BUSY;
+    }
+    __atomic_store_n(&g_product_binding_v15, 0u, __ATOMIC_RELEASE);
     return RIN_GPU_VULKAN_OK;
 }
 
@@ -21877,6 +21986,28 @@ void RIN_VKAPI_CALL vkDestroyShaderModule(
     sync_unlock();
 }
 
+static int process_graphics_v1_varyings_representable(
+        const RinGpuVulkanGraphicsPipelinePlanV1* plan) {
+    if (!plan || plan->backend.varying_count > RIN_GPU_MAX_VARYINGS)
+        return 0;
+    for (uint32_t index = 0u; index < plan->backend.varying_count; ++index) {
+        const RinGpuGraphicsPipelineBackendVaryingV1* varying =
+            &plan->backend.varyings[index];
+        const uint32_t expected_interpolation =
+            varying->type == RIN_GPU_VARYING_FLOAT32
+                ? RIN_GPU_INTERPOLATION_PERSPECTIVE
+                : RIN_GPU_INTERPOLATION_FLAT;
+        if (varying->fragment_input_location > RIN_SHADER_MAX_IO - 5u ||
+            varying->vertex_output_location !=
+                4u + varying->fragment_input_location ||
+            (varying->type != RIN_GPU_VARYING_FLOAT32 &&
+             varying->type != RIN_GPU_VARYING_SINT32) ||
+            varying->interpolation != expected_interpolation)
+            return 0;
+    }
+    return 1;
+}
+
 static RinVkResult create_graphics_pipeline_one(
         RinVkDevice device, const RinVkGraphicsPipelineCreateInfo* info,
         RinVkPipeline* pipeline_out) {
@@ -21893,6 +22024,9 @@ static RinVkResult create_graphics_pipeline_one(
     RinGpuVulkanGraphicsStateV1 state;
     RinGpuVulkanGraphicsPipelinePlanV1 plan;
     RinVulkanProductPlatformV10* process_platform = NULL;
+    RinVulkanProductPlatformV15* process_platform_v15 = NULL;
+    RinGpuBackendVaryingV1 process_varyings[
+        RIN_GPU_MAX_VARYINGS];
     RinSpirvTranslationInfoV1 vertex_translation;
     RinSpirvTranslationInfoV1 fragment_translation;
     RinSpirvTranslationInfoV2 vertex_translation_v2;
@@ -22178,8 +22312,14 @@ static RinVkResult create_graphics_pipeline_one(
     fragment_ir_size = ((const RinShaderHeaderV1*)(const void*)fragment_ir)->total_size;
     if (vertex_ir_size < sizeof(RinShaderHeaderV1) || vertex_ir_size > RIN_SHADER_MAX_SOURCE_BYTES ||
         fragment_ir_size < sizeof(RinShaderHeaderV1) || fragment_ir_size > RIN_SHADER_MAX_SOURCE_BYTES) goto done;
-    process_platform =
-        acquire_process_graphics_pipeline_platform(&process_platform_required);
+    process_platform_v15 = acquire_process_graphics_pipeline_platform_v15(
+        &process_platform_required);
+    if (process_platform_v15) {
+        process_platform = process_platform_v15->base->base->base->base->base;
+    } else {
+        process_platform = acquire_process_graphics_pipeline_platform(
+            &process_platform_required);
+    }
     if (process_platform_required && !process_platform) {
         result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
         goto done;
@@ -22191,6 +22331,13 @@ static RinVkResult create_graphics_pipeline_one(
          state.blend_enabled != 0u ||
          state.color_write_mask != RIN_GPU_COLOR_WRITE_ALL ||
          state.cull_mode != RIN_GPU_CULL_NONE)) {
+        release_product();
+        process_platform = NULL;
+        result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        goto done;
+    }
+    if (process_platform && !process_platform_v15 &&
+        !process_graphics_v1_varyings_representable(&plan)) {
         release_product();
         process_platform = NULL;
         result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
@@ -22255,11 +22402,37 @@ static RinVkResult create_graphics_pipeline_one(
                                       pipeline->generation);
     sync_unlock();
     if (process_platform) {
-        process_result = process_platform->create_process_graphics_pipeline(
-            process_platform->context, pipeline_cookie, pipeline->shader_ir,
-            pipeline->shader_size, pipeline->fragment_shader_ir,
-            pipeline->fragment_shader_size, state.color_format,
-            state.primitive_topology);
+        if (process_platform_v15) {
+            for (index = 0u; index < plan.backend.varying_count; ++index) {
+                process_varyings[index].vertex_output_location =
+                    plan.backend.varyings[index].vertex_output_location;
+                process_varyings[index].fragment_input_location =
+                    plan.backend.varyings[index].fragment_input_location;
+                process_varyings[index].type =
+                    plan.backend.varyings[index].type;
+                process_varyings[index].interpolation =
+                    plan.backend.varyings[index].interpolation;
+            }
+            process_result =
+                process_platform_v15->create_process_graphics_pipeline_v2(
+                    process_platform_v15->context, pipeline_cookie,
+                    pipeline->shader_ir, pipeline->shader_size,
+                    pipeline->fragment_shader_ir,
+                    pipeline->fragment_shader_size, state.color_format,
+                    state.primitive_topology,
+                    plan.backend.varying_count != 0u
+                        ? process_varyings
+                        : NULL,
+                    plan.backend.varying_count);
+        } else {
+            process_result =
+                process_platform->create_process_graphics_pipeline(
+                    process_platform->context, pipeline_cookie,
+                    pipeline->shader_ir, pipeline->shader_size,
+                    pipeline->fragment_shader_ir,
+                    pipeline->fragment_shader_size, state.color_format,
+                    state.primitive_topology);
+        }
         if (process_result != RIN_VULKAN_PRODUCT_OK) {
             sync_lock();
             if (__atomic_load_n(&pipeline->state, __ATOMIC_ACQUIRE) == 2u &&
