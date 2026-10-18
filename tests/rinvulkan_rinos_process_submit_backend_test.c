@@ -1797,6 +1797,73 @@ int main(void) {
               RIN_VULKAN_PRODUCT_OK);
         CHECK(object_destroy_calls == 3u);
     }
+
+    reset_mocks();
+    graphics_pipeline_v2_create_result = RIN_ERROR_NOT_SUPPORTED;
+    object_destroy_result = RIN_ERROR_BUSY;
+    {
+        const uint64_t graphics_pipeline_token = pipeline_cookie + 0x91u;
+        const RinGpuBackendVaryingV1 varyings[2] = {
+            {7u, 3u, RIN_GPU_VARYING_FLOAT32,
+             RIN_GPU_INTERPOLATION_NO_PERSPECTIVE},
+            {9u, 5u, RIN_GPU_VARYING_SINT32,
+             RIN_GPU_INTERPOLATION_FLAT}};
+
+        CHECK(platform_v15->create_process_graphics_pipeline_v2(
+                  platform_v15->context, graphics_pipeline_token, shader_ir,
+                  sizeof(shader_ir), shader_ir, sizeof(shader_ir),
+                  RIN_GPU_FORMAT_RGBA8_UNORM,
+                  RIN_GPU_PRIMITIVE_TRIANGLE_LIST, varyings, 2u) ==
+              RIN_VULKAN_PRODUCT_BUSY);
+        CHECK(graphics_pipeline_v2_create_calls == 1u &&
+              shader_create_calls == 2u &&
+              backend_v11.submit_backend.submit_backend.submit_backend
+                      .submit_backend.submit_backend.graphics_pipelines[0]
+                      .pipeline_token == graphics_pipeline_token &&
+              backend_v11.submit_backend.submit_backend.submit_backend
+                      .submit_backend.submit_backend.graphics_pipelines[0]
+                      .pipeline_active == 0u &&
+              backend_v11.submit_backend.submit_backend.submit_backend
+                      .submit_backend.submit_backend.graphics_pipelines[0]
+                      .fragment_shader_active == 1u &&
+              backend_v11.submit_backend.submit_backend.submit_backend
+                      .submit_backend.submit_backend.graphics_pipelines[0]
+                      .vertex_shader_active == 1u &&
+              object_destroy_calls == 2u &&
+              observed_destroy_tokens[0] ==
+                  observed_graphics_fragment_token &&
+              observed_destroy_tokens[1] == observed_graphics_vertex_token);
+
+        graphics_pipeline_v2_create_result = RIN_SUCCESS;
+        object_destroy_result = RIN_SUCCESS;
+        CHECK(platform_v15->create_process_graphics_pipeline_v2(
+                  platform_v15->context, graphics_pipeline_token, shader_ir,
+                  sizeof(shader_ir), shader_ir, sizeof(shader_ir),
+                  RIN_GPU_FORMAT_RGBA8_UNORM,
+                  RIN_GPU_PRIMITIVE_TRIANGLE_LIST, varyings, 2u) ==
+              RIN_VULKAN_PRODUCT_OK);
+        CHECK(graphics_pipeline_v2_create_calls == 2u &&
+              shader_create_calls == 4u &&
+              backend_v11.submit_backend.submit_backend.submit_backend
+                      .submit_backend.submit_backend.graphics_pipelines[0]
+                      .pipeline_token == graphics_pipeline_token &&
+              backend_v11.submit_backend.submit_backend.submit_backend
+                      .submit_backend.submit_backend.graphics_pipelines[0]
+                      .pipeline_active == 1u &&
+              backend_v11.submit_backend.submit_backend.submit_backend
+                      .submit_backend.submit_backend.graphics_pipelines[0]
+                      .fragment_shader_active == 1u &&
+              backend_v11.submit_backend.submit_backend.submit_backend
+                      .submit_backend.submit_backend.graphics_pipelines[0]
+                      .vertex_shader_active == 1u);
+        CHECK(platform_v10->destroy_process_graphics_pipeline(
+                  platform_v10->context, graphics_pipeline_token) ==
+              RIN_VULKAN_PRODUCT_OK);
+        CHECK(object_destroy_calls == 7u &&
+              backend_v11.submit_backend.submit_backend.submit_backend
+                      .submit_backend.submit_backend.graphics_pipelines[0]
+                      .pipeline_token == 0u);
+    }
     CHECK(rin_vulkan_rinos_process_submit_backend_v11_detach(&backend_v11) ==
           RIN_VULKAN_PRODUCT_OK);
     CHECK(backend_v11.state == 0u && release_calls == 2u);
