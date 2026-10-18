@@ -531,6 +531,7 @@ int ringpu_vulkan_graphics_build_pipeline(
         uint32_t vertex_location;
         const RinSpirvIoV1* output;
         if (input->width == 0u || input->width > 4u ||
+            (input->base_type != 1u && input->base_type != 2u) ||
             input->location > RIN_SHADER_MAX_IO -
                                   RIN_GPU_VULKAN_POSITION_OUTPUT_SLOTS -
                                   input->width)
@@ -540,6 +541,7 @@ int ringpu_vulkan_graphics_build_pipeline(
         output = find_io(vertex->outputs, vertex->output_count,
                          vertex_location);
         if (!output || output->width != input->width ||
+            (output->base_type != 1u && output->base_type != 2u) ||
             output->base_type != input->base_type)
             return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
         if (varying_count > RIN_GPU_MAX_VARYINGS - input->width)
@@ -554,7 +556,10 @@ int ringpu_vulkan_graphics_build_pipeline(
             varying->type = input->base_type == 2u
                                 ? RIN_GPU_VARYING_FLOAT32
                                 : RIN_GPU_VARYING_SINT32;
-            varying->interpolation = RIN_GPU_INTERPOLATION_PERSPECTIVE;
+            varying->interpolation =
+                varying->type == RIN_GPU_VARYING_FLOAT32
+                    ? RIN_GPU_INTERPOLATION_PERSPECTIVE
+                    : RIN_GPU_INTERPOLATION_FLAT;
         }
     }
     plan.backend.varying_count = varying_count;
