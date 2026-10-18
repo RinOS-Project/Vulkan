@@ -64,6 +64,7 @@
 #define RIN_VK_MAX_EVENTS 128u
 #define RIN_VK_MAX_DEBUG_MESSENGERS 32u
 #define RIN_VK_MAX_DEBUG_OBJECTS 256u
+#define RIN_VK_MAX_DESCRIPTOR_IMAGE_WRITES RIN_SHADER_MAX_RESOURCES
 #define RIN_VK_DEBUG_UTILS_MESSENGER_TAG UINT64_C(0x5255)
 #define RIN_VK_DEBUG_SEVERITY_MASK \
     (RIN_VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | \
@@ -194,6 +195,26 @@ typedef struct RinVkPendingPresent {
     uint64_t platform_token;
 } RinVkPendingPresent;
 
+typedef struct RinVkDescriptorImageWriteSlot {
+    uint32_t state;
+    uint32_t descriptor_type;
+    uint32_t binding;
+    uint32_t array_element;
+    uint32_t image_layout;
+    uint32_t reserved;
+    RinVkImageView image_view;
+    RinVkSampler sampler;
+} RinVkDescriptorImageWriteSlot;
+
+typedef struct RinVkDescriptorSetMetadataSlot {
+    uint32_t state;
+    uint32_t reserved;
+    RinVkDescriptorSet set;
+    RinVkDescriptorPool pool;
+    RinVkDescriptorImageWriteSlot image_writes[
+        RIN_VK_MAX_DESCRIPTOR_IMAGE_WRITES];
+} RinVkDescriptorSetMetadataSlot;
+
 struct RinVkDevice_T {
     uintptr_t loader_magic;
     uint32_t state;
@@ -204,6 +225,8 @@ struct RinVkDevice_T {
     RinGpuVulkanDevicePlanV1 plan;
     RinGpuVulkanPhysicalDeviceV2 physical_profile;
     RinGpuVulkanDescriptorRuntimeV1 descriptor_runtime;
+    RinVkDescriptorSetMetadataSlot descriptor_metadata[
+        RIN_GPU_VULKAN_DESCRIPTOR_MAX_SETS];
     volatile uint32_t descriptor_validation_error;
     uint32_t timeline_enabled;
     uint32_t synchronization2_enabled;
@@ -4280,6 +4303,183 @@ static int routed_process_commands_v6_available(
     return product_v5 && product_v6_for_base(product_v5) != NULL;
 }
 
+static int process_graphics_expected_allocation_add(
+        uint64_t allocations[], uint32_t required_access[],
+        uint32_t* allocation_count, uint64_t allocation,
+        uint32_t access) {
+    uint32_t index;
+    if (!allocations || !required_access || !allocation_count ||
+        allocation == 0u || access == 0u)
+        return 0;
+    for (index = 0u; index < *allocation_count; ++index) {
+        if (allocations[index] != allocation) continue;
+        required_access[index] |= access;
+        return 1;
+    }
+    if (*allocation_count >=
+        RIN_GPU_PROCESS_GRAPHICS_BINDING_V2_MAX_COUNT + 1u)
+        return 0;
+    allocations[*allocation_count] = allocation;
+    required_access[*allocation_count] = access;
+    ++*allocation_count;
+    return 1;
+}
+
+static int process_graphics_sampler_token_matches(
+        struct RinVkDevice_T* device, uint64_t token,
+        uint32_t comparison) {
+    uint32_t index;
+    if (!device || token == 0u || comparison > 1u) return 0;
+    for (index = 0u; index < RIN_VK_MAX_SAMPLERS; ++index) {
+        const RinVkSamplerSlot* sampler = &g_samplers[index];
+        if (__atomic_load_n(&sampler->state, __ATOMIC_ACQUIRE) == 1u &&
+            sampler->owner == device &&
+            sampler->process_sampler_token == token &&
+            sampler->compare_enable == comparison)
+            return 1;
+    }
+    return 0;
+}
+
+static int process_graphics_bindings_resources_valid(
+        const RinVkSubmissionSlot* slot, const RinVkPipelineSlot* pipeline,
+        uint64_t color_allocation) {
+    uint64_t allocations[RIN_GPU_PROCESS_GRAPHICS_BINDING_V2_MAX_COUNT + 1u] =
+        {0};
+    uint32_t required_access[
+        RIN_GPU_PROCESS_GRAPHICS_BINDING_V2_MAX_COUNT + 1u] = {0};
+    uint32_t allocation_count = 0u;
+    uint32_t binding_index;
+    if (!slot || !slot->owner || !pipeline || color_allocation == 0u ||
+        slot->graphics_binding_count != pipeline->descriptor_count ||
+        pipeline->descriptor_count >
+            RIN_GPU_PROCESS_GRAPHICS_BINDING_V2_MAX_COUNT ||
+        slot->resource_count == 0u ||
+        !process_graphics_expected_allocation_add(
+            allocations, required_access, &allocation_count,
+            color_allocation, RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE))
+        return 0;
+    for (binding_index = 0u;
+         binding_index < slot->graphics_binding_count; ++binding_index) {
+        const RinVulkanProductProcessGraphicsBindingV14* source =
+            &slot->graphics_bindings[binding_index];
+        const RinGpuProcessGraphicsBindingV2* binding = &source->binding;
+        uint64_t allocation = 0u;
+        uint32_t access = 0u;
+        if (source->struct_size != sizeof(*source) ||
+            source->version !=
+                RIN_VULKAN_PRODUCT_PROCESS_GRAPHICS_BINDING_V14_VERSION ||
+            binding->binding != binding_index ||
+            !rin_gpu_process_graphics_binding_v2_valid(binding))
+            return 0;
+        if (binding->kind ==
+            RIN_GPU_PROCESS_GRAPHICS_RESOURCE_STORAGE_BUFFER_V2) {
+            RinVkBufferSlot* buffer = buffer_slot(
+                (RinVkDevice)(void*)slot->owner,
+                (RinVkBuffer)binding->resource_cookie);
+            if (!buffer || buffer->owner != slot->owner || !buffer->memory ||
+                buffer->memory_generation != buffer->memory->generation ||
+                buffer->memory->owner != slot->owner ||
+                buffer->memory->product_allocation !=
+                    source->allocation_handle ||
+                source->allocation_handle == 0u ||
+                source->resource_size_bytes != buffer->size ||
+                source->allocation_offset != buffer->memory_offset ||
+                source->allocation_offset > UINT64_MAX -
+                                                source->resource_size_bytes ||
+                source->allocation_offset > buffer->memory->requested_size ||
+                source->resource_size_bytes >
+                    buffer->memory->requested_size -
+                        source->allocation_offset ||
+                binding->offset > source->resource_size_bytes ||
+                binding->size_bytes >
+                    source->resource_size_bytes - binding->offset ||
+                source->allocation_handle == color_allocation)
+                return 0;
+            allocation = source->allocation_handle;
+            if ((binding->access &
+                 RIN_GPU_PROCESS_GRAPHICS_ACCESS_READ) != 0u)
+                access |= RIN_VULKAN_PRODUCT_MEMORY_GPU_READ;
+            if ((binding->access &
+                 RIN_GPU_PROCESS_GRAPHICS_ACCESS_WRITE) != 0u)
+                access |= RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE;
+        } else if (binding->kind ==
+                       RIN_GPU_PROCESS_GRAPHICS_RESOURCE_SAMPLED_IMAGE_V2 ||
+                   binding->kind ==
+                       RIN_GPU_PROCESS_GRAPHICS_RESOURCE_SAMPLED_DEPTH_IMAGE_V2 ||
+                   binding->kind ==
+                       RIN_GPU_PROCESS_GRAPHICS_RESOURCE_STORAGE_IMAGE_V2) {
+            RinVkImageSlot* image = image_slot(
+                (RinVkDevice)(void*)slot->owner,
+                (RinVkImage)binding->image_view.resource_cookie);
+            if (source->allocation_handle != 0u ||
+                source->allocation_offset != 0u ||
+                source->resource_size_bytes != 0u || !image ||
+                image->owner != slot->owner || !image->memory ||
+                image->memory_generation != image->memory->generation ||
+                image->memory->owner != slot->owner ||
+                image->memory->product_allocation == 0u ||
+                image->process_resource_bound != 1u ||
+                image->process_image_token == 0u ||
+                image->process_image_token !=
+                    binding->image_view.image_token ||
+                image->memory_offset !=
+                    binding->image_view.allocation_offset ||
+                image->memory_size !=
+                    binding->image_view.allocation_size_bytes ||
+                image->memory->product_allocation == color_allocation ||
+                image->ownership.transfer_pending != 0u)
+                return 0;
+            allocation = image->memory->product_allocation;
+            if (binding->kind ==
+                RIN_GPU_PROCESS_GRAPHICS_RESOURCE_STORAGE_IMAGE_V2) {
+                if ((binding->access &
+                     RIN_GPU_PROCESS_GRAPHICS_ACCESS_READ) != 0u)
+                    access |= RIN_VULKAN_PRODUCT_MEMORY_GPU_READ;
+                if ((binding->access &
+                     RIN_GPU_PROCESS_GRAPHICS_ACCESS_WRITE) != 0u)
+                    access |= RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE;
+            } else {
+                access = RIN_VULKAN_PRODUCT_MEMORY_GPU_READ;
+            }
+        } else if (binding->kind ==
+                       RIN_GPU_PROCESS_GRAPHICS_RESOURCE_SAMPLER_V2 ||
+                   binding->kind ==
+                       RIN_GPU_PROCESS_GRAPHICS_RESOURCE_COMPARISON_SAMPLER_V2) {
+            const uint32_t comparison = binding->kind ==
+                RIN_GPU_PROCESS_GRAPHICS_RESOURCE_COMPARISON_SAMPLER_V2;
+            if (source->allocation_handle != 0u ||
+                source->allocation_offset != 0u ||
+                source->resource_size_bytes != 0u ||
+                !process_graphics_sampler_token_matches(
+                    slot->owner, binding->sampler_token, comparison))
+                return 0;
+            continue;
+        } else {
+            return 0;
+        }
+        if (!process_graphics_expected_allocation_add(
+                allocations, required_access, &allocation_count,
+                allocation, access))
+            return 0;
+    }
+    if (allocation_count != slot->resource_count) return 0;
+    for (binding_index = 0u; binding_index < allocation_count;
+         ++binding_index) {
+        uint32_t resource_index;
+        for (resource_index = 0u; resource_index < slot->resource_count;
+             ++resource_index)
+            if (slot->resources[resource_index].allocation_handle ==
+                    allocations[binding_index] &&
+                slot->resources[resource_index].required_gpu_access ==
+                    required_access[binding_index] &&
+                slot->resources[resource_index].reserved == 0u)
+                break;
+        if (resource_index == slot->resource_count) return 0;
+    }
+    return 1;
+}
+
 static int process_graphics_packet_v6_compatible(
         const RinVkSubmissionSlot* slot) {
     RinGpuVulkanCommandBufferV1* command;
@@ -4296,6 +4496,9 @@ static int process_graphics_packet_v6_compatible(
     packet = slot->graphics_packet;
     pipeline = pipeline_slot((RinVkDevice)(void*)slot->owner,
                              command->bound_graphics_pipeline);
+    if (!process_graphics_bindings_resources_valid(
+            slot, pipeline, packet->color_allocation_handle))
+        return 0;
     view = image_view_slot((RinVkDevice)(void*)slot->owner,
                            (RinVkImageView)command->graphics_color_view);
     image = view ? view->image : NULL;
@@ -4320,7 +4523,6 @@ static int process_graphics_packet_v6_compatible(
         pipeline->graphics_backend.resource_count !=
             pipeline->descriptor_count ||
         packet->pipeline.resource_count != pipeline->descriptor_count ||
-        slot->resource_count != 1u + pipeline->descriptor_count ||
         pipeline->graphics_backend.primitive_topology !=
             RIN_GPU_PRIMITIVE_TRIANGLE_LIST ||
         pipeline->graphics_backend.blend_enabled != 0u ||
@@ -5892,49 +6094,11 @@ static int submit_canonical_process_commands(
             pipeline->kind != RIN_VK_PIPELINE_KIND_GRAPHICS)
             return RIN_VULKAN_PRODUCT_PROTOCOL;
         if (pipeline->descriptor_count != 0u) {
-            uint32_t binding_index;
             if (slot->graphics_binding_count != pipeline->descriptor_count ||
                 pipeline->descriptor_count >
-                    RIN_GPU_VULKAN_COMPUTE_MAX_BINDINGS) {
+                    RIN_GPU_VULKAN_COMPUTE_MAX_BINDINGS ||
+                !process_graphics_packet_v6_compatible(slot)) {
                 return RIN_VULKAN_PRODUCT_PROTOCOL;
-            }
-            for (binding_index = 0u;
-                 binding_index < slot->graphics_binding_count;
-                 ++binding_index) {
-                const RinVulkanProductProcessGraphicsBindingV14* binding =
-                    &slot->graphics_bindings[binding_index];
-                uint32_t resource_index;
-                int found = 0;
-                if (binding->struct_size != sizeof(*binding) ||
-                    binding->version !=
-                        RIN_VULKAN_PRODUCT_PROCESS_GRAPHICS_BINDING_V14_VERSION ||
-                    !rin_gpu_process_graphics_binding_v2_valid(
-                        &binding->binding) ||
-                    binding->binding.binding != binding_index ||
-                    binding->binding.kind !=
-                        RIN_GPU_PROCESS_GRAPHICS_RESOURCE_STORAGE_BUFFER_V2 ||
-                    binding->allocation_handle == 0u ||
-                    binding->resource_size_bytes == 0u ||
-                    binding->allocation_offset >
-                        UINT64_MAX - binding->resource_size_bytes ||
-                    binding->binding.offset > binding->resource_size_bytes ||
-                    binding->binding.size_bytes >
-                        binding->resource_size_bytes -
-                            binding->binding.offset) {
-                    return RIN_VULKAN_PRODUCT_UNSUPPORTED;
-                }
-                for (resource_index = 0u;
-                     resource_index < slot->resource_count;
-                     ++resource_index) {
-                    if (slot->resources[resource_index].allocation_handle ==
-                        binding->allocation_handle) {
-                        found = 1;
-                        break;
-                    }
-                }
-                if (!found) {
-                    return RIN_VULKAN_PRODUCT_PROTOCOL;
-                }
             }
             slot->process_graphics_bind_group_token =
                 reserve_process_graphics_bind_group_token();
@@ -6030,9 +6194,12 @@ static int submit_canonical_process_commands(
                 for (binding_index = 0u;
                      binding_index < slot->graphics_binding_count;
                      ++binding_index)
-                    if (slot->resources[resource_index].allocation_handle ==
-                        slot->graphics_bindings[binding_index]
-                            .allocation_handle) {
+                    if (slot->graphics_bindings[binding_index]
+                                .binding.kind ==
+                            RIN_GPU_PROCESS_GRAPHICS_RESOURCE_STORAGE_BUFFER_V2 &&
+                        slot->resources[resource_index].allocation_handle ==
+                            slot->graphics_bindings[binding_index]
+                                .allocation_handle) {
                         is_group_resource = 1;
                         break;
                     }
@@ -6978,6 +7145,118 @@ static RinVkResult map_descriptor_result(int result) {
     default:
         return RIN_VK_ERROR_UNKNOWN;
     }
+}
+
+static RinVkDescriptorSetMetadataSlot* descriptor_metadata_find_set(
+        struct RinVkDevice_T* owner, RinVkDescriptorSet set) {
+    uint32_t index;
+    if (!owner || set == 0u) return NULL;
+    for (index = 0u; index < RIN_GPU_VULKAN_DESCRIPTOR_MAX_SETS; ++index) {
+        RinVkDescriptorSetMetadataSlot* metadata =
+            &owner->descriptor_metadata[index];
+        if (metadata->state == 1u && metadata->set == set) return metadata;
+    }
+    return NULL;
+}
+
+static int descriptor_metadata_register_set(
+        struct RinVkDevice_T* owner, RinVkDescriptorPool pool,
+        RinVkDescriptorSet set) {
+    uint32_t index;
+    if (!owner || pool == 0u || set == 0u) return 0;
+    if (descriptor_metadata_find_set(owner, set)) return 0;
+    for (index = 0u; index < RIN_GPU_VULKAN_DESCRIPTOR_MAX_SETS; ++index) {
+        RinVkDescriptorSetMetadataSlot* metadata =
+            &owner->descriptor_metadata[index];
+        if (metadata->state != 0u) continue;
+        memset(metadata, 0, sizeof(*metadata));
+        metadata->set = set;
+        metadata->pool = pool;
+        __atomic_store_n(&metadata->state, 1u, __ATOMIC_RELEASE);
+        return 1;
+    }
+    return 0;
+}
+
+static int descriptor_metadata_has_free_set(
+        const struct RinVkDevice_T* owner) {
+    uint32_t index;
+    if (!owner) return 0;
+    for (index = 0u; index < RIN_GPU_VULKAN_DESCRIPTOR_MAX_SETS; ++index)
+        if (owner->descriptor_metadata[index].state == 0u) return 1;
+    return 0;
+}
+
+static void descriptor_metadata_clear_set(
+        struct RinVkDevice_T* owner, RinVkDescriptorSet set) {
+    RinVkDescriptorSetMetadataSlot* metadata =
+        descriptor_metadata_find_set(owner, set);
+    if (!metadata) return;
+    __atomic_store_n(&metadata->state, 0u, __ATOMIC_RELEASE);
+    memset(metadata, 0, sizeof(*metadata));
+}
+
+static void descriptor_metadata_clear_pool(
+        struct RinVkDevice_T* owner, RinVkDescriptorPool pool) {
+    uint32_t index;
+    if (!owner || pool == 0u) return;
+    for (index = 0u; index < RIN_GPU_VULKAN_DESCRIPTOR_MAX_SETS; ++index) {
+        RinVkDescriptorSetMetadataSlot* metadata =
+            &owner->descriptor_metadata[index];
+        if (metadata->state != 1u || metadata->pool != pool) continue;
+        __atomic_store_n(&metadata->state, 0u, __ATOMIC_RELEASE);
+        memset(metadata, 0, sizeof(*metadata));
+    }
+}
+
+static RinVkDescriptorImageWriteSlot* descriptor_metadata_find_image_write(
+        RinVkDescriptorSetMetadataSlot* metadata, uint32_t binding,
+        uint32_t array_element) {
+    uint32_t index;
+    if (!metadata || metadata->state != 1u) return NULL;
+    for (index = 0u; index < RIN_VK_MAX_DESCRIPTOR_IMAGE_WRITES; ++index) {
+        RinVkDescriptorImageWriteSlot* write =
+            &metadata->image_writes[index];
+        if (write->state == 1u && write->binding == binding &&
+            write->array_element == array_element)
+            return write;
+    }
+    return NULL;
+}
+
+static int descriptor_metadata_update_image_write(
+        RinVkDescriptorImageWriteSlot writes[], uint32_t binding,
+        uint32_t array_element, uint32_t descriptor_type,
+        RinVkImageView image_view, RinVkSampler sampler,
+        uint32_t image_layout) {
+    RinVkDescriptorImageWriteSlot* target = NULL;
+    uint32_t index;
+    if (!writes) return 0;
+    for (index = 0u; index < RIN_VK_MAX_DESCRIPTOR_IMAGE_WRITES; ++index) {
+        RinVkDescriptorImageWriteSlot* candidate = &writes[index];
+        if (candidate->state == 1u && candidate->binding == binding &&
+            candidate->array_element == array_element) {
+            target = candidate;
+            break;
+        }
+        if (!target && candidate->state == 0u) target = candidate;
+    }
+    if (!image_view) {
+        if (target && target->state == 1u && target->binding == binding &&
+            target->array_element == array_element)
+            memset(target, 0, sizeof(*target));
+        return 1;
+    }
+    if (!target) return 0;
+    memset(target, 0, sizeof(*target));
+    target->descriptor_type = descriptor_type;
+    target->binding = binding;
+    target->array_element = array_element;
+    target->image_layout = image_layout;
+    target->image_view = image_view;
+    target->sampler = sampler;
+    target->state = 1u;
+    return 1;
 }
 
 static volatile uint32_t g_sync_lock;
@@ -14206,6 +14485,138 @@ static int image_descriptor_layout_valid(const RinVkImageSlot* image,
                          layout);
 }
 
+static int process_image_layout_from_vulkan(
+        uint32_t vulkan_layout, int32_t format, uint32_t* process_layout_out) {
+    if (!process_layout_out) return 0;
+    switch (vulkan_layout) {
+    case RIN_VK_IMAGE_LAYOUT_GENERAL:
+        *process_layout_out = RIN_GPU_PROCESS_IMAGE_LAYOUT_GENERAL_V1;
+        return 1;
+    case RIN_VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+    case RIN_VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL:
+        *process_layout_out = RIN_GPU_PROCESS_IMAGE_LAYOUT_SHADER_READ_V1;
+        return 1;
+    case RIN_VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+        if (format != RIN_VK_FORMAT_D32_SFLOAT) return 0;
+        *process_layout_out = RIN_GPU_PROCESS_IMAGE_LAYOUT_SHADER_READ_V1;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int process_image_usage_from_vulkan(uint32_t vulkan_usage,
+                                           uint32_t* process_usage_out) {
+    uint32_t process_usage = 0u;
+    if (!process_usage_out || (vulkan_usage & ~RIN_VK_IMAGE_USAGE_KNOWN) != 0u)
+        return 0;
+    if ((vulkan_usage & RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0u)
+        process_usage |= RIN_GPU_PROCESS_IMAGE_USAGE_COPY_SOURCE_V1;
+    if ((vulkan_usage & RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT) != 0u)
+        process_usage |= RIN_GPU_PROCESS_IMAGE_USAGE_COPY_DESTINATION_V1;
+    if ((vulkan_usage & RIN_VK_IMAGE_USAGE_SAMPLED_BIT) != 0u)
+        process_usage |= RIN_GPU_PROCESS_IMAGE_USAGE_SAMPLED_V1;
+    if ((vulkan_usage & RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0u)
+        process_usage |= RIN_GPU_PROCESS_IMAGE_USAGE_COLOR_TARGET_V1;
+    *process_usage_out = process_usage;
+    return process_usage != 0u;
+}
+
+static int process_graphics_image_binding_from_vulkan(
+        RinVkDevice device, RinVkImage image_handle,
+        RinVkImageView view_handle, uint32_t vulkan_layout,
+        uint32_t resource_kind, uint32_t binding_index,
+        RinGpuProcessGraphicsBindingV2* binding_out) {
+    RinVkImageViewSlot* view;
+    RinVkImageSlot* image;
+    uint32_t process_layout;
+    uint32_t process_usage;
+    uint32_t process_format;
+    uint32_t required_aspect;
+    RinGpuProcessGraphicsBindingV2 binding;
+    if (!binding_out || image_handle == 0u || view_handle == 0u ||
+        binding_index >= RIN_GPU_PROCESS_GRAPHICS_BINDING_V2_MAX_COUNT ||
+        (resource_kind !=
+             RIN_GPU_PROCESS_GRAPHICS_RESOURCE_SAMPLED_IMAGE_V2 &&
+         resource_kind !=
+             RIN_GPU_PROCESS_GRAPHICS_RESOURCE_SAMPLED_DEPTH_IMAGE_V2))
+        return 0;
+    view = image_view_slot(device, view_handle);
+    image = image_slot(device, image_handle);
+    if (!view || !image || view->image != image || view->owner != image->owner ||
+        view->format != (uint32_t)image->format || !image->memory ||
+        image->memory_generation != image->memory->generation ||
+        image->memory->owner != image->owner ||
+        image->memory->product_allocation == 0u ||
+        image->process_resource_bound == 0u || image->process_image_token == 0u ||
+        image->samples != RIN_VK_SAMPLE_COUNT_1_BIT ||
+        image->memory_offset > UINT64_MAX - image->memory_size ||
+        !image_descriptor_layout_valid(
+            image, RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, vulkan_layout) ||
+        __atomic_load_n(&image->current_layout, __ATOMIC_ACQUIRE) !=
+            vulkan_layout ||
+        !process_image_layout_from_vulkan(
+            vulkan_layout, image->format, &process_layout) ||
+        !process_image_usage_from_vulkan(image->usage, &process_usage))
+        return 0;
+    if (image->format == RIN_VK_FORMAT_R8G8B8A8_UNORM) {
+        process_format = RIN_GPU_PROCESS_IMAGE_FORMAT_RGBA8_UNORM_V1;
+        required_aspect = RIN_GPU_PROCESS_IMAGE_ASPECT_COLOR;
+    } else if (image->format == RIN_VK_FORMAT_D32_SFLOAT) {
+        process_format = RIN_GPU_PROCESS_IMAGE_FORMAT_D32_FLOAT_V1;
+        required_aspect = RIN_GPU_PROCESS_IMAGE_ASPECT_DEPTH;
+    } else {
+        return 0;
+    }
+    if (view->aspect_mask != required_aspect ||
+        (resource_kind ==
+             RIN_GPU_PROCESS_GRAPHICS_RESOURCE_SAMPLED_IMAGE_V2 &&
+         required_aspect != RIN_GPU_PROCESS_IMAGE_ASPECT_COLOR) ||
+        (resource_kind ==
+             RIN_GPU_PROCESS_GRAPHICS_RESOURCE_SAMPLED_DEPTH_IMAGE_V2 &&
+         required_aspect != RIN_GPU_PROCESS_IMAGE_ASPECT_DEPTH) ||
+        (process_usage & RIN_GPU_PROCESS_IMAGE_USAGE_SAMPLED_V1) == 0u)
+        return 0;
+    memset(&binding, 0, sizeof(binding));
+    binding.struct_size = sizeof(binding);
+    binding.version = RIN_GPU_PROCESS_GRAPHICS_BINDING_V2_VERSION;
+    binding.kind = resource_kind;
+    binding.binding = binding_index;
+    binding.access = RIN_GPU_PROCESS_GRAPHICS_ACCESS_READ;
+    binding.image_view.struct_size = sizeof(binding.image_view);
+    binding.image_view.version = RIN_GPU_PROCESS_IMAGE_VIEW_V1_VERSION;
+    binding.image_view.image_token = image->process_image_token;
+    binding.image_view.resource_cookie = image_handle;
+    binding.image_view.allocation_offset = image->memory_offset;
+    binding.image_view.allocation_size_bytes = image->memory_size;
+    binding.image_view.format = process_format;
+    binding.image_view.dimension = RIN_GPU_PROCESS_IMAGE_DIMENSION_2D_V1;
+    binding.image_view.width = image->width;
+    binding.image_view.height = image->height;
+    binding.image_view.depth = 1u;
+    binding.image_view.mip_levels = 1u;
+    binding.image_view.array_layers = 1u;
+    binding.image_view.sample_count = image->samples;
+    binding.image_view.usage = process_usage;
+    binding.image_view.logical_layout = process_layout;
+    binding.image_view.aspect_mask = view->aspect_mask;
+    binding.image_view.base_mip_level = 0u;
+    binding.image_view.level_count = 1u;
+    binding.image_view.base_array_layer = 0u;
+    binding.image_view.layer_count = 1u;
+    if (!rin_gpu_process_graphics_binding_v2_valid(&binding)) return 0;
+    *binding_out = binding;
+    return 1;
+}
+
+static int graphics_resource_kind_v2_supported(uint32_t resource_kind) {
+    return resource_kind == RIN_SHADER_RESOURCE_STORAGE_BUFFER ||
+           resource_kind == RIN_SHADER_RESOURCE_SAMPLED_IMAGE ||
+           resource_kind == RIN_SHADER_RESOURCE_SAMPLED_DEPTH_IMAGE ||
+           resource_kind == RIN_SHADER_RESOURCE_SAMPLER ||
+           resource_kind == RIN_SHADER_RESOURCE_COMPARISON_SAMPLER;
+}
+
 static int image_layout_transfer_source_valid(uint32_t layout) {
     return layout == RIN_VK_IMAGE_LAYOUT_GENERAL ||
            layout == RIN_VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
@@ -17095,7 +17506,8 @@ static RinVkResult snapshot_graphics_submission(
            sizeof(graphics_bindings_out[0]) *
                RIN_GPU_VULKAN_COMPUTE_MAX_BINDINGS);
     if (pipeline->descriptor_count != 0u) {
-        RinVulkanProductPlatformV12* process_platform;
+        uint32_t descriptor_index;
+        int requires_v14 = 0;
         int process_platform_required = 0;
         if (pipeline->set_layout_count != 1u ||
             command->descriptor_bind_recorded != 1u ||
@@ -17110,13 +17522,25 @@ static RinVkResult snapshot_graphics_submission(
                 (RinGpuVulkanDescriptorHandleV1)pipeline->set_layouts[0]) !=
                 1)
             return RIN_VK_ERROR_INITIALIZATION_FAILED;
-        process_platform =
-            acquire_process_graphics_bind_group_platform(
-                &process_platform_required);
-        if (!process_platform)
-            return process_platform_required
-                       ? RIN_VK_ERROR_FEATURE_NOT_PRESENT
-                       : RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        for (descriptor_index = 0u;
+             descriptor_index < pipeline->descriptor_count;
+             ++descriptor_index)
+            if (pipeline->descriptors[descriptor_index].resource_kind !=
+                RIN_SHADER_RESOURCE_STORAGE_BUFFER)
+                requires_v14 = 1;
+        if (requires_v14) {
+            RinVulkanProductPlatformV14* process_platform_v14 =
+                acquire_process_graphics_bind_group_platform_v14(
+                    &process_platform_required);
+            if (!process_platform_v14)
+                return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        } else {
+            RinVulkanProductPlatformV12* process_platform_v12 =
+                acquire_process_graphics_bind_group_platform(
+                    &process_platform_required);
+            if (!process_platform_v12)
+                return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+        }
         release_product();
     } else if (command->descriptor_bind_recorded != 0u ||
                pipeline->set_layout_count != 0u) {
@@ -17183,16 +17607,10 @@ static RinVkResult snapshot_graphics_submission(
         RinGpuVulkanDescriptorWriteV1 write;
         RinVulkanProductProcessGraphicsBindingV14* target =
             &graphics_bindings_out[descriptor_index];
-        RinVkBufferSlot* buffer;
-        RinVkBufferOwnershipUpdate* update =
-            &ownership_updates[ownership_update_count];
-        uint64_t address;
-        uint64_t resource_end;
-        uint32_t required_access = 0u;
-        uint32_t range_index;
         int graphics_result;
         if (descriptor->set != 0u ||
-            descriptor->resource_kind != RIN_SHADER_RESOURCE_STORAGE_BUFFER ||
+            !graphics_resource_kind_v2_supported(
+                descriptor->resource_kind) ||
             descriptor->resource_index != descriptor_index ||
             descriptor->binding != descriptor->resource_index ||
             resource_indices[descriptor->resource_index] != 0u) {
@@ -17207,107 +17625,247 @@ static RinVkResult snapshot_graphics_submission(
             write.set != descriptor->set ||
             write.binding != descriptor->binding || write.array_element != 0u ||
             write.resource_index != descriptor->resource_index ||
-            write.descriptor_type != RIN_GPU_VULKAN_DESCRIPTOR_STORAGE_BUFFER ||
-            write.resource == 0u || write.size_bytes == 0u ||
             write.flags != 0u || write.reserved != 0u ||
-            write.mip_level != 0u || write.array_layer != 0u ||
-            write.access == 0u ||
-            (write.access & ~(RIN_GPU_RESOURCE_READ |
-                              RIN_GPU_RESOURCE_WRITE)) != 0u) {
+            write.resource == 0u) {
             result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
             goto fail;
         }
-        buffer = buffer_slot((RinVkDevice)(void*)device,
-                             (RinVkBuffer)write.resource);
-        if (!buffer || buffer->owner != device || !buffer->memory ||
-            buffer->memory_generation != buffer->memory->generation ||
-            buffer->memory->owner != device ||
-            buffer->memory->product_allocation == 0u ||
-            (buffer->usage & RIN_VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) == 0u ||
-            !checked_buffer_address(buffer, write.offset, write.size_bytes,
-                                    &address) ||
-            buffer->memory_offset > UINT64_MAX - write.offset ||
-            buffer->memory_offset > buffer->memory->requested_size ||
-            buffer->size > buffer->memory->requested_size -
-                               buffer->memory_offset ||
-            (write.offset & 3u) != 0u || (write.size_bytes & 3u) != 0u ||
-            buffer->memory->product_allocation ==
-                image->memory->product_allocation) {
-            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
-            goto fail;
-        }
-        (void)address;
-        resource_end = write.offset + write.size_bytes;
-        update->buffer = buffer;
-        update->resource_cookie = write.resource;
-        update->state = buffer->ownership;
-        if (!rin_vk_buffer_ownership_ensure_coverage(
-                &update->state, write.offset, resource_end,
-                RIN_VK_QUEUE_FAMILY_IGNORED, 1)) {
-            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
-            goto fail;
-        }
-        for (range_index = 0u; range_index < update->state.range_count;
-             ++range_index) {
-            RinVkBufferOwnershipRange* range =
-                &update->state.ranges[range_index];
-            if (range->offset >= resource_end ||
-                range->offset + range->size <= write.offset)
-                continue;
-            if (range->transfer_pending != 0u ||
-                (range->owner_queue_family != RIN_VK_QUEUE_FAMILY_IGNORED &&
-                 range->owner_queue_family != queue_family_index)) {
-                result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
-                goto fail;
-            }
-            range->owner_queue_family = queue_family_index;
-        }
-        for (range_index = 0u; range_index < descriptor_index;
-             ++range_index)
-            if (ownership_updates[range_index].buffer == buffer ||
-                graphics_bindings_out[range_index].allocation_handle ==
-                    buffer->memory->product_allocation) {
-                result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
-                goto fail;
-            }
         target->struct_size = sizeof(*target);
         target->version =
             RIN_VULKAN_PRODUCT_PROCESS_GRAPHICS_BINDING_V14_VERSION;
         target->binding.struct_size = sizeof(target->binding);
         target->binding.version =
             RIN_GPU_PROCESS_GRAPHICS_BINDING_V2_VERSION;
-        target->binding.kind =
-            RIN_GPU_PROCESS_GRAPHICS_RESOURCE_STORAGE_BUFFER_V2;
-        target->binding.binding = descriptor->resource_index;
-        if ((write.access & RIN_GPU_RESOURCE_READ) != 0u)
-            target->binding.access |=
-                RIN_GPU_PROCESS_GRAPHICS_ACCESS_READ;
-        if ((write.access & RIN_GPU_RESOURCE_WRITE) != 0u)
-            target->binding.access |=
-                RIN_GPU_PROCESS_GRAPHICS_ACCESS_WRITE;
-        target->binding.resource_cookie = write.resource;
-        target->binding.offset = write.offset;
-        target->binding.size_bytes = write.size_bytes;
-        target->allocation_handle = buffer->memory->product_allocation;
-        target->allocation_offset = buffer->memory_offset;
-        target->resource_size_bytes = buffer->size;
+        target->binding.binding = descriptor->binding;
+        if (descriptor->resource_kind ==
+            RIN_SHADER_RESOURCE_STORAGE_BUFFER) {
+            RinVkBufferSlot* buffer;
+            RinVkBufferOwnershipUpdate* update =
+                &ownership_updates[ownership_update_count];
+            uint64_t address;
+            uint64_t resource_end;
+            uint32_t required_access = 0u;
+            uint32_t range_index;
+            if (write.descriptor_type !=
+                    RIN_GPU_VULKAN_DESCRIPTOR_STORAGE_BUFFER ||
+                write.size_bytes == 0u || write.mip_level != 0u ||
+                write.array_layer != 0u || write.access == 0u ||
+                (write.access & ~(RIN_GPU_RESOURCE_READ |
+                                  RIN_GPU_RESOURCE_WRITE)) != 0u) {
+                result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+                goto fail;
+            }
+            buffer = buffer_slot((RinVkDevice)(void*)device,
+                                 (RinVkBuffer)write.resource);
+            if (!buffer || buffer->owner != device || !buffer->memory ||
+                buffer->memory_generation != buffer->memory->generation ||
+                buffer->memory->owner != device ||
+                buffer->memory->product_allocation == 0u ||
+                (buffer->usage & RIN_VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) == 0u ||
+                !checked_buffer_address(buffer, write.offset,
+                                        write.size_bytes, &address) ||
+                buffer->memory_offset > UINT64_MAX - write.offset ||
+                buffer->memory_offset > buffer->memory->requested_size ||
+                buffer->size > buffer->memory->requested_size -
+                                   buffer->memory_offset ||
+                (write.offset & 3u) != 0u ||
+                (write.size_bytes & 3u) != 0u ||
+                buffer->memory->product_allocation ==
+                    image->memory->product_allocation) {
+                result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+                goto fail;
+            }
+            (void)address;
+            resource_end = write.offset + write.size_bytes;
+            update->buffer = buffer;
+            update->resource_cookie = write.resource;
+            update->state = buffer->ownership;
+            if (!rin_vk_buffer_ownership_ensure_coverage(
+                    &update->state, write.offset, resource_end,
+                    RIN_VK_QUEUE_FAMILY_IGNORED, 1)) {
+                result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+                goto fail;
+            }
+            for (range_index = 0u;
+                 range_index < update->state.range_count; ++range_index) {
+                RinVkBufferOwnershipRange* range =
+                    &update->state.ranges[range_index];
+                if (range->offset >= resource_end ||
+                    range->offset + range->size <= write.offset)
+                    continue;
+                if (range->transfer_pending != 0u ||
+                    (range->owner_queue_family !=
+                         RIN_VK_QUEUE_FAMILY_IGNORED &&
+                     range->owner_queue_family != queue_family_index)) {
+                    result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+                    goto fail;
+                }
+                range->owner_queue_family = queue_family_index;
+            }
+            for (range_index = 0u;
+                 range_index < descriptor_index; ++range_index) {
+                const RinGpuProcessGraphicsBindingV2* prior_binding =
+                    &graphics_bindings_out[range_index].binding;
+                uint64_t prior_allocation =
+                    graphics_bindings_out[range_index].allocation_handle;
+                if (prior_binding->kind ==
+                        RIN_GPU_PROCESS_GRAPHICS_RESOURCE_SAMPLED_IMAGE_V2 ||
+                    prior_binding->kind ==
+                        RIN_GPU_PROCESS_GRAPHICS_RESOURCE_SAMPLED_DEPTH_IMAGE_V2) {
+                    RinVkImageSlot* prior_image = image_slot(
+                        (RinVkDevice)(void*)device,
+                        (RinVkImage)prior_binding->image_view.resource_cookie);
+                    if (!prior_image || !prior_image->memory) {
+                        result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+                        goto fail;
+                    }
+                    prior_allocation =
+                        prior_image->memory->product_allocation;
+                }
+                if ((prior_binding->kind ==
+                         RIN_GPU_PROCESS_GRAPHICS_RESOURCE_STORAGE_BUFFER_V2 ||
+                     prior_binding->kind ==
+                         RIN_GPU_PROCESS_GRAPHICS_RESOURCE_SAMPLED_IMAGE_V2 ||
+                     prior_binding->kind ==
+                         RIN_GPU_PROCESS_GRAPHICS_RESOURCE_SAMPLED_DEPTH_IMAGE_V2) &&
+                    prior_allocation ==
+                        buffer->memory->product_allocation) {
+                    result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+                    goto fail;
+                }
+            }
+            target->binding.kind =
+                RIN_GPU_PROCESS_GRAPHICS_RESOURCE_STORAGE_BUFFER_V2;
+            if ((write.access & RIN_GPU_RESOURCE_READ) != 0u)
+                target->binding.access |=
+                    RIN_GPU_PROCESS_GRAPHICS_ACCESS_READ;
+            if ((write.access & RIN_GPU_RESOURCE_WRITE) != 0u)
+                target->binding.access |=
+                    RIN_GPU_PROCESS_GRAPHICS_ACCESS_WRITE;
+            target->binding.resource_cookie = write.resource;
+            target->binding.offset = write.offset;
+            target->binding.size_bytes = write.size_bytes;
+            target->allocation_handle = buffer->memory->product_allocation;
+            target->allocation_offset = buffer->memory_offset;
+            target->resource_size_bytes = buffer->size;
+            if ((write.access & RIN_GPU_RESOURCE_READ) != 0u)
+                required_access |= RIN_VULKAN_PRODUCT_MEMORY_GPU_READ;
+            if ((write.access & RIN_GPU_RESOURCE_WRITE) != 0u)
+                required_access |= RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE;
+            if (!append_submission_resource(
+                    resources, &resource_count,
+                    buffer->memory->product_allocation, required_access)) {
+                result = RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+                goto fail;
+            }
+            ++ownership_update_count;
+        } else if (descriptor->resource_kind ==
+                       RIN_SHADER_RESOURCE_SAMPLER ||
+                   descriptor->resource_kind ==
+                       RIN_SHADER_RESOURCE_COMPARISON_SAMPLER) {
+            RinVkSamplerSlot* sampler;
+            if (write.descriptor_type !=
+                    RIN_GPU_VULKAN_DESCRIPTOR_SAMPLER ||
+                write.offset != 0u || write.size_bytes != 0u ||
+                write.mip_level != 0u || write.array_layer != 0u ||
+                write.flags != 0u || write.reserved != 0u) {
+                result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+                goto fail;
+            }
+            sampler = sampler_slot((RinVkDevice)(void*)device,
+                                    (RinVkSampler)write.resource);
+            if (!sampler || sampler->owner != device ||
+                sampler->process_sampler_token == 0u ||
+                (descriptor->resource_kind ==
+                     RIN_SHADER_RESOURCE_COMPARISON_SAMPLER
+                     ? sampler->compare_enable == 0u
+                     : sampler->compare_enable != 0u)) {
+                result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+                goto fail;
+            }
+            target->binding.kind =
+                descriptor->resource_kind ==
+                        RIN_SHADER_RESOURCE_COMPARISON_SAMPLER
+                    ? RIN_GPU_PROCESS_GRAPHICS_RESOURCE_COMPARISON_SAMPLER_V2
+                    : RIN_GPU_PROCESS_GRAPHICS_RESOURCE_SAMPLER_V2;
+            target->binding.access = RIN_GPU_PROCESS_GRAPHICS_ACCESS_READ;
+            target->binding.sampler_token = sampler->process_sampler_token;
+        } else {
+            RinVkDescriptorSetMetadataSlot* set_metadata =
+                descriptor_metadata_find_set(
+                    device, (RinVkDescriptorSet)command->descriptor_sets[0]);
+            RinVkDescriptorImageWriteSlot* image_write;
+            RinVkImageSlot* sampled_image;
+            uint32_t process_kind;
+            if (descriptor->resource_kind ==
+                RIN_SHADER_RESOURCE_SAMPLED_IMAGE) {
+                process_kind =
+                    RIN_GPU_PROCESS_GRAPHICS_RESOURCE_SAMPLED_IMAGE_V2;
+            } else if (descriptor->resource_kind ==
+                       RIN_SHADER_RESOURCE_SAMPLED_DEPTH_IMAGE) {
+                process_kind =
+                    RIN_GPU_PROCESS_GRAPHICS_RESOURCE_SAMPLED_DEPTH_IMAGE_V2;
+            } else {
+                result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+                goto fail;
+            }
+            image_write = descriptor_metadata_find_image_write(
+                set_metadata, descriptor->binding, 0u);
+            sampled_image = image_slot((RinVkDevice)(void*)device,
+                                       (RinVkImage)write.resource);
+            if (write.descriptor_type !=
+                    RIN_GPU_VULKAN_DESCRIPTOR_SAMPLED_IMAGE ||
+                write.mip_level != 0u || write.array_layer != 0u ||
+                write.access != RIN_GPU_RESOURCE_READ ||
+                !image_write || image_write->descriptor_type !=
+                                    RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
+                image_write->sampler != 0u || !sampled_image ||
+                !sampled_image->memory ||
+                sampled_image->memory_generation !=
+                    sampled_image->memory->generation ||
+                sampled_image->memory->owner != device ||
+                sampled_image->memory->product_allocation == 0u ||
+                sampled_image->ownership.transfer_pending != 0u ||
+                (sampled_image->ownership.owner_queue_family !=
+                     RIN_VK_QUEUE_FAMILY_IGNORED &&
+                 sampled_image->ownership.owner_queue_family !=
+                     queue_family_index) ||
+                sampled_image->memory->product_allocation ==
+                    image->memory->product_allocation ||
+                !process_graphics_image_binding_from_vulkan(
+                    (RinVkDevice)(void*)device,
+                    (RinVkImage)write.resource, image_write->image_view,
+                    image_write->image_layout, process_kind,
+                    descriptor->binding, &target->binding)) {
+                result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+                goto fail;
+            }
+            for (uint32_t prior_index = 0u;
+                 prior_index < descriptor_index; ++prior_index) {
+                const RinGpuProcessGraphicsBindingV2* prior_binding =
+                    &graphics_bindings_out[prior_index].binding;
+                if (prior_binding->kind ==
+                        RIN_GPU_PROCESS_GRAPHICS_RESOURCE_STORAGE_BUFFER_V2 &&
+                    graphics_bindings_out[prior_index].allocation_handle ==
+                        sampled_image->memory->product_allocation) {
+                    result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+                    goto fail;
+                }
+            }
+            if (!append_submission_resource(
+                    resources, &resource_count,
+                    sampled_image->memory->product_allocation,
+                    RIN_VULKAN_PRODUCT_MEMORY_GPU_READ)) {
+                result = RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+                goto fail;
+            }
+        }
         if (!rin_gpu_process_graphics_binding_v2_valid(
                 &target->binding)) {
             result = RIN_VK_ERROR_INITIALIZATION_FAILED;
             goto fail;
         }
-        if ((write.access & RIN_GPU_RESOURCE_READ) != 0u)
-            required_access |= RIN_VULKAN_PRODUCT_MEMORY_GPU_READ;
-        if ((write.access & RIN_GPU_RESOURCE_WRITE) != 0u)
-            required_access |= RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE;
-        if (!append_submission_resource(
-                resources, &resource_count,
-                buffer->memory->product_allocation, required_access)) {
-            result = RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
-            goto fail;
-        }
         resource_indices[descriptor->resource_index] = 1u;
-        ++ownership_update_count;
     }
     for (uint32_t descriptor_index = 0u;
          descriptor_index < pipeline->descriptor_count; ++descriptor_index)
@@ -17356,11 +17914,14 @@ static RinVkResult snapshot_graphics_submission(
             &ownership_updates[ownership_update_count];
         uint32_t descriptor_index;
         for (descriptor_index = 0u;
-             descriptor_index < pipeline->descriptor_count;
+             descriptor_index < ownership_update_count;
              ++descriptor_index)
             if (ownership_updates[descriptor_index].buffer == vertex_buffer ||
-                graphics_bindings_out[descriptor_index].allocation_handle ==
-                    vertex_buffer->memory->product_allocation) {
+                (ownership_updates[descriptor_index].buffer &&
+                 ownership_updates[descriptor_index].buffer->memory &&
+                 ownership_updates[descriptor_index]
+                         .buffer->memory->product_allocation ==
+                     vertex_buffer->memory->product_allocation)) {
                 result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
                 goto fail;
             }
@@ -20433,6 +20994,7 @@ void RIN_VKAPI_CALL vkDestroyDescriptorPool(RinVkDevice device,
                          __ATOMIC_RELEASE);
         return;
     }
+    descriptor_metadata_clear_pool(owner, pool);
     for (index = 0u; index < RIN_GPU_VULKAN_COMMAND_MAX_BUFFERS; ++index)
         if (invalidate[index] != 0u)
             rin_gpu_vulkan_command_buffer_invalidate(
@@ -20455,6 +21017,20 @@ RinVkResult RIN_VKAPI_CALL vkAllocateDescriptorSets(
         sets_out[index] = 0u;
     for (index = 0u; index < info->descriptorSetCount; ++index) {
         RinGpuVulkanDescriptorHandleV1 set = 0u;
+        if (!descriptor_metadata_has_free_set(owner)) {
+            uint32_t cleanup;
+            for (cleanup = 0u; cleanup < index; ++cleanup) {
+                if (rin_gpu_vulkan_descriptor_set_free_from_pool(
+                        &owner->descriptor_runtime,
+                        (RinGpuVulkanDescriptorHandleV1)info->descriptorPool,
+                        (RinGpuVulkanDescriptorHandleV1)sets_out[cleanup]) !=
+                    RIN_GPU_VULKAN_GRAPHICS_OK)
+                    return RIN_VK_ERROR_INITIALIZATION_FAILED;
+                descriptor_metadata_clear_set(owner, sets_out[cleanup]);
+                sets_out[cleanup] = 0u;
+            }
+            return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+        }
         int result = rin_gpu_vulkan_descriptor_set_allocate(
             &owner->descriptor_runtime,
             (RinGpuVulkanDescriptorHandleV1)info->descriptorPool,
@@ -20468,6 +21044,7 @@ RinVkResult RIN_VKAPI_CALL vkAllocateDescriptorSets(
                     (RinGpuVulkanDescriptorHandleV1)sets_out[cleanup]) !=
                     RIN_GPU_VULKAN_GRAPHICS_OK)
                     cleanup_failed = 1;
+                descriptor_metadata_clear_set(owner, sets_out[cleanup]);
                 sets_out[cleanup] = 0u;
             }
             if (cleanup_failed)
@@ -20475,6 +21052,30 @@ RinVkResult RIN_VKAPI_CALL vkAllocateDescriptorSets(
             return map_descriptor_result(result);
         }
         sets_out[index] = (RinVkDescriptorSet)set;
+        if (!descriptor_metadata_register_set(
+                owner, info->descriptorPool, sets_out[index])) {
+            const int current_freed =
+                rin_gpu_vulkan_descriptor_set_free_from_pool(
+                    &owner->descriptor_runtime,
+                    (RinGpuVulkanDescriptorHandleV1)info->descriptorPool,
+                    set) == RIN_GPU_VULKAN_GRAPHICS_OK;
+            uint32_t cleanup;
+            int cleanup_failed = !current_freed;
+            if (current_freed) sets_out[index] = 0u;
+            for (cleanup = 0u; cleanup < index; ++cleanup) {
+                if (rin_gpu_vulkan_descriptor_set_free_from_pool(
+                        &owner->descriptor_runtime,
+                        (RinGpuVulkanDescriptorHandleV1)info->descriptorPool,
+                        (RinGpuVulkanDescriptorHandleV1)sets_out[cleanup]) !=
+                    RIN_GPU_VULKAN_GRAPHICS_OK)
+                    cleanup_failed = 1;
+                descriptor_metadata_clear_set(owner, sets_out[cleanup]);
+                sets_out[cleanup] = 0u;
+            }
+            if (cleanup_failed)
+                return RIN_VK_ERROR_INITIALIZATION_FAILED;
+            return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
+        }
     }
     return RIN_VK_SUCCESS;
 }
@@ -20514,6 +21115,7 @@ RinVkResult RIN_VKAPI_CALL vkFreeDescriptorSets(
             (RinGpuVulkanDescriptorHandleV1)sets[index]);
         if (current != RIN_GPU_VULKAN_GRAPHICS_OK)
             return map_descriptor_result(current);
+        descriptor_metadata_clear_set(owner, sets[index]);
     }
     for (index = 0u; index < set_count; ++index)
         for (prior = 0u; prior < RIN_GPU_VULKAN_COMMAND_MAX_BUFFERS;
@@ -20543,6 +21145,10 @@ void RIN_VKAPI_CALL vkUpdateDescriptorSets(
     for (index = 0u; index < write_count; ++index) {
         const RinVkWriteDescriptorSet* source = &writes[index];
         RinGpuVulkanDescriptorWriteV1 converted[RIN_SHADER_MAX_RESOURCES];
+        RinVkDescriptorSetMetadataSlot* metadata = NULL;
+        RinVkDescriptorImageWriteSlot pending_image_writes[
+            RIN_VK_MAX_DESCRIPTOR_IMAGE_WRITES];
+        uint32_t metadata_pending = 0u;
         uint32_t item;
         uint32_t type = descriptor_runtime_type(source->descriptorType);
         int invalid = source->sType != 0 || source->pNext ||
@@ -20570,12 +21176,19 @@ void RIN_VKAPI_CALL vkUpdateDescriptorSets(
             RIN_VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
             RinGpuVulkanCombinedImageSamplerWriteV1 combined[
                 RIN_SHADER_MAX_RESOURCES];
+            RinVkDescriptorSetMetadataSlot* metadata =
+                descriptor_metadata_find_set(owner, source->dstSet);
+            RinVkDescriptorImageWriteSlot pending_image_writes[
+                RIN_VK_MAX_DESCRIPTOR_IMAGE_WRITES];
             memset(combined, 0, sizeof(combined));
-            if (source->dstBinding >= RIN_SHADER_MAX_RESOURCES / 2u) {
+            if (!metadata || source->dstBinding >=
+                                 RIN_SHADER_MAX_RESOURCES / 2u) {
                 __atomic_store_n(&owner->descriptor_validation_error, 1u,
                                  __ATOMIC_RELEASE);
                 continue;
             }
+            memcpy(pending_image_writes, metadata->image_writes,
+                   sizeof(pending_image_writes));
             for (item = 0u; item < source->descriptorCount; ++item) {
                 const RinVkDescriptorImageInfo* image_info =
                     &source->pImageInfo[item];
@@ -20603,17 +21216,41 @@ void RIN_VKAPI_CALL vkUpdateDescriptorSets(
                     view->image->generation);
                 combined[item].sampler_resource =
                     (RinGpuHandle)image_info->sampler;
+                if (!descriptor_metadata_update_image_write(
+                        pending_image_writes, source->dstBinding,
+                        source->dstArrayElement + item,
+                        source->descriptorType, image_info->imageView,
+                        image_info->sampler, image_info->imageLayout)) {
+                    invalid = 1;
+                    break;
+                }
             }
             if (invalid || rin_gpu_vulkan_descriptor_set_update_combined(
-                                &owner->descriptor_runtime,
-                                (RinGpuVulkanDescriptorHandleV1)source->dstSet,
-                                combined, source->descriptorCount) !=
-                            RIN_GPU_VULKAN_GRAPHICS_OK)
+                               &owner->descriptor_runtime,
+                               (RinGpuVulkanDescriptorHandleV1)source->dstSet,
+                               combined, source->descriptorCount) !=
+                           RIN_GPU_VULKAN_GRAPHICS_OK) {
                 __atomic_store_n(&owner->descriptor_validation_error, 1u,
                                  __ATOMIC_RELEASE);
+            } else {
+                memcpy(metadata->image_writes, pending_image_writes,
+                       sizeof(pending_image_writes));
+            }
             continue;
         }
         memset(converted, 0, sizeof(converted));
+        if (source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
+            source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
+            metadata = descriptor_metadata_find_set(owner, source->dstSet);
+            if (!metadata) {
+                __atomic_store_n(&owner->descriptor_validation_error, 1u,
+                                 __ATOMIC_RELEASE);
+                continue;
+            }
+            memcpy(pending_image_writes, metadata->image_writes,
+                   sizeof(pending_image_writes));
+            metadata_pending = 1u;
+        }
         for (item = 0u; item < source->descriptorCount; ++item) {
             RinGpuVulkanDescriptorWriteV1* destination = &converted[item];
             destination->set = 0u;
@@ -20665,16 +21302,29 @@ void RIN_VKAPI_CALL vkUpdateDescriptorSets(
                         source->descriptorType == RIN_VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
                             ? RIN_GPU_RESOURCE_READ | RIN_GPU_RESOURCE_WRITE
                             : RIN_GPU_RESOURCE_READ;
+                    if (metadata_pending != 0u &&
+                        !descriptor_metadata_update_image_write(
+                            pending_image_writes, source->dstBinding,
+                            source->dstArrayElement + item,
+                            source->descriptorType, image_info->imageView,
+                            0u, image_info->imageLayout)) {
+                        invalid = 1;
+                        break;
+                    }
                 }
             }
         }
         if (invalid || rin_gpu_vulkan_descriptor_set_update(
-                            &owner->descriptor_runtime,
-                            (RinGpuVulkanDescriptorHandleV1)source->dstSet,
-                            converted, source->descriptorCount) !=
-                        RIN_GPU_VULKAN_GRAPHICS_OK)
+                           &owner->descriptor_runtime,
+                           (RinGpuVulkanDescriptorHandleV1)source->dstSet,
+                           converted, source->descriptorCount) !=
+                       RIN_GPU_VULKAN_GRAPHICS_OK) {
             __atomic_store_n(&owner->descriptor_validation_error, 1u,
                              __ATOMIC_RELEASE);
+        } else if (metadata_pending != 0u) {
+            memcpy(metadata->image_writes, pending_image_writes,
+                   sizeof(pending_image_writes));
+        }
     }
 }
 
@@ -21414,8 +22064,8 @@ static RinVkResult create_graphics_pipeline_one(
             &vertex_translation.descriptors[index];
         const uint32_t resource_index = descriptor->resource_index;
         if (descriptor->set != 0u ||
-            descriptor->resource_kind !=
-                RIN_SHADER_RESOURCE_STORAGE_BUFFER ||
+            !graphics_resource_kind_v2_supported(
+                descriptor->resource_kind) ||
             resource_index >= RIN_SPIRV_MAX_RESOURCES ||
             descriptor->binding != resource_index)
             goto done;
@@ -21438,8 +22088,8 @@ static RinVkResult create_graphics_pipeline_one(
             &fragment_translation.descriptors[index];
         const uint32_t resource_index = descriptor->resource_index;
         if (descriptor->set != 0u ||
-            descriptor->resource_kind !=
-                RIN_SHADER_RESOURCE_STORAGE_BUFFER ||
+            !graphics_resource_kind_v2_supported(
+                descriptor->resource_kind) ||
             resource_index >= RIN_SPIRV_MAX_RESOURCES ||
             descriptor->binding != resource_index)
             goto done;
@@ -21511,8 +22161,8 @@ static RinVkResult create_graphics_pipeline_one(
         plan.backend.vertex_binding_count > 1u)
         goto done;
     for (index = 0u; index < graphics_descriptor_count; ++index)
-        if (plan.backend.resource_kinds[index] !=
-            RIN_SHADER_RESOURCE_STORAGE_BUFFER)
+        if (!graphics_resource_kind_v2_supported(
+                plan.backend.resource_kinds[index]))
             goto done;
     vertex_ir_size = ((const RinShaderHeaderV1*)(const void*)vertex_ir)->total_size;
     fragment_ir_size = ((const RinShaderHeaderV1*)(const void*)fragment_ir)->total_size;
