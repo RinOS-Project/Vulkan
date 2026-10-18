@@ -30,6 +30,34 @@ static RinVulkanExampleRuntimeLifecycleV1 g_rinos_vulkan_lifecycle = {
     sizeof(RinVulkanExampleRuntimeLifecycleV1),
     RIN_VULKAN_EXAMPLE_RUNTIME_LIFECYCLE_V1_VERSION, 0u, 0u};
 
+static RinVulkanRinOSProcessSubmitBackendV10* rinos_process_backend_v10(void) {
+    return &g_rinos_process_submit_backend.submit_backend;
+}
+
+static RinVulkanRinOSProcessSubmitBackendV9* rinos_process_backend_v9(void) {
+    return &rinos_process_backend_v10()->submit_backend;
+}
+
+static RinVulkanRinOSProcessSubmitBackendV8* rinos_process_backend_v8(void) {
+    return &rinos_process_backend_v9()->submit_backend;
+}
+
+static RinVulkanRinOSProcessSubmitBackendV7* rinos_process_backend_v7(void) {
+    return &rinos_process_backend_v8()->submit_backend;
+}
+
+static RinVulkanRinOSProcessSubmitBackendV6* rinos_process_backend_v6(void) {
+    return &rinos_process_backend_v7()->submit_backend;
+}
+
+static RinVulkanRinOSProcessSubmitBackendV5* rinos_process_backend_v5(void) {
+    return &rinos_process_backend_v6()->submit_backend;
+}
+
+static RinVulkanRinOSProcessSubmitBackendV4* rinos_process_backend_v4(void) {
+    return &rinos_process_backend_v5()->submit_backend;
+}
+
 enum {
     RINOS_PRODUCT_BIND_V1 = 1u << 0,
     RINOS_PRODUCT_BIND_V2 = 1u << 1,
@@ -134,62 +162,52 @@ static int bind_rinos_product_platform(uint64_t device_id,
     RINOS_BIND_PRODUCT(
         RINOS_PRODUCT_BIND_V6,
         rin_gpu_vulkan_icd_bind_product_platform_v6(
-            &g_rinos_process_submit_backend.submit_backend.submit_backend
-                 .submit_backend.submit_backend.submit_backend
-                 .submit_backend.platform_v6),
+            &rinos_process_backend_v4()->platform_v6),
         "bind product platform V6");
     RINOS_BIND_PRODUCT(
         RINOS_PRODUCT_BIND_V7,
         rin_gpu_vulkan_icd_bind_product_platform_v7(
-            &g_rinos_process_submit_backend.submit_backend.submit_backend
-                 .submit_backend.submit_backend.submit_backend
-                 .submit_backend.platform_v7),
+            &rinos_process_backend_v4()->platform_v7),
         "bind product platform V7");
     RINOS_BIND_PRODUCT(
         RINOS_PRODUCT_BIND_V8,
         rin_gpu_vulkan_icd_bind_product_platform_v8(
-            &g_rinos_process_submit_backend.submit_backend.submit_backend
-                 .submit_backend.submit_backend.submit_backend
-                 .submit_backend.platform_v8),
+            &rinos_process_backend_v4()->platform_v8),
         "bind product platform V8");
     RINOS_BIND_PRODUCT(
         RINOS_PRODUCT_BIND_V9,
         rin_gpu_vulkan_icd_bind_product_platform_v9(
-            &g_rinos_process_submit_backend.submit_backend.submit_backend
-                 .submit_backend.submit_backend
-                 .submit_backend.platform_v9),
+            &rinos_process_backend_v5()->platform_v9),
         "bind product platform V9");
     RINOS_BIND_PRODUCT(
         RINOS_PRODUCT_BIND_V10,
         rin_gpu_vulkan_icd_bind_product_platform_v10(
             rin_vulkan_rinos_process_submit_backend_v6_platform_v10(
-                &g_rinos_process_submit_backend.submit_backend
-                     .submit_backend.submit_backend.submit_backend)),
+                rinos_process_backend_v6())),
         "bind product platform V10");
     RINOS_BIND_PRODUCT(
         RINOS_PRODUCT_BIND_V11,
         rin_gpu_vulkan_icd_bind_product_platform_v11(
             rin_vulkan_rinos_process_submit_backend_v7_platform_v11(
-                &g_rinos_process_submit_backend.submit_backend
-                     .submit_backend.submit_backend)),
+                rinos_process_backend_v7())),
         "bind product platform V11");
     RINOS_BIND_PRODUCT(
         RINOS_PRODUCT_BIND_V12,
         rin_gpu_vulkan_icd_bind_product_platform_v12(
             rin_vulkan_rinos_process_submit_backend_v8_platform_v12(
-                &g_rinos_process_submit_backend.submit_backend
-                     .submit_backend)),
+                rinos_process_backend_v8())),
         "bind product platform V12");
     RINOS_BIND_PRODUCT(
         RINOS_PRODUCT_BIND_V13,
         rin_gpu_vulkan_icd_bind_product_platform_v13(
             rin_vulkan_rinos_process_submit_backend_v9_platform_v13(
-                &g_rinos_process_submit_backend.submit_backend)),
+                rinos_process_backend_v9())),
         "bind product platform V13");
     RINOS_BIND_PRODUCT(
         RINOS_PRODUCT_BIND_V14,
         rin_gpu_vulkan_icd_bind_product_platform_v14(
-            &g_rinos_process_submit_backend.submit_backend.platform_v14),
+            rin_vulkan_rinos_process_submit_backend_v10_platform_v14(
+                rinos_process_backend_v10())),
         "bind product platform V14");
     RINOS_BIND_PRODUCT(
         RINOS_PRODUCT_BIND_V15,
@@ -226,64 +244,52 @@ static int cleanup_rinos_product_platform(void) {
     RINOS_UNBIND_PRODUCT(
         RINOS_PRODUCT_BIND_V14,
         rin_gpu_vulkan_icd_unbind_product_platform_v14(
-            &g_rinos_process_submit_backend.submit_backend.platform_v14),
+            rin_vulkan_rinos_process_submit_backend_v10_platform_v14(
+                rinos_process_backend_v10())),
         "unbind product platform V14");
     RINOS_UNBIND_PRODUCT(
         RINOS_PRODUCT_BIND_V13,
         rin_gpu_vulkan_icd_unbind_product_platform_v13(
             rin_vulkan_rinos_process_submit_backend_v9_platform_v13(
-                &g_rinos_process_submit_backend.submit_backend)),
+                rinos_process_backend_v9())),
         "unbind product platform V13");
     RINOS_UNBIND_PRODUCT(
         RINOS_PRODUCT_BIND_V12,
         rin_gpu_vulkan_icd_unbind_product_platform_v12(
             rin_vulkan_rinos_process_submit_backend_v8_platform_v12(
-                &g_rinos_process_submit_backend.submit_backend
-                     .submit_backend)),
+                rinos_process_backend_v8())),
         "unbind product platform V12");
     RINOS_UNBIND_PRODUCT(
         RINOS_PRODUCT_BIND_V11,
         rin_gpu_vulkan_icd_unbind_product_platform_v11(
             rin_vulkan_rinos_process_submit_backend_v7_platform_v11(
-                &g_rinos_process_submit_backend.submit_backend
-                     .submit_backend.submit_backend)),
+                rinos_process_backend_v7())),
         "unbind product platform V11");
     RINOS_UNBIND_PRODUCT(
         RINOS_PRODUCT_BIND_V10,
         rin_gpu_vulkan_icd_unbind_product_platform_v10(
             rin_vulkan_rinos_process_submit_backend_v6_platform_v10(
-                &g_rinos_process_submit_backend.submit_backend
-                     .submit_backend.submit_backend.submit_backend)),
+                rinos_process_backend_v6())),
         "unbind product platform V10");
     RINOS_UNBIND_PRODUCT(
         RINOS_PRODUCT_BIND_V9,
         rin_gpu_vulkan_icd_unbind_product_platform_v9(
-            &g_rinos_process_submit_backend.submit_backend
-                 .submit_backend.submit_backend.submit_backend
-                 .submit_backend.platform_v9),
+            &rinos_process_backend_v5()->platform_v9),
         "unbind product platform V9");
     RINOS_UNBIND_PRODUCT(
         RINOS_PRODUCT_BIND_V8,
         rin_gpu_vulkan_icd_unbind_product_platform_v8(
-            &g_rinos_process_submit_backend.submit_backend
-                 .submit_backend.submit_backend.submit_backend
-                 .submit_backend.submit_backend.platform_v8),
+            &rinos_process_backend_v4()->platform_v8),
         "unbind product platform V8");
     RINOS_UNBIND_PRODUCT(
         RINOS_PRODUCT_BIND_V7,
         rin_gpu_vulkan_icd_unbind_product_platform_v7(
-            &g_rinos_process_submit_backend.submit_backend
-                 .submit_backend.submit_backend.submit_backend
-                 .submit_backend.submit_backend.submit_backend
-                 .platform_v7),
+            &rinos_process_backend_v4()->platform_v7),
         "unbind product platform V7");
     RINOS_UNBIND_PRODUCT(
         RINOS_PRODUCT_BIND_V6,
         rin_gpu_vulkan_icd_unbind_product_platform_v6(
-            &g_rinos_process_submit_backend.submit_backend
-                 .submit_backend.submit_backend.submit_backend
-                 .submit_backend.submit_backend.submit_backend
-                 .submit_backend.platform_v6),
+            &rinos_process_backend_v4()->platform_v6),
         "unbind product platform V6");
     if (g_rinos_process_submit_backend.struct_size != 0u) {
         result = rin_vulkan_rinos_process_submit_backend_v11_detach(
