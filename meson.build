@@ -29,6 +29,13 @@ rinvulkan_dep = declare_dependency(
   dependencies: ringpu_dep,
 )
 
+rinvulkan_interpolation_v2_test = executable(
+  'rinvulkan-interpolation-v2-test',
+  'tests/rinvulkan_interpolation_v2_test.c',
+  dependencies: rinvulkan_dep,
+)
+test('rinvulkan-interpolation-v2', rinvulkan_interpolation_v2_test)
+
 # RinOS's syscall-backed process-submit adapter is opt-in and stays separate
 # from the generic Vulkan ICD/shared library.
 rinvulkan_rinos_process_backend = static_library(

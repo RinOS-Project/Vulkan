@@ -202,6 +202,13 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME rinvulkan-native-window
         COMMAND rinvulkan-native-window-test)
+    add_executable(rinvulkan-interpolation-v2-test
+        tests/rinvulkan_interpolation_v2_test.c)
+    target_compile_features(rinvulkan-interpolation-v2-test PRIVATE c_std_11)
+    target_link_libraries(rinvulkan-interpolation-v2-test PRIVATE
+        RinVulkan::RinVulkan)
+    add_test(NAME rinvulkan-interpolation-v2
+        COMMAND rinvulkan-interpolation-v2-test)
     if(RINVULKAN_BUILD_RINOS_NATIVE_WINDOW_EXAMPLE)
         add_executable(rinvulkan-native-window-runtime-integration-test
             tests/rinvulkan_native_window_runtime_integration_test.c)

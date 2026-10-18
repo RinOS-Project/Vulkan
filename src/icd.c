@@ -21895,6 +21895,8 @@ static RinVkResult create_graphics_pipeline_one(
     RinVulkanProductPlatformV10* process_platform = NULL;
     RinSpirvTranslationInfoV1 vertex_translation;
     RinSpirvTranslationInfoV1 fragment_translation;
+    RinSpirvTranslationInfoV2 vertex_translation_v2;
+    RinSpirvTranslationInfoV2 fragment_translation_v2;
     RinSpirvDescriptorV1 graphics_descriptors[RIN_SPIRV_MAX_RESOURCES];
     uint8_t graphics_descriptor_indices[RIN_SPIRV_MAX_RESOURCES] = {0};
     RinVkDescriptorSetLayout graphics_set_layouts[
@@ -22042,19 +22044,25 @@ static RinVkResult create_graphics_pipeline_one(
     fragment_ir = (uint8_t*)malloc(RIN_SHADER_MAX_SOURCE_BYTES);
     if (!vertex_ir || !fragment_ir) { result = RIN_VK_ERROR_OUT_OF_HOST_MEMORY; goto done; }
     memset(&vertex_translation, 0, sizeof(vertex_translation));
-    translated = ringpu_vulkan_graphics_translate_shader(vertex_spirv, vertex_spirv_size / 4u,
-        RIN_SHADER_STAGE_VERTEX, NULL, 0u, vertex_ir, RIN_SHADER_MAX_SOURCE_BYTES, &vertex_translation);
+    translated = ringpu_vulkan_graphics_translate_shader_v2(
+        vertex_spirv, vertex_spirv_size / 4u, RIN_SHADER_STAGE_VERTEX,
+        NULL, 0u, vertex_ir, RIN_SHADER_MAX_SOURCE_BYTES,
+        &vertex_translation_v2);
     if (translated != RIN_GPU_VULKAN_GRAPHICS_OK) {
         result = translated == RIN_GPU_VULKAN_GRAPHICS_LIMIT ? RIN_VK_ERROR_OUT_OF_HOST_MEMORY : RIN_VK_ERROR_FEATURE_NOT_PRESENT;
         goto done;
     }
-    memset(&fragment_translation, 0, sizeof(fragment_translation));
-    translated = ringpu_vulkan_graphics_translate_shader(fragment_spirv, fragment_spirv_size / 4u,
-        RIN_SHADER_STAGE_FRAGMENT, NULL, 0u, fragment_ir, RIN_SHADER_MAX_SOURCE_BYTES, &fragment_translation);
+    vertex_translation = vertex_translation_v2.base;
+    memset(&fragment_translation_v2, 0, sizeof(fragment_translation_v2));
+    translated = ringpu_vulkan_graphics_translate_shader_v2(
+        fragment_spirv, fragment_spirv_size / 4u, RIN_SHADER_STAGE_FRAGMENT,
+        NULL, 0u, fragment_ir, RIN_SHADER_MAX_SOURCE_BYTES,
+        &fragment_translation_v2);
     if (translated != RIN_GPU_VULKAN_GRAPHICS_OK) {
         result = translated == RIN_GPU_VULKAN_GRAPHICS_LIMIT ? RIN_VK_ERROR_OUT_OF_HOST_MEMORY : RIN_VK_ERROR_FEATURE_NOT_PRESENT;
         goto done;
     }
+    fragment_translation = fragment_translation_v2.base;
     if (strcmp(vertex_stage->pName, vertex_translation.entry_name) ||
         strcmp(fragment_stage->pName, fragment_translation.entry_name) ||
         (!binding_count && (vertex_translation.input_count || attribute_count)))
@@ -22154,8 +22162,10 @@ static RinVkResult create_graphics_pipeline_one(
         }
     }
     memset(&plan, 0, sizeof(plan));
-    if (ringpu_vulkan_graphics_build_pipeline(&vertex_translation, &fragment_translation, &state,
-            binding_count ? &binding : NULL, binding_count, attributes, attribute_count, &plan) !=
+    if (ringpu_vulkan_graphics_build_pipeline_v2(
+            &vertex_translation_v2, &fragment_translation_v2, &state,
+            binding_count ? &binding : NULL, binding_count, attributes,
+            attribute_count, &plan) !=
             RIN_GPU_VULKAN_GRAPHICS_OK ||
         plan.backend.resource_count != graphics_descriptor_count ||
         plan.backend.vertex_binding_count > 1u)

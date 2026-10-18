@@ -157,6 +157,16 @@ int ringpu_vulkan_graphics_translate_shader(
     void* rin_shader_out, size_t rin_shader_capacity,
     RinSpirvTranslationInfoV1* info_out);
 
+/* Versioned translation preserves SPIR-V Flat/NoPerspective decorations and
+ * leaves the V1 metadata layout unchanged. Vulkan fragment-input qualifiers
+ * control interpolation; decorations on pre-raster outputs do not override
+ * the fragment-input qualifier or its Vulkan default. */
+int ringpu_vulkan_graphics_translate_shader_v2(
+    const uint32_t* words, size_t word_count, uint32_t expected_stage,
+    const RinSpirvSpecializationValueV1* overrides, uint32_t override_count,
+    void* rin_shader_out, size_t rin_shader_capacity,
+    RinSpirvTranslationInfoV2* info_out);
+
 /* Build the pointer-free RinGPU graphics pipeline description from the
  * validated stage interfaces produced by ringpu_spirv_translate().  This is
  * the Vulkan-to-RinGPU assembly/raster/IO boundary; the returned descriptor
@@ -164,6 +174,18 @@ int ringpu_vulkan_graphics_translate_shader(
 int ringpu_vulkan_graphics_build_pipeline(
     const RinSpirvTranslationInfoV1* vertex,
     const RinSpirvTranslationInfoV1* fragment,
+    const RinGpuVulkanGraphicsStateV1* state,
+    const RinGpuVulkanVertexInputBindingV1* vertex_bindings,
+    uint32_t vertex_binding_count,
+    const RinGpuVulkanVertexInputAttributeV1* vertex_attributes,
+    uint32_t vertex_attribute_count,
+    RinGpuVulkanGraphicsPipelinePlanV1* plan_out);
+
+/* Build a V1 backend plan from versioned translation metadata, applying the
+ * fragment-input interpolation decorations and Vulkan scalar-type rules. */
+int ringpu_vulkan_graphics_build_pipeline_v2(
+    const RinSpirvTranslationInfoV2* vertex,
+    const RinSpirvTranslationInfoV2* fragment,
     const RinGpuVulkanGraphicsStateV1* state,
     const RinGpuVulkanVertexInputBindingV1* vertex_bindings,
     uint32_t vertex_binding_count,

@@ -28,6 +28,58 @@ static int translation_info_valid(const RinSpirvTranslationInfoV1* info,
     return 1;
 }
 
+static int translation_info_io_valid(const RinSpirvIoV1* io, uint32_t count) {
+    if (count > RIN_SPIRV_MAX_IO || (count != 0u && !io))
+        return 0;
+    for (uint32_t index = 0u; index < count; ++index) {
+        const RinSpirvIoV1* current = &io[index];
+        uint32_t current_end;
+        if (current->width == 0u || current->width > 4u ||
+            (current->base_type != 1u && current->base_type != 2u) ||
+            current->location > RIN_SHADER_MAX_IO - current->width)
+            return 0;
+        current_end = current->location + current->width;
+        for (uint32_t prior = 0u; prior < index; ++prior) {
+            const RinSpirvIoV1* previous = &io[prior];
+            const uint32_t previous_end = previous->location + previous->width;
+            if (current->location < previous_end &&
+                previous->location < current_end)
+                return 0;
+        }
+    }
+    return 1;
+}
+
+static int translation_info_v2_valid(const RinSpirvTranslationInfoV2* info,
+                                     uint32_t stage) {
+    if (!info || info->struct_size != sizeof(*info) ||
+        info->api_version != 2u ||
+        !translation_info_valid(&info->base, stage) ||
+        !translation_info_io_valid(info->base.inputs,
+                                   info->base.input_count) ||
+        !translation_info_io_valid(info->base.outputs,
+                                   info->base.output_count))
+        return 0;
+    for (uint32_t index = 0u; index < info->base.input_count; ++index) {
+        const uint32_t interpolation = info->input_interpolation[index];
+        if (interpolation > RIN_SPIRV_INTERPOLATION_FLAT_V2 ||
+            (stage != RIN_SHADER_STAGE_FRAGMENT &&
+             interpolation != RIN_SPIRV_INTERPOLATION_UNSPECIFIED_V2) ||
+            (stage == RIN_SHADER_STAGE_FRAGMENT &&
+             info->base.inputs[index].base_type == 1u &&
+             interpolation != RIN_SPIRV_INTERPOLATION_FLAT_V2))
+            return 0;
+    }
+    for (uint32_t index = 0u; index < info->base.output_count; ++index) {
+        const uint32_t interpolation = info->output_interpolation[index];
+        if (interpolation > RIN_SPIRV_INTERPOLATION_FLAT_V2 ||
+            (stage != RIN_SHADER_STAGE_VERTEX &&
+             interpolation != RIN_SPIRV_INTERPOLATION_UNSPECIFIED_V2))
+            return 0;
+    }
+    return 1;
+}
+
 /* The current RSH1 shader ABI exposes each scalar component as an IO slot.
  * Reject reflected interface ranges that alias after Vulkan vectors are
  * flattened into those scalar slots; otherwise the plan can appear valid but
@@ -283,6 +335,44 @@ int ringpu_vulkan_graphics_translate_shader(
         return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
     }
     if (!translation_info_valid(info_out, expected_stage)) {
+        memset(info_out, 0, sizeof(*info_out));
+        return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
+    }
+    return RIN_GPU_VULKAN_GRAPHICS_OK;
+}
+
+int ringpu_vulkan_graphics_translate_shader_v2(
+    const uint32_t* words, size_t word_count, uint32_t expected_stage,
+    const RinSpirvSpecializationValueV1* overrides, uint32_t override_count,
+    void* rin_shader_out, size_t rin_shader_capacity,
+    RinSpirvTranslationInfoV2* info_out) {
+    int result;
+
+    if (!words || word_count == 0u || !rin_shader_out ||
+        rin_shader_capacity == 0u || !info_out ||
+        (expected_stage != RIN_SHADER_STAGE_VERTEX &&
+         expected_stage != RIN_SHADER_STAGE_FRAGMENT &&
+         expected_stage != RIN_SHADER_STAGE_COMPUTE) ||
+        (override_count != 0u && !overrides))
+        return RIN_GPU_VULKAN_GRAPHICS_INVALID_ARGUMENT;
+
+    result = ringpu_spirv_translate_v2(
+        words, word_count, expected_stage, overrides, override_count,
+        rin_shader_out, rin_shader_capacity, info_out);
+    if (result != RIN_SPIRV_OK) {
+        memset(info_out, 0, sizeof(*info_out));
+        return result == RIN_SPIRV_ERROR_NO_MEMORY
+                   ? RIN_GPU_VULKAN_GRAPHICS_LIMIT
+                   : RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
+    }
+    if (!translation_info_v2_valid(info_out, expected_stage)) {
+        memset(info_out, 0, sizeof(*info_out));
+        return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
+    }
+
+    if (expected_stage == RIN_SHADER_STAGE_VERTEX &&
+        !remap_vertex_outputs(words, word_count, rin_shader_out,
+                              rin_shader_capacity, &info_out->base)) {
         memset(info_out, 0, sizeof(*info_out));
         return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
     }
@@ -605,6 +695,74 @@ int ringpu_vulkan_graphics_build_pipeline(
             return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
         plan.backend.resource_kinds[index] = resource_kinds[index];
     }
+    *plan_out = plan;
+    return RIN_GPU_VULKAN_GRAPHICS_OK;
+}
+
+int ringpu_vulkan_graphics_build_pipeline_v2(
+    const RinSpirvTranslationInfoV2* vertex,
+    const RinSpirvTranslationInfoV2* fragment,
+    const RinGpuVulkanGraphicsStateV1* state,
+    const RinGpuVulkanVertexInputBindingV1* vertex_bindings,
+    uint32_t vertex_binding_count,
+    const RinGpuVulkanVertexInputAttributeV1* vertex_attributes,
+    uint32_t vertex_attribute_count,
+    RinGpuVulkanGraphicsPipelinePlanV1* plan_out) {
+    RinGpuVulkanGraphicsPipelinePlanV1 plan;
+    uint32_t varying_index = 0u;
+    int result;
+
+    if (!plan_out || !vertex || !fragment ||
+        !translation_info_v2_valid(vertex, RIN_SHADER_STAGE_VERTEX) ||
+        !translation_info_v2_valid(fragment, RIN_SHADER_STAGE_FRAGMENT))
+        return RIN_GPU_VULKAN_GRAPHICS_INVALID_ARGUMENT;
+
+    result = ringpu_vulkan_graphics_build_pipeline(
+        &vertex->base, &fragment->base, state, vertex_bindings,
+        vertex_binding_count, vertex_attributes, vertex_attribute_count,
+        &plan);
+    if (result != RIN_GPU_VULKAN_GRAPHICS_OK)
+        return result;
+
+    for (uint32_t input_index = 0u;
+         input_index < fragment->base.input_count; ++input_index) {
+        const RinSpirvIoV1* input = &fragment->base.inputs[input_index];
+        uint32_t interpolation = fragment->input_interpolation[input_index];
+
+        if (interpolation == RIN_SPIRV_INTERPOLATION_UNSPECIFIED_V2) {
+            interpolation = input->base_type == 2u
+                ? RIN_GPU_INTERPOLATION_PERSPECTIVE
+                : RIN_GPU_INTERPOLATION_FLAT;
+        } else if (interpolation ==
+                   RIN_SPIRV_INTERPOLATION_PERSPECTIVE_V2) {
+            interpolation = RIN_GPU_INTERPOLATION_PERSPECTIVE;
+        } else if (interpolation ==
+                   RIN_SPIRV_INTERPOLATION_NO_PERSPECTIVE_V2) {
+            interpolation = RIN_GPU_INTERPOLATION_NO_PERSPECTIVE;
+        } else if (interpolation == RIN_SPIRV_INTERPOLATION_FLAT_V2) {
+            interpolation = RIN_GPU_INTERPOLATION_FLAT;
+        } else {
+            return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
+        }
+        if ((input->base_type == 1u &&
+             interpolation != RIN_GPU_INTERPOLATION_FLAT) ||
+            varying_index > plan.backend.varying_count ||
+            input->width > plan.backend.varying_count - varying_index)
+            return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
+        for (uint32_t component = 0u; component < input->width; ++component) {
+            RinGpuGraphicsPipelineBackendVaryingV1* varying =
+                &plan.backend.varyings[varying_index++];
+            if (varying->fragment_input_location !=
+                    input->location + component ||
+                varying->type != (input->base_type == 2u
+                    ? RIN_GPU_VARYING_FLOAT32 : RIN_GPU_VARYING_SINT32))
+                return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
+            varying->interpolation = interpolation;
+        }
+    }
+    if (varying_index != plan.backend.varying_count)
+        return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
+
     *plan_out = plan;
     return RIN_GPU_VULKAN_GRAPHICS_OK;
 }
