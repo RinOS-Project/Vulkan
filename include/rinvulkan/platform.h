@@ -18,7 +18,11 @@
 #define RIN_VULKAN_PRODUCT_PLATFORM_V9_VERSION 9u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V10_VERSION 10u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V11_VERSION 11u
+#define RIN_VULKAN_PRODUCT_PLATFORM_V12_VERSION 12u
 #define RIN_VULKAN_PRODUCT_PROCESS_SAMPLER_DESC_V11_VERSION 1u
+#define RIN_VULKAN_PRODUCT_PROCESS_GRAPHICS_BINDING_V12_VERSION 1u
+#define RIN_VULKAN_PRODUCT_PROCESS_GRAPHICS_BIND_GROUP_TOKEN_TAG \
+    UINT64_C(0x5265)
 #define RIN_VULKAN_PRODUCT_PROCESS_SUBMIT_RECEIPT_V1_VERSION 1u
 #define RIN_VULKAN_PRODUCT_MEMORY_VERSION 1u
 #define RIN_VULKAN_PRODUCT_MAX_QUEUES 8u
@@ -515,6 +519,42 @@ typedef struct RinVulkanProductPlatformV11 {
     uint64_t reserved[2];
 } RinVulkanProductPlatformV11;
 
+/* V12 adds an API-neutral storage-buffer graphics bind-group lifecycle. The
+ * adapter passes resource identity and allocation-relative ranges; it never
+ * forwards a GPU VA, IOVA, or backend cookie as an address. */
+typedef struct RinVulkanProductProcessGraphicsBindingV12 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint32_t resource_index;
+    uint32_t access;
+    uint64_t resource_cookie;
+    uint64_t allocation_handle;
+    uint64_t allocation_offset;
+    uint64_t resource_size_bytes;
+    uint64_t offset;
+    uint64_t size_bytes;
+    uint32_t reserved[2];
+} RinVulkanProductProcessGraphicsBindingV12;
+
+typedef int (*RinVulkanProductCreateProcessGraphicsBindGroupV12Fn)(
+    void* context, uint64_t bind_group_token, uint64_t pipeline_token,
+    const RinVulkanProductProcessGraphicsBindingV12* bindings,
+    uint32_t binding_count);
+typedef int (*RinVulkanProductDestroyProcessGraphicsBindGroupV12Fn)(
+    void* context, uint64_t bind_group_token);
+
+typedef struct RinVulkanProductPlatformV12 {
+    uint32_t struct_size;
+    uint32_t version;
+    RinVulkanProductPlatformV11* base;
+    void* context;
+    RinVulkanProductCreateProcessGraphicsBindGroupV12Fn
+        create_process_graphics_bind_group;
+    RinVulkanProductDestroyProcessGraphicsBindGroupV12Fn
+        destroy_process_graphics_bind_group;
+    uint64_t reserved[2];
+} RinVulkanProductPlatformV12;
+
 #ifdef __cplusplus
 static_assert(sizeof(RinVulkanProductResourceV1) == 16u,
               "Vulkan product resource ABI drift");
@@ -522,6 +562,8 @@ static_assert(sizeof(RinVulkanProductProcessComputeBindingV8) == 72u,
               "Vulkan process compute binding V8 ABI drift");
 static_assert(sizeof(RinVulkanProductProcessQueryResultV9) == 88u,
               "Vulkan process query result V9 ABI drift");
+static_assert(sizeof(RinVulkanProductProcessGraphicsBindingV12) == 72u,
+              "Vulkan process graphics binding V12 ABI drift");
 static_assert(sizeof(RinVulkanProductReportV1) == 128u,
               "Vulkan product report ABI drift");
 static_assert(sizeof(RinVulkanProductStatusV1) == 128u,
@@ -541,6 +583,8 @@ _Static_assert(sizeof(RinVulkanProductProcessComputeBindingV8) == 72u,
                "Vulkan process compute binding V8 ABI drift");
 _Static_assert(sizeof(RinVulkanProductProcessQueryResultV9) == 88u,
                "Vulkan process query result V9 ABI drift");
+_Static_assert(sizeof(RinVulkanProductProcessGraphicsBindingV12) == 72u,
+               "Vulkan process graphics binding V12 ABI drift");
 _Static_assert(sizeof(RinVulkanProductReportV1) == 128u,
                "Vulkan product report ABI drift");
 _Static_assert(sizeof(RinVulkanProductStatusV1) == 128u,
