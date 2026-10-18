@@ -61,6 +61,7 @@ typedef struct RinGpuVulkanGraphicsStateV1 {
     uint32_t color_write_mask;
     uint32_t cull_mode;
     uint32_t front_face;
+    /* V1 uses RSH1's fixed BuiltIn Position slots 0..3. */
     uint32_t position_output_location;
     uint32_t render_pass_model;
     uint32_t flags;
@@ -146,7 +147,10 @@ typedef struct RinGpuVulkanDescriptorSetPlanV1 {
  * it is consumed by the Vulkan graphics plan builder.  Specialization
  * overrides are applied while the module is translated; the returned RSH1
  * bytes and metadata are published only after structural and shader
- * validation succeeds. */
+ * validation succeeds. For vertex stages, BuiltIn Position occupies RinGPU
+ * output slots 0..3; ordinary Vulkan user outputs are remapped to RinGPU
+ * slots location+4. Fragment input locations retain their Vulkan locations,
+ * and the pipeline builder links them across that explicit mapping. */
 int ringpu_vulkan_graphics_translate_shader(
     const uint32_t* words, size_t word_count, uint32_t expected_stage,
     const RinSpirvSpecializationValueV1* overrides, uint32_t override_count,

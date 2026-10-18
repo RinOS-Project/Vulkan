@@ -4,6 +4,16 @@
 
 #include <string.h>
 
+enum {
+    SPV_OP_FUNCTION = 54,
+    SPV_OP_FUNCTION_END = 56,
+    SPV_OP_STORE = 62,
+    SPV_OP_DECORATE = 71,
+    SPV_DECORATION_BUILT_IN = 11,
+    SPV_BUILTIN_POSITION = 0,
+    RIN_GPU_VULKAN_POSITION_OUTPUT_SLOTS = 4
+};
+
 static int translation_info_valid(const RinSpirvTranslationInfoV1* info,
                                   uint32_t stage) {
     if (!info || info->struct_size != sizeof(*info) ||
@@ -16,6 +26,187 @@ static int translation_info_valid(const RinSpirvTranslationInfoV1* info,
         info->shader.resource_count > RIN_SHADER_MAX_RESOURCES)
         return 0;
     return 1;
+}
+
+static int shader_output_opcode(uint16_t opcode) {
+    return opcode == RIN_SHADER_OP_STORE_OUTPUT ||
+           opcode == RIN_SHADER_OP_STORE_OUTPUT_F32;
+}
+
+static const RinSpirvIoV1* find_io_id(const RinSpirvIoV1* io, uint32_t count,
+                                      uint32_t id) {
+    for (uint32_t index = 0u; index < count; ++index)
+        if (io[index].id == id) return &io[index];
+    return NULL;
+}
+
+/* RSH1 reserves output slots 0..3 for BuiltIn Position. Vulkan's user
+ * Location 0 is independent of BuiltIn Position, so translate ordinary
+ * vertex outputs to slots location+4. Match stores by their SPIR-V variable
+ * ID rather than by the RSH1 location: Position and a user Location 0 both
+ * lower to slot 0 before this adapter runs. */
+static int remap_vertex_output_stores_pass(
+    const uint32_t* words, size_t word_count,
+    const RinSpirvTranslationInfoV1* info, void* shader,
+    const RinShaderHeaderV1* header, uint32_t position_id, int apply,
+    uint32_t* output_count_out) {
+    const uint8_t* bytes = (const uint8_t*)shader;
+    uint32_t output_count = header->output_count;
+    uint32_t shader_index = 0u;
+    int in_entry = 0;
+    size_t cursor = 5u;
+
+    while (cursor < word_count) {
+        const uint32_t* instruction_words = &words[cursor];
+        uint16_t opcode = (uint16_t)(instruction_words[0] & 0xffffu);
+        uint16_t instruction_word_count =
+            (uint16_t)(instruction_words[0] >> 16u);
+        if (instruction_word_count == 0u ||
+            instruction_word_count > word_count - cursor)
+            return 0;
+        if (opcode == SPV_OP_FUNCTION) {
+            if (instruction_word_count < 3u) return 0;
+            in_entry = instruction_words[2] == info->entry_id;
+        } else if (opcode == SPV_OP_FUNCTION_END) {
+            in_entry = 0;
+        } else if (in_entry && opcode == SPV_OP_STORE) {
+            const RinSpirvIoV1* output = NULL;
+            uint32_t target;
+            uint32_t location;
+            uint32_t width;
+            int remap = 0;
+
+            if (instruction_word_count < 3u) return 0;
+            target = instruction_words[1];
+            if (target == position_id && position_id != 0u) {
+                location = 0u;
+                width = RIN_GPU_VULKAN_POSITION_OUTPUT_SLOTS;
+            } else {
+                output = find_io_id(info->outputs, info->output_count,
+                                    target);
+                if (!output) {
+                    cursor += instruction_word_count;
+                    continue;
+                }
+                location = output->location;
+                width = output->width;
+                remap = 1;
+                if (width == 0u || width > 4u ||
+                    location > RIN_SHADER_MAX_IO -
+                                   RIN_GPU_VULKAN_POSITION_OUTPUT_SLOTS - width)
+                    return 0;
+            }
+            if (width == 0u || width > 4u ||
+                location > RIN_SHADER_MAX_IO - width)
+                return 0;
+            for (uint32_t component = 0u; component < width; ++component) {
+                int found = 0;
+                while (shader_index < header->instruction_count) {
+                    RinShaderInstructionV1 translated;
+                    size_t offset = (size_t)header->header_size +
+                        (size_t)shader_index * sizeof(translated);
+                    memcpy(&translated, bytes + offset, sizeof(translated));
+                    ++shader_index;
+                    if (!shader_output_opcode(translated.opcode)) continue;
+                    if (translated.immediate != location + component)
+                        return 0;
+                    if (apply && remap) {
+                        translated.immediate +=
+                            RIN_GPU_VULKAN_POSITION_OUTPUT_SLOTS;
+                        memcpy((uint8_t*)shader + offset, &translated,
+                               sizeof(translated));
+                    }
+                    found = 1;
+                    break;
+                }
+                if (!found) return 0;
+            }
+            if (remap && output_count < location +
+                                             RIN_GPU_VULKAN_POSITION_OUTPUT_SLOTS +
+                                             width)
+                output_count = location +
+                               RIN_GPU_VULKAN_POSITION_OUTPUT_SLOTS + width;
+        }
+        cursor += instruction_word_count;
+    }
+
+    if (in_entry) return 0;
+    while (shader_index < header->instruction_count) {
+        RinShaderInstructionV1 translated;
+        size_t offset = (size_t)header->header_size +
+            (size_t)shader_index * sizeof(translated);
+        memcpy(&translated, bytes + offset, sizeof(translated));
+        ++shader_index;
+        if (shader_output_opcode(translated.opcode)) return 0;
+    }
+    *output_count_out = output_count;
+    return 1;
+}
+
+static int remap_vertex_outputs(const uint32_t* words, size_t word_count,
+                                void* shader_out, size_t shader_capacity,
+                                RinSpirvTranslationInfoV1* info) {
+    RinShaderHeaderV1 header;
+    uint32_t position_id = 0u;
+    uint32_t output_count = 0u;
+    size_t cursor = 5u;
+
+    if (!words || word_count < 5u || !shader_out || !info ||
+        info->entry_id == 0u)
+        return 0;
+    while (cursor < word_count) {
+        uint16_t opcode = (uint16_t)(words[cursor] & 0xffffu);
+        uint16_t instruction_word_count = (uint16_t)(words[cursor] >> 16u);
+        if (instruction_word_count == 0u ||
+            instruction_word_count > word_count - cursor)
+            return 0;
+        if (opcode == SPV_OP_DECORATE && instruction_word_count == 4u &&
+            words[cursor + 2u] == SPV_DECORATION_BUILT_IN &&
+            words[cursor + 3u] == SPV_BUILTIN_POSITION) {
+            if (position_id != 0u && position_id != words[cursor + 1u])
+                return 0;
+            position_id = words[cursor + 1u];
+        }
+        cursor += instruction_word_count;
+    }
+    if (position_id != 0u &&
+        find_io_id(info->outputs, info->output_count, position_id))
+        return 0;
+
+    memcpy(&header, shader_out, sizeof(header));
+    if (header.magic != RIN_SHADER_MAGIC ||
+        header.version != RIN_SHADER_IR_VERSION ||
+        header.header_size != sizeof(header) ||
+        header.stage != RIN_SHADER_STAGE_VERTEX ||
+        header.instruction_count > RIN_SHADER_MAX_INSTRUCTIONS ||
+        header.total_size > shader_capacity ||
+        header.total_size < sizeof(header) +
+                                (size_t)header.instruction_count *
+                                    sizeof(RinShaderInstructionV1))
+        return 0;
+    for (uint32_t index = 0u; index < info->output_count; ++index) {
+        const RinSpirvIoV1* output = &info->outputs[index];
+        if (output->width == 0u || output->width > 4u ||
+            output->location > RIN_SHADER_MAX_IO -
+                                   RIN_GPU_VULKAN_POSITION_OUTPUT_SLOTS -
+                                   output->width)
+            return 0;
+    }
+    if (!remap_vertex_output_stores_pass(
+            words, word_count, info, shader_out, &header, position_id, 0,
+            &output_count))
+        return 0;
+    if (!remap_vertex_output_stores_pass(
+            words, word_count, info, shader_out, &header, position_id, 1,
+            &output_count))
+        return 0;
+    for (uint32_t index = 0u; index < info->output_count; ++index)
+        info->outputs[index].location +=
+            RIN_GPU_VULKAN_POSITION_OUTPUT_SLOTS;
+    header.output_count = output_count;
+    memcpy(shader_out, &header, sizeof(header));
+    return ringpu_shader_validate(shader_out, header.total_size,
+                                  &info->shader) == RIN_SHADER_OK;
 }
 
 static int finite_float(float value) {
@@ -59,6 +250,12 @@ int ringpu_vulkan_graphics_translate_shader(
         return result == RIN_SPIRV_ERROR_NO_MEMORY
                    ? RIN_GPU_VULKAN_GRAPHICS_LIMIT
                    : RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
+    }
+    if (expected_stage == RIN_SHADER_STAGE_VERTEX &&
+        !remap_vertex_outputs(words, word_count, rin_shader_out,
+                              rin_shader_capacity, info_out)) {
+        memset(info_out, 0, sizeof(*info_out));
+        return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
     }
     if (!translation_info_valid(info_out, expected_stage)) {
         memset(info_out, 0, sizeof(*info_out));
@@ -135,7 +332,7 @@ static int graphics_state_valid(const RinGpuVulkanGraphicsStateV1* state) {
            state->render_pass_model == RIN_GPU_VULKAN_GRAPHICS_RENDER_PASS &&
            state->flags == 0u && state->reserved == 0u &&
            state->color_format != 0u && state->primitive_topology != 0u &&
-           state->position_output_location < RIN_SHADER_MAX_IO &&
+           state->position_output_location == 0u &&
            (!state->blend_enabled ||
             (finite_float(state->blend_constant_red) &&
              finite_float(state->blend_constant_green) &&
@@ -331,13 +528,20 @@ int ringpu_vulkan_graphics_build_pipeline(
     for (output_index = 0u; output_index < fragment->input_count;
          ++output_index) {
         const RinSpirvIoV1* input = &fragment->inputs[output_index];
-        const RinSpirvIoV1* output =
-            find_io(vertex->outputs, vertex->output_count, input->location);
-        if (!output || output->width != input->width ||
-            output->base_type != input->base_type || input->width == 0u ||
-            input->width > 4u)
+        uint32_t vertex_location;
+        const RinSpirvIoV1* output;
+        if (input->width == 0u || input->width > 4u ||
+            input->location > RIN_SHADER_MAX_IO -
+                                  RIN_GPU_VULKAN_POSITION_OUTPUT_SLOTS -
+                                  input->width)
             return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
-        if (input->location == state->position_output_location) continue;
+        vertex_location = input->location +
+                          RIN_GPU_VULKAN_POSITION_OUTPUT_SLOTS;
+        output = find_io(vertex->outputs, vertex->output_count,
+                         vertex_location);
+        if (!output || output->width != input->width ||
+            output->base_type != input->base_type)
+            return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
         if (varying_count > RIN_GPU_MAX_VARYINGS - input->width)
             return RIN_GPU_VULKAN_GRAPHICS_LIMIT;
         if (input->location > RIN_SHADER_MAX_IO - input->width)
