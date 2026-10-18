@@ -587,10 +587,10 @@ typedef struct RinVkSubmissionSlot {
     uint64_t process_compute_bind_group_token;
     uint64_t process_graphics_bind_group_token;
     uint32_t graphics_binding_count;
-    uint32_t graphics_reserved;
+    uint32_t graphics_binding_platform_version;
     uint32_t abort_cleanup_applied;
     uint32_t cleanup_reserved;
-    RinVulkanProductProcessGraphicsBindingV12 graphics_bindings[
+    RinVulkanProductProcessGraphicsBindingV14 graphics_bindings[
         RIN_GPU_VULKAN_COMPUTE_MAX_BINDINGS];
     RinVkFence fence;
     uint32_t wait_semaphore_count;
@@ -665,6 +665,7 @@ static uintptr_t g_product_binding_v10;
 static uintptr_t g_product_binding_v11;
 static uintptr_t g_product_binding_v12;
 static uintptr_t g_product_binding_v13;
+static uintptr_t g_product_binding_v14;
 static uint32_t g_active_product_calls;
 static volatile uint64_t g_next_process_bind_group_token = UINT64_C(1);
 static volatile uint64_t g_next_process_graphics_bind_group_token =
@@ -1527,6 +1528,17 @@ static RinVulkanProductPlatformV13* product_v13_for_base(
     return platform->base == base ? platform : NULL;
 }
 
+static RinVulkanProductPlatformV14* product_v14_for_base(
+        const RinVulkanProductPlatformV13* base) {
+    const uintptr_t binding =
+        __atomic_load_n(&g_product_binding_v14, __ATOMIC_ACQUIRE);
+    RinVulkanProductPlatformV14* platform;
+    if (binding == 0u || binding == RIN_VK_ICD_BINDING_TRANSITION)
+        return NULL;
+    platform = (RinVulkanProductPlatformV14*)binding;
+    return platform->base == base ? platform : NULL;
+}
+
 /* Keep the V10 adapter pinned by the same product-call lease used by the
  * callback. A V7 process pipeline chain without V10 is reported to the caller
  * as a missing process graphics provider, never silently downgraded. */
@@ -1634,6 +1646,47 @@ acquire_process_graphics_bind_group_platform(int* process_platform_required) {
     product_v12 = product_v11 ? product_v12_for_base(product_v11) : NULL;
     if (!product_v12) release_product();
     return product_v12;
+}
+
+static RinVulkanProductPlatformV14*
+acquire_process_graphics_bind_group_platform_v14(
+        int* process_platform_required) {
+    RinVulkanProductPlatformV1* product = acquire_product();
+    RinVulkanProductPlatformV2* product_v2;
+    RinVulkanProductPlatformV3* product_v3;
+    RinVulkanProductPlatformV4* product_v4;
+    RinVulkanProductPlatformV5* product_v5;
+    RinVulkanProductPlatformV6* product_v6;
+    RinVulkanProductPlatformV7* product_v7;
+    RinVulkanProductPlatformV8* product_v8;
+    RinVulkanProductPlatformV9* product_v9;
+    RinVulkanProductPlatformV10* product_v10;
+    RinVulkanProductPlatformV11* product_v11;
+    RinVulkanProductPlatformV12* product_v12;
+    RinVulkanProductPlatformV13* product_v13;
+    RinVulkanProductPlatformV14* product_v14;
+    if (process_platform_required) *process_platform_required = 0;
+    if (!product) return NULL;
+    product_v2 = product_v2_for_base(product);
+    product_v3 = product_v2 ? product_v3_for_base(product_v2) : NULL;
+    product_v4 = product_v3 ? product_v4_for_base(product_v3) : NULL;
+    product_v5 = product_v4 ? product_v5_for_base(product_v4) : NULL;
+    product_v6 = product_v5 ? product_v6_for_base(product_v5) : NULL;
+    product_v7 = product_v6 ? product_v7_for_base(product_v6) : NULL;
+    if (!product_v7) {
+        release_product();
+        return NULL;
+    }
+    if (process_platform_required) *process_platform_required = 1;
+    product_v8 = product_v8_for_base(product_v7);
+    product_v9 = product_v8 ? product_v9_for_base(product_v8) : NULL;
+    product_v10 = product_v9 ? product_v10_for_base(product_v9) : NULL;
+    product_v11 = product_v10 ? product_v11_for_base(product_v10) : NULL;
+    product_v12 = product_v11 ? product_v12_for_base(product_v11) : NULL;
+    product_v13 = product_v12 ? product_v13_for_base(product_v12) : NULL;
+    product_v14 = product_v13 ? product_v14_for_base(product_v13) : NULL;
+    if (!product_v14) release_product();
+    return product_v14;
 }
 
 /* Holds one active product call until the returned V9 query callback finishes.
@@ -5658,26 +5711,44 @@ static int release_process_compute_bind_group(
 
 static int release_process_graphics_bind_group(
         RinVkSubmissionSlot* slot) {
-    RinVulkanProductPlatformV12* process_platform;
+    RinVulkanProductPlatformV12* process_platform_v12;
+    RinVulkanProductPlatformV14* process_platform_v14;
     uint64_t token;
     int process_platform_required = 0;
     int result;
     if (!slot || slot->process_graphics_bind_group_token == 0u)
         return RIN_VULKAN_PRODUCT_OK;
     token = slot->process_graphics_bind_group_token;
-    process_platform =
-        acquire_process_graphics_bind_group_platform(
-            &process_platform_required);
-    if (!process_platform)
-        return process_platform_required
-                   ? RIN_VULKAN_PRODUCT_STATE
-                   : RIN_VULKAN_PRODUCT_UNSUPPORTED;
-    result = process_platform->destroy_process_graphics_bind_group(
-        process_platform->context, token);
+    if (slot->graphics_binding_platform_version ==
+        RIN_VULKAN_PRODUCT_PLATFORM_V14_VERSION) {
+        process_platform_v14 =
+            acquire_process_graphics_bind_group_platform_v14(
+                &process_platform_required);
+        if (!process_platform_v14)
+            return process_platform_required
+                       ? RIN_VULKAN_PRODUCT_STATE
+                       : RIN_VULKAN_PRODUCT_UNSUPPORTED;
+        result = process_platform_v14->destroy_process_graphics_bind_group(
+            process_platform_v14->context, token);
+    } else if (slot->graphics_binding_platform_version ==
+               RIN_VULKAN_PRODUCT_PLATFORM_V12_VERSION) {
+        process_platform_v12 =
+            acquire_process_graphics_bind_group_platform(
+                &process_platform_required);
+        if (!process_platform_v12)
+            return process_platform_required
+                       ? RIN_VULKAN_PRODUCT_STATE
+                       : RIN_VULKAN_PRODUCT_UNSUPPORTED;
+        result = process_platform_v12->destroy_process_graphics_bind_group(
+            process_platform_v12->context, token);
+    } else {
+        return RIN_VULKAN_PRODUCT_PROTOCOL;
+    }
     release_product();
     if (result == RIN_VULKAN_PRODUCT_OK) {
         slot->process_graphics_bind_group_token = 0u;
         slot->graphics_binding_count = 0u;
+        slot->graphics_binding_platform_version = 0u;
         memset(slot->graphics_bindings, 0,
                sizeof(slot->graphics_bindings));
     }
@@ -5696,6 +5767,9 @@ static int submit_canonical_process_commands(
     RinVulkanProductPlatformV7* process_platform;
     RinVulkanProductPlatformV8* process_platform_v8;
     RinVulkanProductPlatformV12* process_platform_v12;
+    RinVulkanProductPlatformV14* process_platform_v14;
+    RinVulkanProductProcessGraphicsBindingV12 legacy_graphics_bindings[
+        RIN_GPU_VULKAN_COMPUTE_MAX_BINDINGS];
     RinVulkanProductProcessComputeBindingV8 process_bindings[
         RIN_GPU_VULKAN_COMPUTE_MAX_BINDINGS];
     uint32_t command_count = 0u;
@@ -5710,6 +5784,7 @@ static int submit_canonical_process_commands(
                               ? product_v8_for_base(process_platform)
                               : NULL;
     memset(process_bindings, 0, sizeof(process_bindings));
+    memset(legacy_graphics_bindings, 0, sizeof(legacy_graphics_bindings));
     memset(graphics_submit_resources, 0,
            sizeof(graphics_submit_resources));
     if (slot->compute_packet) {
@@ -5818,26 +5893,36 @@ static int submit_canonical_process_commands(
             return RIN_VULKAN_PRODUCT_PROTOCOL;
         if (pipeline->descriptor_count != 0u) {
             uint32_t binding_index;
-            process_platform_v12 =
-                acquire_process_graphics_bind_group_platform(
-                    &process_platform_required);
-            if (!process_platform_v12)
-                return process_platform_required
-                           ? RIN_VULKAN_PRODUCT_UNSUPPORTED
-                           : RIN_VULKAN_PRODUCT_STATE;
             if (slot->graphics_binding_count != pipeline->descriptor_count ||
                 pipeline->descriptor_count >
                     RIN_GPU_VULKAN_COMPUTE_MAX_BINDINGS) {
-                release_product();
                 return RIN_VULKAN_PRODUCT_PROTOCOL;
             }
             for (binding_index = 0u;
                  binding_index < slot->graphics_binding_count;
                  ++binding_index) {
-                const RinVulkanProductProcessGraphicsBindingV12* binding =
+                const RinVulkanProductProcessGraphicsBindingV14* binding =
                     &slot->graphics_bindings[binding_index];
                 uint32_t resource_index;
                 int found = 0;
+                if (binding->struct_size != sizeof(*binding) ||
+                    binding->version !=
+                        RIN_VULKAN_PRODUCT_PROCESS_GRAPHICS_BINDING_V14_VERSION ||
+                    !rin_gpu_process_graphics_binding_v2_valid(
+                        &binding->binding) ||
+                    binding->binding.binding != binding_index ||
+                    binding->binding.kind !=
+                        RIN_GPU_PROCESS_GRAPHICS_RESOURCE_STORAGE_BUFFER_V2 ||
+                    binding->allocation_handle == 0u ||
+                    binding->resource_size_bytes == 0u ||
+                    binding->allocation_offset >
+                        UINT64_MAX - binding->resource_size_bytes ||
+                    binding->binding.offset > binding->resource_size_bytes ||
+                    binding->binding.size_bytes >
+                        binding->resource_size_bytes -
+                            binding->binding.offset) {
+                    return RIN_VULKAN_PRODUCT_UNSUPPORTED;
+                }
                 for (resource_index = 0u;
                      resource_index < slot->resource_count;
                      ++resource_index) {
@@ -5847,8 +5932,7 @@ static int submit_canonical_process_commands(
                         break;
                     }
                 }
-                if (!found || binding->resource_index != binding_index) {
-                    release_product();
+                if (!found) {
                     return RIN_VULKAN_PRODUCT_PROTOCOL;
                 }
             }
@@ -5858,14 +5942,72 @@ static int submit_canonical_process_commands(
                 release_product();
                 return RIN_VULKAN_PRODUCT_LIMIT;
             }
-            result = process_platform_v12->create_process_graphics_bind_group(
-                process_platform_v12->context,
-                slot->process_graphics_bind_group_token,
-                pipeline->process_graphics_pipeline_token,
-                slot->graphics_bindings, slot->graphics_binding_count);
-            release_product();
+            process_platform_v14 =
+                acquire_process_graphics_bind_group_platform_v14(
+                    &process_platform_required);
+            if (process_platform_v14) {
+                result =
+                    process_platform_v14->create_process_graphics_bind_group(
+                        process_platform_v14->context,
+                        slot->process_graphics_bind_group_token,
+                        pipeline->process_graphics_pipeline_token,
+                        slot->graphics_bindings,
+                        slot->graphics_binding_count);
+                slot->graphics_binding_platform_version =
+                    RIN_VULKAN_PRODUCT_PLATFORM_V14_VERSION;
+                release_product();
+            } else {
+                uint32_t legacy_index;
+                process_platform_v12 =
+                    acquire_process_graphics_bind_group_platform(
+                        &process_platform_required);
+                if (!process_platform_v12) {
+                    slot->process_graphics_bind_group_token = 0u;
+                    return process_platform_required
+                               ? RIN_VULKAN_PRODUCT_UNSUPPORTED
+                               : RIN_VULKAN_PRODUCT_STATE;
+                }
+                for (legacy_index = 0u;
+                     legacy_index < slot->graphics_binding_count;
+                     ++legacy_index) {
+                    const RinVulkanProductProcessGraphicsBindingV14* source =
+                        &slot->graphics_bindings[legacy_index];
+                    RinVulkanProductProcessGraphicsBindingV12* target =
+                        &legacy_graphics_bindings[legacy_index];
+                    if (source->binding.kind !=
+                        RIN_GPU_PROCESS_GRAPHICS_RESOURCE_STORAGE_BUFFER_V2) {
+                        release_product();
+                        slot->process_graphics_bind_group_token = 0u;
+                        return RIN_VULKAN_PRODUCT_UNSUPPORTED;
+                    }
+                    target->struct_size = sizeof(*target);
+                    target->version =
+                        RIN_VULKAN_PRODUCT_PROCESS_GRAPHICS_BINDING_V12_VERSION;
+                    target->resource_index = source->binding.binding;
+                    target->access = source->binding.access;
+                    target->resource_cookie =
+                        source->binding.resource_cookie;
+                    target->allocation_handle = source->allocation_handle;
+                    target->allocation_offset = source->allocation_offset;
+                    target->resource_size_bytes =
+                        source->resource_size_bytes;
+                    target->offset = source->binding.offset;
+                    target->size_bytes = source->binding.size_bytes;
+                }
+                result =
+                    process_platform_v12->create_process_graphics_bind_group(
+                        process_platform_v12->context,
+                        slot->process_graphics_bind_group_token,
+                        pipeline->process_graphics_pipeline_token,
+                        legacy_graphics_bindings,
+                        slot->graphics_binding_count);
+                slot->graphics_binding_platform_version =
+                    RIN_VULKAN_PRODUCT_PLATFORM_V12_VERSION;
+                release_product();
+            }
             if (result != RIN_VULKAN_PRODUCT_OK) {
                 slot->process_graphics_bind_group_token = 0u;
+                slot->graphics_binding_platform_version = 0u;
                 return result;
             }
         } else if (slot->graphics_binding_count != 0u) {
@@ -5889,7 +6031,8 @@ static int submit_canonical_process_commands(
                      binding_index < slot->graphics_binding_count;
                      ++binding_index)
                     if (slot->resources[resource_index].allocation_handle ==
-                        slot->graphics_bindings[binding_index].allocation_handle) {
+                        slot->graphics_bindings[binding_index]
+                            .allocation_handle) {
                         is_group_resource = 1;
                         break;
                     }
@@ -8790,6 +8933,7 @@ int rin_gpu_vulkan_icd_unbind_product_platform_v13(
     if (platform->struct_size != sizeof(*platform) ||
         platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V13_VERSION ||
         !platform->base ||
+        __atomic_load_n(&g_product_binding_v14, __ATOMIC_ACQUIRE) != 0u ||
         __atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
         process_image_slots_active()) {
         __atomic_store_n(&g_product_binding_v13, (uintptr_t)platform,
@@ -8797,6 +8941,62 @@ int rin_gpu_vulkan_icd_unbind_product_platform_v13(
         return RIN_GPU_VULKAN_BUSY;
     }
     __atomic_store_n(&g_product_binding_v13, 0u, __ATOMIC_RELEASE);
+    return RIN_GPU_VULKAN_OK;
+}
+
+int rin_gpu_vulkan_icd_bind_product_platform_v14(
+        RinVulkanProductPlatformV14* platform) {
+    uintptr_t expected = 0u;
+    uintptr_t v13_binding;
+    if (!platform || (uintptr_t)platform == RIN_VK_ICD_BINDING_TRANSITION ||
+        platform->struct_size != sizeof(*platform) ||
+        platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V14_VERSION ||
+        !platform->base || !platform->context ||
+        !platform->create_process_graphics_bind_group ||
+        !platform->destroy_process_graphics_bind_group ||
+        !wsi_zero_words(platform->reserved, 2u))
+        return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    if (!__atomic_compare_exchange_n(&g_product_binding_v14, &expected,
+                                     RIN_VK_ICD_BINDING_TRANSITION, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        return RIN_GPU_VULKAN_BUSY;
+    v13_binding =
+        __atomic_load_n(&g_product_binding_v13, __ATOMIC_ACQUIRE);
+    if (v13_binding == 0u ||
+        v13_binding == RIN_VK_ICD_BINDING_TRANSITION ||
+        v13_binding != (uintptr_t)platform->base ||
+        !platform->base->base ||
+        __atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
+        process_graphics_bind_group_slots_active()) {
+        __atomic_store_n(&g_product_binding_v14, 0u, __ATOMIC_RELEASE);
+        return RIN_GPU_VULKAN_BUSY;
+    }
+    __atomic_store_n(&g_product_binding_v14, (uintptr_t)platform,
+                     __ATOMIC_RELEASE);
+    return RIN_GPU_VULKAN_OK;
+}
+
+int rin_gpu_vulkan_icd_unbind_product_platform_v14(
+        RinVulkanProductPlatformV14* platform) {
+    uintptr_t expected;
+    if (!platform) return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    expected = (uintptr_t)platform;
+    if (!__atomic_compare_exchange_n(
+            &g_product_binding_v14, &expected,
+            RIN_VK_ICD_BINDING_TRANSITION, 0, __ATOMIC_ACQ_REL,
+            __ATOMIC_RELAXED))
+        return expected == 0u ? RIN_GPU_VULKAN_NOT_INITIALIZED
+                              : RIN_GPU_VULKAN_BUSY;
+    if (platform->struct_size != sizeof(*platform) ||
+        platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V14_VERSION ||
+        !platform->base ||
+        __atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
+        process_graphics_bind_group_slots_active()) {
+        __atomic_store_n(&g_product_binding_v14, (uintptr_t)platform,
+                         __ATOMIC_RELEASE);
+        return RIN_GPU_VULKAN_BUSY;
+    }
+    __atomic_store_n(&g_product_binding_v14, 0u, __ATOMIC_RELEASE);
     return RIN_GPU_VULKAN_OK;
 }
 
@@ -16826,7 +17026,7 @@ static RinVkResult snapshot_graphics_submission(
         RinVulkanProductResourceV1 resources[], uint32_t* resource_count_out,
         RinVkBufferOwnershipUpdate** ownership_updates_out,
         uint32_t* ownership_update_count_out,
-        RinVulkanProductProcessGraphicsBindingV12 graphics_bindings_out[],
+        RinVulkanProductProcessGraphicsBindingV14 graphics_bindings_out[],
         uint32_t* graphics_binding_count_out) {
     RinGpuVulkanCommandBufferV1* command;
     RinVkPipelineSlot* pipeline;
@@ -16981,7 +17181,7 @@ static RinVkResult snapshot_graphics_submission(
         const RinSpirvDescriptorV1* descriptor =
             &pipeline->descriptors[descriptor_index];
         RinGpuVulkanDescriptorWriteV1 write;
-        RinVulkanProductProcessGraphicsBindingV12* target =
+        RinVulkanProductProcessGraphicsBindingV14* target =
             &graphics_bindings_out[descriptor_index];
         RinVkBufferSlot* buffer;
         RinVkBufferOwnershipUpdate* update =
@@ -17072,15 +17272,30 @@ static RinVkResult snapshot_graphics_submission(
             }
         target->struct_size = sizeof(*target);
         target->version =
-            RIN_VULKAN_PRODUCT_PROCESS_GRAPHICS_BINDING_V12_VERSION;
-        target->resource_index = descriptor->resource_index;
-        target->access = write.access;
-        target->resource_cookie = write.resource;
+            RIN_VULKAN_PRODUCT_PROCESS_GRAPHICS_BINDING_V14_VERSION;
+        target->binding.struct_size = sizeof(target->binding);
+        target->binding.version =
+            RIN_GPU_PROCESS_GRAPHICS_BINDING_V2_VERSION;
+        target->binding.kind =
+            RIN_GPU_PROCESS_GRAPHICS_RESOURCE_STORAGE_BUFFER_V2;
+        target->binding.binding = descriptor->resource_index;
+        if ((write.access & RIN_GPU_RESOURCE_READ) != 0u)
+            target->binding.access |=
+                RIN_GPU_PROCESS_GRAPHICS_ACCESS_READ;
+        if ((write.access & RIN_GPU_RESOURCE_WRITE) != 0u)
+            target->binding.access |=
+                RIN_GPU_PROCESS_GRAPHICS_ACCESS_WRITE;
+        target->binding.resource_cookie = write.resource;
+        target->binding.offset = write.offset;
+        target->binding.size_bytes = write.size_bytes;
         target->allocation_handle = buffer->memory->product_allocation;
         target->allocation_offset = buffer->memory_offset;
         target->resource_size_bytes = buffer->size;
-        target->offset = write.offset;
-        target->size_bytes = write.size_bytes;
+        if (!rin_gpu_process_graphics_binding_v2_valid(
+                &target->binding)) {
+            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+            goto fail;
+        }
         if ((write.access & RIN_GPU_RESOURCE_READ) != 0u)
             required_access |= RIN_VULKAN_PRODUCT_MEMORY_GPU_READ;
         if ((write.access & RIN_GPU_RESOURCE_WRITE) != 0u)
@@ -18425,7 +18640,7 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
     size_t validation_graphics_packet_size = 0u;
     RinVkBufferOwnershipUpdate* validation_graphics_ownership_updates = NULL;
     uint32_t validation_graphics_ownership_update_count = 0u;
-    RinVulkanProductProcessGraphicsBindingV12
+    RinVulkanProductProcessGraphicsBindingV14
         validation_graphics_bindings[RIN_GPU_VULKAN_COMPUTE_MAX_BINDINGS];
     uint32_t validation_graphics_binding_count = 0u;
     RinVulkanProductResourceV1
