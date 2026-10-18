@@ -132,6 +132,12 @@ typedef struct TestSdkProcessResource {
     RinGpuProcessResourceBindingV1 binding;
 } TestSdkProcessResource;
 
+typedef struct TestSdkProcessImage {
+    uint32_t active;
+    uint32_t reserved;
+    RinGpuProcessImageViewV1 image;
+} TestSdkProcessImage;
+
 #define TEST_SDK_PROCESS_QUERY_CAPACITY 4u
 #define TEST_SDK_PROCESS_COMMAND_CAPTURE 8u
 
@@ -156,11 +162,13 @@ typedef struct TestProductAdapters {
     RinVulkanProductPlatformV10* v10;
     RinVulkanProductPlatformV11* v11;
     RinVulkanProductPlatformV12* v12;
+    RinVulkanProductPlatformV13 v13;
     RinVulkanProductPlatformV6 software_v6;
     RinVulkanRinOSProcessSubmitBackendV8 process_submit_backend;
     TestSdkProcessQueue sdk_queues[RIN_GPU_PROCESS_MAX_QUEUES_V1];
     TestSdkProcessResource sdk_resources[
         RIN_GPU_PROCESS_MAX_COMPUTE_BINDINGS_V1];
+    TestSdkProcessImage sdk_process_images[128];
     TestSdkProcessQuery sdk_queries[TEST_SDK_PROCESS_QUERY_CAPACITY];
     uint32_t sdk_queue_bind_calls;
     uint32_t sdk_queue_release_calls;
@@ -180,6 +188,15 @@ typedef struct TestProductAdapters {
         RIN_GPU_PROCESS_MAX_RESOURCES_V1];
     uint32_t sdk_resource_bind_calls;
     uint32_t sdk_resource_unbind_calls;
+    uint32_t sdk_process_image_create_calls;
+    uint32_t sdk_process_image_active_count;
+    int process_image_create_result;
+    int process_image_destroy_result;
+    uint32_t process_image_create_calls;
+    uint32_t process_image_destroy_calls;
+    uint32_t process_image_active;
+    uint64_t process_image_token;
+    RinVulkanProductProcessImageV13 process_image_descriptor;
     uint32_t sdk_bind_group_create_calls;
     uint32_t sdk_bind_group_destroy_busy_attempts;
     RinGpuProcessResourceBindingV1 sdk_last_resource_binding;
@@ -993,6 +1010,47 @@ static int test_unbind_resource_v5(void* context, uint64_t resource_cookie) {
         return RIN_VULKAN_PRODUCT_OK;
     }
     return RIN_VULKAN_PRODUCT_STATE;
+}
+
+static int test_create_process_image_v13(
+        void* context, uint64_t image_token,
+        const RinVulkanProductProcessImageV13* descriptor) {
+    TestProductAdapters* adapters = (TestProductAdapters*)context;
+    if (!adapters || !descriptor || image_token == 0u ||
+        descriptor->struct_size != sizeof(*descriptor) ||
+        descriptor->version !=
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_V13_VERSION ||
+        descriptor->resource_cookie == 0u ||
+        descriptor->allocation_handle == 0u ||
+        descriptor->allocation_size_bytes == 0u)
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    ++adapters->process_image_create_calls;
+    if (adapters->process_image_create_result != RIN_VULKAN_PRODUCT_OK)
+        return adapters->process_image_create_result;
+    if (adapters->process_image_active != 0u)
+        return RIN_VULKAN_PRODUCT_BUSY;
+    adapters->process_image_token = image_token;
+    adapters->process_image_descriptor = *descriptor;
+    adapters->process_image_active = 1u;
+    return RIN_VULKAN_PRODUCT_OK;
+}
+
+static int test_destroy_process_image_v13(void* context,
+                                          uint64_t image_token) {
+    TestProductAdapters* adapters = (TestProductAdapters*)context;
+    if (!adapters || image_token == 0u)
+        return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
+    ++adapters->process_image_destroy_calls;
+    if (adapters->process_image_destroy_result != RIN_VULKAN_PRODUCT_OK)
+        return adapters->process_image_destroy_result;
+    if (adapters->process_image_active != 1u ||
+        adapters->process_image_token != image_token)
+        return RIN_VULKAN_PRODUCT_STATE;
+    adapters->process_image_token = 0u;
+    adapters->process_image_active = 0u;
+    memset(&adapters->process_image_descriptor, 0,
+           sizeof(adapters->process_image_descriptor));
+    return RIN_VULKAN_PRODUCT_OK;
 }
 
 static const TestResourceBinding* test_find_resource_binding(
@@ -2250,6 +2308,49 @@ RinResult rin_gpu_process_resource_unbind_v1(
     return RIN_ERROR_STALE_HANDLE;
 }
 
+RinResult rin_gpu_process_image_create_v1(
+    uint64_t device_id, uint64_t device_generation,
+    const RinGpuProcessImageViewV1* image) {
+    TestProductAdapters* adapters = g_process_submit_adapters;
+    TestSdkProcessImage* free_slot = NULL;
+    uint32_t resource_index;
+    uint32_t image_index;
+    if (!adapters || device_id != TEST_PROCESS_SUBMIT_DEVICE_ID ||
+        device_generation != TEST_PROCESS_SUBMIT_DEVICE_GENERATION ||
+        !rin_gpu_process_image_create_desc_v1_valid(image))
+        return RIN_ERROR_INVALID_ARGUMENT;
+    ++adapters->sdk_process_image_create_calls;
+    for (resource_index = 0u;
+         resource_index < RIN_GPU_PROCESS_MAX_COMPUTE_BINDINGS_V1;
+         ++resource_index) {
+        const TestSdkProcessResource* resource =
+            &adapters->sdk_resources[resource_index];
+        if (resource->active == 1u &&
+            resource->binding.resource_cookie == image->resource_cookie &&
+            resource->binding.allocation_offset == image->allocation_offset &&
+            resource->binding.size_bytes == image->allocation_size_bytes)
+            break;
+    }
+    if (resource_index == RIN_GPU_PROCESS_MAX_COMPUTE_BINDINGS_V1)
+        return RIN_ERROR_STALE_HANDLE;
+    for (image_index = 0u;
+         image_index < sizeof(adapters->sdk_process_images) /
+                           sizeof(adapters->sdk_process_images[0]);
+         ++image_index) {
+        TestSdkProcessImage* slot =
+            &adapters->sdk_process_images[image_index];
+        if (slot->active == 1u &&
+            slot->image.image_token == image->image_token)
+            return RIN_ERROR_BUSY;
+        if (slot->active == 0u && !free_slot) free_slot = slot;
+    }
+    if (!free_slot) return RIN_ERROR_TABLE_FULL;
+    free_slot->image = *image;
+    free_slot->active = 1u;
+    ++adapters->sdk_process_image_active_count;
+    return RIN_SUCCESS;
+}
+
 RinResult rin_gpu_process_compute_bind_group_create_v1(
     uint64_t device_id, uint64_t device_generation,
     uint64_t bind_group_token, uint64_t pipeline_token,
@@ -2411,6 +2512,27 @@ RinResult rin_gpu_process_object_destroy_v1(
                    sizeof(adapters->sdk_queries[index]));
             break;
         }
+    }
+    if ((object_token >> 48u) ==
+        RIN_VULKAN_PRODUCT_PROCESS_IMAGE_TOKEN_TAG) {
+        for (index = 0u;
+             index < sizeof(adapters->sdk_process_images) /
+                         sizeof(adapters->sdk_process_images[0]);
+             ++index) {
+            TestSdkProcessImage* image =
+                &adapters->sdk_process_images[index];
+            if (image->active != 1u ||
+                image->image.image_token != object_token)
+                continue;
+            if (adapters->sdk_process_image_active_count == 0u)
+                return RIN_ERROR_INTEGRITY;
+            memset(image, 0, sizeof(*image));
+            --adapters->sdk_process_image_active_count;
+            break;
+        }
+        if (index == sizeof(adapters->sdk_process_images) /
+                         sizeof(adapters->sdk_process_images[0]))
+            return RIN_ERROR_STALE_HANDLE;
     }
     return RIN_SUCCESS;
 }
@@ -3167,6 +3289,14 @@ static int initialize_product_adapters(
             adapters->v11->base != adapters->v10 ||
             adapters->v12->base != adapters->v11)
             return RIN_VULKAN_PRODUCT_STATE;
+        adapters->v13.struct_size = sizeof(adapters->v13);
+        adapters->v13.version = RIN_VULKAN_PRODUCT_PLATFORM_V13_VERSION;
+        adapters->v13.base = adapters->v12;
+        adapters->v13.context = adapters;
+        adapters->v13.create_process_image = test_create_process_image_v13;
+        adapters->v13.destroy_process_image = test_destroy_process_image_v13;
+        adapters->process_image_create_result = RIN_VULKAN_PRODUCT_OK;
+        adapters->process_image_destroy_result = RIN_VULKAN_PRODUCT_OK;
     }
     return RIN_VULKAN_PRODUCT_OK;
 }
@@ -4048,7 +4178,17 @@ static int test_process_graphics_pipeline_create(
         rin_gpu_vulkan_icd_unbind_product_platform_v12(adapters->v12) ==
             RIN_GPU_VULKAN_BUSY);
     adapters->sdk_bind_group_destroy_busy_attempts = 3u;
-    PROCESS_GRAPHICS_CHECK(vkQueueWaitIdle(queue) == RIN_VK_SUCCESS);
+    {
+        const RinVkResult idle_result = vkQueueWaitIdle(queue);
+        if (idle_result != RIN_VK_SUCCESS)
+            fprintf(stderr,
+                    "process graphics queue wait returned %d; SDK destroy=%u "
+                    "bind-group active=%u image-token-active=%u\n",
+                    idle_result, adapters->sdk_object_destroy_calls,
+                    adapters->sdk_graphics_bind_group_active,
+                    adapters->sdk_process_image_active_count);
+        PROCESS_GRAPHICS_CHECK(idle_result == RIN_VK_SUCCESS);
+    }
     target_binding = test_find_resource_binding(adapters, image);
     storage_binding = test_find_resource_binding(adapters, storage_buffer);
     fprintf(stderr,
@@ -6386,6 +6526,151 @@ done:
     return result;
 }
 
+static int test_process_image_platform_v13(
+        RinVkDevice device, TestProductAdapters* adapters) {
+    RinVkImageCreateInfo create_info;
+    RinVkMemoryRequirements requirements;
+    RinVkMemoryAllocateInfo allocation_info;
+    RinVkImage image = 0u;
+    RinVkDeviceMemory memory = 0u;
+    uint32_t baseline_resources;
+    uint32_t baseline_binds;
+    uint32_t baseline_unbinds;
+    uint32_t extension_bound = 0u;
+    uint32_t stage = 0u;
+    int result = -1;
+
+    if (!device || !adapters || !adapters->v12 ||
+        rin_gpu_vulkan_icd_bind_product_platform_v13(&adapters->v13) !=
+            RIN_GPU_VULKAN_OK)
+        return -1;
+    extension_bound = 1u;
+    stage = 1u;
+    if (rin_gpu_vulkan_icd_unbind_product_platform_v12(adapters->v12) !=
+        RIN_GPU_VULKAN_BUSY)
+        goto done;
+
+    memset(&create_info, 0, sizeof(create_info));
+    create_info.sType = RIN_VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    create_info.imageType = RIN_VK_IMAGE_TYPE_2D;
+    create_info.format = RIN_VK_FORMAT_R8G8B8A8_UNORM;
+    create_info.extent.width = 16u;
+    create_info.extent.height = 8u;
+    create_info.extent.depth = 1u;
+    create_info.mipLevels = 1u;
+    create_info.arrayLayers = 1u;
+    create_info.samples = RIN_VK_SAMPLE_COUNT_1_BIT;
+    create_info.tiling = RIN_VK_IMAGE_TILING_OPTIMAL;
+    create_info.usage = RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                        RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                        RIN_VK_IMAGE_USAGE_SAMPLED_BIT |
+                        RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    create_info.sharingMode = RIN_VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateImage(device, &create_info, NULL, &image) != RIN_VK_SUCCESS)
+        goto done;
+    stage = 2u;
+    memset(&requirements, 0, sizeof(requirements));
+    vkGetImageMemoryRequirements(device, image, &requirements);
+    if (requirements.size == 0u ||
+        (requirements.memoryTypeBits & UINT32_C(1)) == 0u)
+        goto done;
+    memset(&allocation_info, 0, sizeof(allocation_info));
+    allocation_info.sType = RIN_VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocation_info.allocationSize = requirements.size;
+    allocation_info.memoryTypeIndex = 0u;
+    if (vkAllocateMemory(device, &allocation_info, NULL, &memory) !=
+        RIN_VK_SUCCESS)
+        goto done;
+
+    stage = 3u;
+    baseline_resources = adapters->active_resource_count;
+    baseline_binds = adapters->resource_bind_calls;
+    baseline_unbinds = adapters->resource_unbind_calls;
+    adapters->process_image_create_result = RIN_VULKAN_PRODUCT_UNSUPPORTED;
+    if (vkBindImageMemory(device, image, memory, 0u) !=
+            RIN_VK_ERROR_FEATURE_NOT_PRESENT ||
+        adapters->process_image_create_calls != 1u ||
+        adapters->process_image_active != 0u ||
+        adapters->active_resource_count != baseline_resources ||
+        adapters->resource_bind_calls != baseline_binds + 1u ||
+        adapters->resource_unbind_calls != baseline_unbinds + 1u)
+        goto done;
+
+    adapters->process_image_create_result = RIN_VULKAN_PRODUCT_OK;
+    stage = 4u;
+    if (vkBindImageMemory(device, image, memory, 0u) != RIN_VK_SUCCESS ||
+        adapters->process_image_create_calls != 2u ||
+        adapters->process_image_active != 1u ||
+        adapters->process_image_token == 0u ||
+        (adapters->process_image_token >> 48u) !=
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_TOKEN_TAG ||
+        adapters->process_image_descriptor.resource_cookie != image ||
+        adapters->process_image_descriptor.allocation_handle == 0u ||
+        adapters->process_image_descriptor.allocation_size_bytes !=
+            requirements.size ||
+        adapters->process_image_descriptor.width != 16u ||
+        adapters->process_image_descriptor.height != 8u ||
+        adapters->process_image_descriptor.sample_count != 1u ||
+        adapters->process_image_descriptor.format !=
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_FORMAT_RGBA8_UNORM_V13 ||
+        adapters->process_image_descriptor.usage !=
+            (RIN_VULKAN_PRODUCT_PROCESS_IMAGE_USAGE_COPY_SOURCE_V13 |
+             RIN_VULKAN_PRODUCT_PROCESS_IMAGE_USAGE_COPY_DESTINATION_V13 |
+             RIN_VULKAN_PRODUCT_PROCESS_IMAGE_USAGE_SAMPLED_V13 |
+             RIN_VULKAN_PRODUCT_PROCESS_IMAGE_USAGE_COLOR_TARGET_V13) ||
+        adapters->process_image_descriptor.logical_layout !=
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_LAYOUT_UNDEFINED_V13 ||
+        adapters->process_image_descriptor.aspect_mask !=
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_ASPECT_COLOR_V13)
+        goto done;
+
+    adapters->process_image_destroy_result = RIN_VULKAN_PRODUCT_BUSY;
+    stage = 5u;
+    vkDestroyImage(device, image, NULL);
+    if (adapters->process_image_destroy_calls != 1u ||
+        adapters->process_image_active != 1u ||
+        adapters->active_resource_count != baseline_resources + 1u ||
+        rin_gpu_vulkan_icd_unbind_product_platform_v13(&adapters->v13) !=
+            RIN_GPU_VULKAN_BUSY)
+        goto done;
+    adapters->process_image_destroy_result = RIN_VULKAN_PRODUCT_OK;
+    stage = 6u;
+    vkDestroyImage(device, image, NULL);
+    if (adapters->process_image_destroy_calls != 2u ||
+        adapters->process_image_active != 0u ||
+        adapters->active_resource_count != baseline_resources ||
+        adapters->resource_unbind_calls != baseline_unbinds + 2u)
+        goto done;
+    image = 0u;
+    vkFreeMemory(device, memory, NULL);
+    memory = 0u;
+    if (rin_gpu_vulkan_icd_unbind_product_platform_v13(&adapters->v13) !=
+        RIN_GPU_VULKAN_OK)
+        goto done;
+    extension_bound = 0u;
+    adapters->resource_bind_calls = 0u;
+    adapters->resource_unbind_calls = 0u;
+    result = 0;
+
+done:
+    if (result != 0)
+        fprintf(stderr,
+                "V13 process-image fixture failed at stage %u: creates=%u "
+                "destroys=%u active=%u resources=%u binds=%u unbinds=%u\n",
+                stage, adapters->process_image_create_calls,
+                adapters->process_image_destroy_calls,
+                adapters->process_image_active, adapters->active_resource_count,
+                adapters->resource_bind_calls,
+                adapters->resource_unbind_calls);
+    adapters->process_image_create_result = RIN_VULKAN_PRODUCT_OK;
+    adapters->process_image_destroy_result = RIN_VULKAN_PRODUCT_OK;
+    if (image != 0u) vkDestroyImage(device, image, NULL);
+    if (memory != 0u) (void)vkFreeMemory(device, memory, NULL);
+    if (extension_bound != 0u && adapters->process_image_active == 0u)
+        (void)rin_gpu_vulkan_icd_unbind_product_platform_v13(&adapters->v13);
+    return result;
+}
+
 int main(void) {
     RinGpuVulkanPhysicalDeviceV2 profile;
     RinGpuVulkanRuntimeV1 runtime;
@@ -6711,6 +6996,7 @@ int main(void) {
     CHECK(second_queue != NULL && second_queue != queue);
     vkGetDeviceQueue(device, 1u, 0u, &transfer_queue);
     CHECK(transfer_queue != NULL);
+    CHECK(test_process_image_platform_v13(device, &product_adapters) == 0);
     CHECK(test_sync2_queue_family_stage_validation(device));
     CHECK(test_sync2_event_queue_type_validation(device));
     CHECK(test_sync2_queue_submit_stage_validation(device, transfer_queue));

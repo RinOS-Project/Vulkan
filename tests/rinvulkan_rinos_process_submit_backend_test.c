@@ -19,6 +19,7 @@ static RinResult bind_group_create_result;
 static RinResult graphics_bind_group_create_result;
 static RinResult query_create_result;
 static RinResult query_read_result;
+static RinResult process_image_create_result;
 static uint32_t fail_resource_bind_call;
 static uint64_t fail_resource_unbind_cookie;
 static RinGpuProcessQueueV1 fail_release_token;
@@ -67,6 +68,9 @@ static RinGpuProcessSamplerDescV1 observed_sampler_desc;
 static uint64_t observed_destroy_tokens[8];
 static uint32_t query_create_calls;
 static uint32_t query_read_calls;
+static uint32_t process_image_create_calls;
+static uint64_t observed_process_image_token;
+static RinGpuProcessImageViewV1 observed_process_image;
 static uint64_t observed_query_token;
 static RinGpuProcessQueryDescV1 observed_query_desc;
 static RinGpuProcessQueryResultV1 supplied_query_result;
@@ -440,12 +444,29 @@ static void reset_mocks(void) {
     memset(observed_destroy_tokens, 0, sizeof(observed_destroy_tokens));
     query_create_calls = 0u;
     query_read_calls = 0u;
+    process_image_create_result = RIN_SUCCESS;
+    process_image_create_calls = 0u;
+    observed_process_image_token = 0u;
+    memset(&observed_process_image, 0, sizeof(observed_process_image));
     observed_query_token = 0u;
     memset(&observed_query_desc, 0, sizeof(observed_query_desc));
     memset(&supplied_query_result, 0, sizeof(supplied_query_result));
     supplied_query_result.struct_size = sizeof(supplied_query_result);
     supplied_query_result.version = RIN_GPU_PROCESS_QUERY_RESULT_VERSION_V1;
     supplied_query_result.query_type = RIN_GPU_PROCESS_QUERY_TIMESTAMP_V1;
+}
+
+RinResult rin_gpu_process_image_create_v1(
+    uint64_t device_id, uint64_t device_generation,
+    const RinGpuProcessImageViewV1* image) {
+    ++process_image_create_calls;
+    if (device_id != UINT64_C(0x1111) ||
+        device_generation != UINT64_C(0x2222) ||
+        !rin_gpu_process_image_create_desc_v1_valid(image))
+        return RIN_ERROR_INVALID_ARGUMENT;
+    observed_process_image_token = image->image_token;
+    observed_process_image = *image;
+    return process_image_create_result;
 }
 
 int main(void) {
@@ -457,6 +478,7 @@ int main(void) {
     RinVulkanRinOSProcessSubmitBackendV6 backend_v6 = {0};
     RinVulkanRinOSProcessSubmitBackendV7 backend_v7 = {0};
     RinVulkanRinOSProcessSubmitBackendV8 backend_v8 = {0};
+    RinVulkanRinOSProcessSubmitBackendV9 backend_v9 = {0};
     RinVulkanProductPlatformV5 parent = {0};
     uint32_t queue_ids[2] = {0u, 2u};
     RinVulkanRinOSProcessQueueMapV4 queue_mappings[3] = {
@@ -476,6 +498,7 @@ int main(void) {
     RinVulkanProductPlatformV10* platform_v10;
     RinVulkanProductPlatformV11* platform_v11;
     RinVulkanProductPlatformV12* platform_v12;
+    RinVulkanProductPlatformV13* platform_v13;
     RinVulkanProductProcessComputeBindingV8 process_bindings[2] = {{0}};
     uint8_t shader_ir[sizeof(RinShaderHeaderV1)] = {0};
     uint64_t process_pipeline_token = 0u;
@@ -1263,6 +1286,93 @@ int main(void) {
               active_resource_cookies[1] == 0u);
     }
 
-    puts("RinVulkan RinOS process-submit/compute/graphics/sampler/bind-group adapter: PASS");
+    reset_mocks();
+    CHECK(rin_vulkan_rinos_process_submit_backend_v9_init(
+              &backend_v9, &parent, 0x1111u, 0x2222u, queue_mappings, 3u) ==
+          RIN_VULKAN_PRODUCT_OK);
+    CHECK(rin_vulkan_rinos_process_submit_backend_v9_valid(&backend_v9));
+    platform_v13 =
+        rin_vulkan_rinos_process_submit_backend_v9_platform_v13(&backend_v9);
+    CHECK(platform_v13 &&
+          platform_v13->base ==
+              &backend_v9.submit_backend.platform_v12 &&
+          platform_v13->create_process_image &&
+          platform_v13->destroy_process_image);
+    {
+        const uint64_t image_token =
+            (RIN_VULKAN_PRODUCT_PROCESS_IMAGE_TOKEN_TAG << 48u) | 1u;
+        RinVulkanProductProcessImageV13 descriptor = {0};
+        descriptor.struct_size = sizeof(descriptor);
+        descriptor.version =
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_V13_VERSION;
+        descriptor.resource_cookie =
+            (RIN_VULKAN_RINOS_PROCESS_IMAGE_RESOURCE_COOKIE_TAG << 48u) |
+            UINT64_C(0x1001);
+        descriptor.allocation_handle = UINT64_C(0xB001);
+        descriptor.allocation_offset = UINT64_C(0x2000);
+        descriptor.allocation_size_bytes = UINT64_C(0x8000);
+        descriptor.format =
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_FORMAT_RGBA8_UNORM_V13;
+        descriptor.dimension =
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_DIMENSION_2D_V13;
+        descriptor.width = 64u;
+        descriptor.height = 32u;
+        descriptor.depth = 1u;
+        descriptor.mip_levels = 1u;
+        descriptor.array_layers = 1u;
+        descriptor.sample_count = 1u;
+        descriptor.usage =
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_USAGE_COPY_DESTINATION_V13 |
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_USAGE_COLOR_TARGET_V13;
+        descriptor.logical_layout =
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_LAYOUT_UNDEFINED_V13;
+        descriptor.aspect_mask =
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_ASPECT_COLOR_V13;
+        descriptor.level_count = 1u;
+        descriptor.layer_count = 1u;
+        process_image_create_result = RIN_ERROR_NOT_SUPPORTED;
+        CHECK(platform_v13->create_process_image(
+                  platform_v13->context, image_token, &descriptor) ==
+              RIN_VULKAN_PRODUCT_UNSUPPORTED);
+        CHECK(backend_v9.images[0].image_token == 0u &&
+              rin_vulkan_rinos_process_submit_backend_v9_valid(&backend_v9));
+        process_image_create_result = RIN_SUCCESS;
+        CHECK(platform_v13->create_process_image(
+                  platform_v13->context, image_token, &descriptor) ==
+              RIN_VULKAN_PRODUCT_OK);
+        CHECK(process_image_create_calls == 2u &&
+              observed_process_image_token == image_token &&
+              observed_process_image.image_token == image_token &&
+              observed_process_image.resource_cookie ==
+                  descriptor.resource_cookie &&
+              observed_process_image.allocation_offset ==
+                  descriptor.allocation_offset &&
+              observed_process_image.allocation_size_bytes ==
+                  descriptor.allocation_size_bytes &&
+              observed_process_image.format == descriptor.format &&
+              observed_process_image.usage == descriptor.usage &&
+              backend_v9.images[0].active == 1u);
+        CHECK(platform_v13->create_process_image(
+                  platform_v13->context, image_token, &descriptor) ==
+              RIN_VULKAN_PRODUCT_INVALID_ARGUMENT);
+        descriptor.sample_count = 2u;
+        CHECK(platform_v13->create_process_image(
+                  platform_v13->context, image_token + 1u, &descriptor) ==
+              RIN_VULKAN_PRODUCT_INVALID_ARGUMENT);
+        descriptor.sample_count = 1u;
+        object_destroy_result = RIN_ERROR_BUSY;
+        CHECK(rin_vulkan_rinos_process_submit_backend_v9_detach(&backend_v9) ==
+              RIN_VULKAN_PRODUCT_BUSY);
+        CHECK(backend_v9.state == 2u &&
+              backend_v9.images[0].image_token == image_token &&
+              backend_v9.images[0].active == 1u);
+        object_destroy_result = RIN_SUCCESS;
+        CHECK(rin_vulkan_rinos_process_submit_backend_v9_detach(&backend_v9) ==
+              RIN_VULKAN_PRODUCT_OK);
+        CHECK(backend_v9.state == 0u && release_calls == 2u &&
+              backend_v9.images[0].image_token == 0u);
+    }
+
+    puts("RinVulkan RinOS process-submit/compute/graphics/sampler/image/bind-group adapter: PASS");
     return 0;
 }

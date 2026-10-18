@@ -272,6 +272,7 @@ typedef struct RinVkImageSlot {
     RinVkMemorySlot* memory;
     uint32_t memory_generation;
     uint32_t process_resource_bound;
+    uint64_t process_image_token;
     int32_t format;
     uint32_t usage;
     uint64_t memory_size;
@@ -663,6 +664,7 @@ static uintptr_t g_product_binding_v9;
 static uintptr_t g_product_binding_v10;
 static uintptr_t g_product_binding_v11;
 static uintptr_t g_product_binding_v12;
+static uintptr_t g_product_binding_v13;
 static uint32_t g_active_product_calls;
 static volatile uint64_t g_next_process_bind_group_token = UINT64_C(1);
 static volatile uint64_t g_next_process_graphics_bind_group_token =
@@ -670,6 +672,7 @@ static volatile uint64_t g_next_process_graphics_bind_group_token =
 static volatile uint64_t g_next_process_query_token = UINT64_C(1);
 static uintptr_t g_wsi_binding;
 static uint32_t g_active_wsi_calls;
+static RinVkResult destroy_process_image_v13(uint64_t image_token);
 static struct RinVkInstance_T g_instances[RIN_GPU_VULKAN_MAX_INSTANCES];
 static struct RinVkDevice_T g_devices[RIN_GPU_VULKAN_MAX_DEVICES];
 static RinGpuVulkanCommandRuntimeV1 g_command_runtime;
@@ -1513,6 +1516,17 @@ static RinVulkanProductPlatformV12* product_v12_for_base(
     return platform->base == base ? platform : NULL;
 }
 
+static RinVulkanProductPlatformV13* product_v13_for_base(
+        const RinVulkanProductPlatformV12* base) {
+    const uintptr_t binding =
+        __atomic_load_n(&g_product_binding_v13, __ATOMIC_ACQUIRE);
+    RinVulkanProductPlatformV13* platform;
+    if (binding == 0u || binding == RIN_VK_ICD_BINDING_TRANSITION)
+        return NULL;
+    platform = (RinVulkanProductPlatformV13*)binding;
+    return platform->base == base ? platform : NULL;
+}
+
 /* Keep the V10 adapter pinned by the same product-call lease used by the
  * callback. A V7 process pipeline chain without V10 is reported to the caller
  * as a missing process graphics provider, never silently downgraded. */
@@ -1894,6 +1908,8 @@ static RinVkResult map_product_result(int result) {
         return RIN_VK_ERROR_DEVICE_LOST;
     case RIN_VULKAN_PRODUCT_BUSY:
         return RIN_VK_NOT_READY;
+    case RIN_VULKAN_PRODUCT_UNSUPPORTED:
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
     case RIN_VULKAN_PRODUCT_ACCESS_DENIED:
         return map_host_mapping_result(result);
     case RIN_VULKAN_PRODUCT_INVALID_ARGUMENT:
@@ -3354,6 +3370,13 @@ static int process_graphics_bind_group_slots_active(void) {
     for (index = 0u; index < RIN_VK_MAX_SUBMISSIONS; ++index)
         if (g_submissions[index].process_graphics_bind_group_token != 0u)
             return 1;
+    return 0;
+}
+
+static int process_image_slots_active(void) {
+    uint32_t index;
+    for (index = 0u; index < RIN_VK_MAX_IMAGES; ++index)
+        if (g_images[index].process_image_token != 0u) return 1;
     return 0;
 }
 
@@ -6353,6 +6376,7 @@ static void clear_image_slot(RinVkImageSlot* slot) {
     slot->memory = NULL;
     slot->memory_generation = 0u;
     slot->process_resource_bound = 0u;
+    slot->process_image_token = 0u;
     slot->format = 0;
     slot->usage = 0u;
     slot->memory_size = 0u;
@@ -7751,6 +7775,16 @@ static int cleanup_device_resources(struct RinVkDevice_T* device) {
     for (index = 0u; index < RIN_VK_MAX_IMAGES; ++index) {
         RinVkImageSlot* image = &g_images[index];
         if (__atomic_load_n(&image->state, __ATOMIC_ACQUIRE) != 1u ||
+            image->owner != device || image->process_image_token == 0u)
+            continue;
+        if (destroy_process_image_v13(image->process_image_token) !=
+            RIN_VK_SUCCESS)
+            return 0;
+        image->process_image_token = 0u;
+    }
+    for (index = 0u; index < RIN_VK_MAX_IMAGES; ++index) {
+        RinVkImageSlot* image = &g_images[index];
+        if (__atomic_load_n(&image->state, __ATOMIC_ACQUIRE) != 1u ||
             image->owner != device ||
             image->process_resource_bound == 0u)
             continue;
@@ -8700,6 +8734,7 @@ int rin_gpu_vulkan_icd_unbind_product_platform_v12(
     if (platform->struct_size != sizeof(*platform) ||
         platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V12_VERSION ||
         !platform->base ||
+        __atomic_load_n(&g_product_binding_v13, __ATOMIC_ACQUIRE) != 0u ||
         __atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
         process_graphics_bind_group_slots_active()) {
         __atomic_store_n(&g_product_binding_v12, (uintptr_t)platform,
@@ -8707,6 +8742,61 @@ int rin_gpu_vulkan_icd_unbind_product_platform_v12(
         return RIN_GPU_VULKAN_BUSY;
     }
     __atomic_store_n(&g_product_binding_v12, 0u, __ATOMIC_RELEASE);
+    return RIN_GPU_VULKAN_OK;
+}
+
+int rin_gpu_vulkan_icd_bind_product_platform_v13(
+        RinVulkanProductPlatformV13* platform) {
+    uintptr_t expected = 0u;
+    uintptr_t v12_binding;
+    if (!platform || (uintptr_t)platform == RIN_VK_ICD_BINDING_TRANSITION ||
+        platform->struct_size != sizeof(*platform) ||
+        platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V13_VERSION ||
+        !platform->base || !platform->context ||
+        !platform->create_process_image || !platform->destroy_process_image ||
+        !wsi_zero_words(platform->reserved, 2u))
+        return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    if (!__atomic_compare_exchange_n(&g_product_binding_v13, &expected,
+                                     RIN_VK_ICD_BINDING_TRANSITION, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        return RIN_GPU_VULKAN_BUSY;
+    v12_binding =
+        __atomic_load_n(&g_product_binding_v12, __ATOMIC_ACQUIRE);
+    if (v12_binding == 0u ||
+        v12_binding == RIN_VK_ICD_BINDING_TRANSITION ||
+        v12_binding != (uintptr_t)platform->base ||
+        !platform->base->base ||
+        __atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
+        process_image_slots_active()) {
+        __atomic_store_n(&g_product_binding_v13, 0u, __ATOMIC_RELEASE);
+        return RIN_GPU_VULKAN_BUSY;
+    }
+    __atomic_store_n(&g_product_binding_v13, (uintptr_t)platform,
+                     __ATOMIC_RELEASE);
+    return RIN_GPU_VULKAN_OK;
+}
+
+int rin_gpu_vulkan_icd_unbind_product_platform_v13(
+        RinVulkanProductPlatformV13* platform) {
+    uintptr_t expected;
+    if (!platform) return RIN_GPU_VULKAN_INVALID_ARGUMENT;
+    expected = (uintptr_t)platform;
+    if (!__atomic_compare_exchange_n(
+            &g_product_binding_v13, &expected,
+            RIN_VK_ICD_BINDING_TRANSITION, 0, __ATOMIC_ACQ_REL,
+            __ATOMIC_RELAXED))
+        return expected == 0u ? RIN_GPU_VULKAN_NOT_INITIALIZED
+                              : RIN_GPU_VULKAN_BUSY;
+    if (platform->struct_size != sizeof(*platform) ||
+        platform->version != RIN_VULKAN_PRODUCT_PLATFORM_V13_VERSION ||
+        !platform->base ||
+        __atomic_load_n(&g_active_product_calls, __ATOMIC_ACQUIRE) != 0u ||
+        process_image_slots_active()) {
+        __atomic_store_n(&g_product_binding_v13, (uintptr_t)platform,
+                         __ATOMIC_RELEASE);
+        return RIN_GPU_VULKAN_BUSY;
+    }
+    __atomic_store_n(&g_product_binding_v13, 0u, __ATOMIC_RELEASE);
     return RIN_GPU_VULKAN_OK;
 }
 
@@ -19474,6 +19564,173 @@ RinVkResult RIN_VKAPI_CALL vkBindBufferMemory(
     return RIN_VK_SUCCESS;
 }
 
+static int process_image_descriptor_v13(
+        RinVkImage image_handle, const RinVkImageSlot* image,
+        const RinVkMemorySlot* memory, uint64_t memory_offset,
+        RinVulkanProductProcessImageV13* descriptor_out,
+        uint64_t* image_token_out) {
+    RinVulkanProductProcessImageV13 descriptor;
+    uint64_t image_token;
+    if (!image || !memory || !descriptor_out || !image_token_out ||
+        image_handle == 0u || image->samples == 0u ||
+        image->memory_size == 0u || memory->product_allocation == 0u ||
+        memory_offset > UINT64_MAX - image->memory_size)
+        return 0;
+    image_token =
+        (RIN_VULKAN_PRODUCT_PROCESS_IMAGE_TOKEN_TAG << 48u) |
+        (image_handle & UINT64_C(0x0000FFFFFFFFFFFF));
+    if ((image_token & UINT64_C(0x0000FFFFFFFFFFFF)) == 0u) return 0;
+    memset(&descriptor, 0, sizeof(descriptor));
+    descriptor.struct_size = sizeof(descriptor);
+    descriptor.version = RIN_VULKAN_PRODUCT_PROCESS_IMAGE_V13_VERSION;
+    descriptor.resource_cookie = image_handle;
+    descriptor.allocation_handle = memory->product_allocation;
+    descriptor.allocation_offset = memory_offset;
+    descriptor.allocation_size_bytes = image->memory_size;
+    if (image->format == RIN_VK_FORMAT_R8G8B8A8_UNORM) {
+        descriptor.format =
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_FORMAT_RGBA8_UNORM_V13;
+        descriptor.aspect_mask =
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_ASPECT_COLOR_V13;
+    } else if (image->format == RIN_VK_FORMAT_D32_SFLOAT) {
+        descriptor.format =
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_FORMAT_D32_FLOAT_V13;
+        descriptor.aspect_mask =
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_ASPECT_DEPTH_V13;
+    } else {
+        return 0;
+    }
+    descriptor.dimension =
+        RIN_VULKAN_PRODUCT_PROCESS_IMAGE_DIMENSION_2D_V13;
+    descriptor.width = image->width;
+    descriptor.height = image->height;
+    descriptor.depth = 1u;
+    descriptor.mip_levels = 1u;
+    descriptor.array_layers = 1u;
+    descriptor.sample_count = image->samples;
+    if ((image->usage & RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0u)
+        descriptor.usage |=
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_USAGE_COPY_SOURCE_V13;
+    if ((image->usage & RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT) != 0u)
+        descriptor.usage |=
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_USAGE_COPY_DESTINATION_V13;
+    if ((image->usage & RIN_VK_IMAGE_USAGE_SAMPLED_BIT) != 0u)
+        descriptor.usage |=
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_USAGE_SAMPLED_V13;
+    if ((image->usage & RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0u)
+        descriptor.usage |=
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_USAGE_COLOR_TARGET_V13;
+    descriptor.logical_layout =
+        RIN_VULKAN_PRODUCT_PROCESS_IMAGE_LAYOUT_UNDEFINED_V13;
+    descriptor.level_count = descriptor.mip_levels;
+    descriptor.layer_count = descriptor.array_layers;
+    *descriptor_out = descriptor;
+    *image_token_out = image_token;
+    return 1;
+}
+
+static RinVkResult create_process_image_v13(
+        RinVkImage image_handle, RinVkImageSlot* image,
+        RinVkMemorySlot* memory, uint64_t memory_offset,
+        uint64_t* image_token_out) {
+    uintptr_t binding =
+        __atomic_load_n(&g_product_binding_v13, __ATOMIC_ACQUIRE);
+    RinVulkanProductPlatformV1* product;
+    RinVulkanProductPlatformV2* product_v2;
+    RinVulkanProductPlatformV3* product_v3;
+    RinVulkanProductPlatformV4* product_v4;
+    RinVulkanProductPlatformV5* product_v5;
+    RinVulkanProductPlatformV6* product_v6;
+    RinVulkanProductPlatformV7* product_v7;
+    RinVulkanProductPlatformV8* product_v8;
+    RinVulkanProductPlatformV9* product_v9;
+    RinVulkanProductPlatformV10* product_v10;
+    RinVulkanProductPlatformV11* product_v11;
+    RinVulkanProductPlatformV12* product_v12;
+    RinVulkanProductPlatformV13* product_v13;
+    RinVulkanProductProcessImageV13 descriptor;
+    uint64_t image_token = 0u;
+    RinVkResult result;
+    if (image_token_out) *image_token_out = 0u;
+    if (!image_token_out || !image || !memory)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    if (binding == 0u) return RIN_VK_SUCCESS;
+    if (binding == RIN_VK_ICD_BINDING_TRANSITION) return RIN_VK_NOT_READY;
+    if (!process_image_descriptor_v13(image_handle, image, memory,
+                                      memory_offset, &descriptor,
+                                      &image_token))
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+    product = acquire_product();
+    if (!product) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    product_v2 = product_v2_for_base(product);
+    product_v3 = product_v2 ? product_v3_for_base(product_v2) : NULL;
+    product_v4 = product_v3 ? product_v4_for_base(product_v3) : NULL;
+    product_v5 = product_v4 ? product_v5_for_base(product_v4) : NULL;
+    product_v6 = product_v5 ? product_v6_for_base(product_v5) : NULL;
+    product_v7 = product_v6 ? product_v7_for_base(product_v6) : NULL;
+    product_v8 = product_v7 ? product_v8_for_base(product_v7) : NULL;
+    product_v9 = product_v8 ? product_v9_for_base(product_v8) : NULL;
+    product_v10 = product_v9 ? product_v10_for_base(product_v9) : NULL;
+    product_v11 = product_v10 ? product_v11_for_base(product_v10) : NULL;
+    product_v12 = product_v11 ? product_v12_for_base(product_v11) : NULL;
+    product_v13 = product_v12 ? product_v13_for_base(product_v12) : NULL;
+    if (!product_v13 || (uintptr_t)product_v13 != binding ||
+        !product_v13->create_process_image) {
+        release_product();
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    }
+    result = map_product_result(product_v13->create_process_image(
+        product_v13->context, image_token, &descriptor));
+    release_product();
+    if (result == RIN_VK_SUCCESS) *image_token_out = image_token;
+    return result;
+}
+
+static RinVkResult destroy_process_image_v13(uint64_t image_token) {
+    RinVulkanProductPlatformV1* product;
+    RinVulkanProductPlatformV2* product_v2;
+    RinVulkanProductPlatformV3* product_v3;
+    RinVulkanProductPlatformV4* product_v4;
+    RinVulkanProductPlatformV5* product_v5;
+    RinVulkanProductPlatformV6* product_v6;
+    RinVulkanProductPlatformV7* product_v7;
+    RinVulkanProductPlatformV8* product_v8;
+    RinVulkanProductPlatformV9* product_v9;
+    RinVulkanProductPlatformV10* product_v10;
+    RinVulkanProductPlatformV11* product_v11;
+    RinVulkanProductPlatformV12* product_v12;
+    RinVulkanProductPlatformV13* product_v13;
+    RinVkResult result;
+    uintptr_t binding =
+        __atomic_load_n(&g_product_binding_v13, __ATOMIC_ACQUIRE);
+    if (image_token == 0u) return RIN_VK_SUCCESS;
+    if (binding == 0u || binding == RIN_VK_ICD_BINDING_TRANSITION)
+        return RIN_VK_NOT_READY;
+    product = acquire_product();
+    if (!product) return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    product_v2 = product_v2_for_base(product);
+    product_v3 = product_v2 ? product_v3_for_base(product_v2) : NULL;
+    product_v4 = product_v3 ? product_v4_for_base(product_v3) : NULL;
+    product_v5 = product_v4 ? product_v5_for_base(product_v4) : NULL;
+    product_v6 = product_v5 ? product_v6_for_base(product_v5) : NULL;
+    product_v7 = product_v6 ? product_v7_for_base(product_v6) : NULL;
+    product_v8 = product_v7 ? product_v8_for_base(product_v7) : NULL;
+    product_v9 = product_v8 ? product_v9_for_base(product_v8) : NULL;
+    product_v10 = product_v9 ? product_v10_for_base(product_v9) : NULL;
+    product_v11 = product_v10 ? product_v11_for_base(product_v10) : NULL;
+    product_v12 = product_v11 ? product_v12_for_base(product_v11) : NULL;
+    product_v13 = product_v12 ? product_v13_for_base(product_v12) : NULL;
+    if (!product_v13 || (uintptr_t)product_v13 != binding ||
+        !product_v13->destroy_process_image) {
+        release_product();
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    }
+    result = map_product_result(product_v13->destroy_process_image(
+        product_v13->context, image_token));
+    release_product();
+    return result;
+}
+
 static RinVkResult create_image_with_storage_policy(
         RinVkDevice device, const RinVkImageCreateInfo* create_info,
         uint32_t allow_internal_linear, RinVkImage* image_out) {
@@ -19565,6 +19822,12 @@ void RIN_VKAPI_CALL vkDestroyImage(RinVkDevice device, RinVkImage handle,
     RinVkImageSlot* image = image_slot(device, handle);
     (void)allocator;
     if (!image || image->swapchain_owner || image_has_views(image)) return;
+    if (image->process_image_token != 0u) {
+        if (destroy_process_image_v13(image->process_image_token) !=
+            RIN_VK_SUCCESS)
+            return;
+        image->process_image_token = 0u;
+    }
     if (image->process_resource_bound != 0u) {
         if (unbind_process_resource_v5(handle) != RIN_VK_SUCCESS) return;
         image->process_resource_bound = 0u;
@@ -19597,6 +19860,7 @@ RinVkResult RIN_VKAPI_CALL vkBindImageMemory(
     RinVkMemorySlot* memory = memory_slot(device, memory_handle);
     uint32_t required_gpu_access = 0u;
     uint32_t resource_bound = 0u;
+    uint64_t process_image_token = 0u;
     RinVkResult bind_result;
     if (!image || image->swapchain_owner || !memory || image->memory ||
         (memory_offset & (RIN_VK_RESOURCE_ALIGNMENT - 1u)) != 0u ||
@@ -19624,6 +19888,24 @@ RinVkResult RIN_VKAPI_CALL vkBindImageMemory(
     image->process_resource_bound = resource_bound;
     image->memory_offset = memory_offset;
     ++memory->bound_resource_count;
+    if (resource_bound != 0u &&
+        __atomic_load_n(&g_product_binding_v13, __ATOMIC_ACQUIRE) != 0u) {
+        bind_result = create_process_image_v13(
+            image_handle, image, memory, memory_offset,
+            &process_image_token);
+        if (bind_result != RIN_VK_SUCCESS) {
+            if (unbind_process_resource_v5(image_handle) == RIN_VK_SUCCESS) {
+                image->process_resource_bound = 0u;
+                image->memory = NULL;
+                image->memory_generation = 0u;
+                image->memory_offset = 0u;
+                if (memory->bound_resource_count != 0u)
+                    --memory->bound_resource_count;
+            }
+            return bind_result;
+        }
+        image->process_image_token = process_image_token;
+    }
     return RIN_VK_SUCCESS;
 }
 

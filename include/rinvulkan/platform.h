@@ -19,8 +19,11 @@
 #define RIN_VULKAN_PRODUCT_PLATFORM_V10_VERSION 10u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V11_VERSION 11u
 #define RIN_VULKAN_PRODUCT_PLATFORM_V12_VERSION 12u
+#define RIN_VULKAN_PRODUCT_PLATFORM_V13_VERSION 13u
 #define RIN_VULKAN_PRODUCT_PROCESS_SAMPLER_DESC_V11_VERSION 1u
 #define RIN_VULKAN_PRODUCT_PROCESS_GRAPHICS_BINDING_V12_VERSION 1u
+#define RIN_VULKAN_PRODUCT_PROCESS_IMAGE_V13_VERSION 1u
+#define RIN_VULKAN_PRODUCT_PROCESS_IMAGE_TOKEN_TAG UINT64_C(0x5266)
 #define RIN_VULKAN_PRODUCT_PROCESS_GRAPHICS_BIND_GROUP_TOKEN_TAG \
     UINT64_C(0x5265)
 #define RIN_VULKAN_PRODUCT_PROCESS_SUBMIT_RECEIPT_V1_VERSION 1u
@@ -555,6 +558,71 @@ typedef struct RinVulkanProductPlatformV12 {
     uint64_t reserved[2];
 } RinVulkanProductPlatformV12;
 
+/* V13 adds process-owned image lifetime. The descriptor is API-neutral:
+ * format/usage/layout use the stable RinGPU process-image values, and the
+ * allocation range is relative to the SDK allocation. Vulkan tiling,
+ * modifiers, row pitch, and device addresses are deliberately not inferred
+ * or carried here; the physical image provider owns that storage contract. */
+typedef struct RinVulkanProductProcessImageV13 {
+    uint32_t struct_size;
+    uint32_t version;
+    uint64_t resource_cookie;
+    uint64_t allocation_handle;
+    uint64_t allocation_offset;
+    uint64_t allocation_size_bytes;
+    uint32_t format;
+    uint32_t dimension;
+    uint32_t width;
+    uint32_t height;
+    uint32_t depth;
+    uint32_t mip_levels;
+    uint32_t array_layers;
+    uint32_t sample_count;
+    uint32_t usage;
+    uint32_t logical_layout;
+    uint32_t aspect_mask;
+    uint32_t base_mip_level;
+    uint32_t level_count;
+    uint32_t base_array_layer;
+    uint32_t layer_count;
+    uint32_t reserved0;
+    uint64_t reserved[2];
+} RinVulkanProductProcessImageV13;
+
+#define RIN_VULKAN_PRODUCT_PROCESS_IMAGE_FORMAT_RGBA8_UNORM_V13 2u
+#define RIN_VULKAN_PRODUCT_PROCESS_IMAGE_FORMAT_D32_FLOAT_V13 4u
+#define RIN_VULKAN_PRODUCT_PROCESS_IMAGE_DIMENSION_2D_V13 2u
+#define RIN_VULKAN_PRODUCT_PROCESS_IMAGE_USAGE_COPY_SOURCE_V13 UINT32_C(0x01)
+#define RIN_VULKAN_PRODUCT_PROCESS_IMAGE_USAGE_COPY_DESTINATION_V13 \
+    UINT32_C(0x02)
+#define RIN_VULKAN_PRODUCT_PROCESS_IMAGE_USAGE_SAMPLED_V13 UINT32_C(0x04)
+#define RIN_VULKAN_PRODUCT_PROCESS_IMAGE_USAGE_STORAGE_V13 UINT32_C(0x08)
+#define RIN_VULKAN_PRODUCT_PROCESS_IMAGE_USAGE_COLOR_TARGET_V13 \
+    UINT32_C(0x10)
+#define RIN_VULKAN_PRODUCT_PROCESS_IMAGE_USAGE_DEPTH_STENCIL_V13 \
+    UINT32_C(0x20)
+#define RIN_VULKAN_PRODUCT_PROCESS_IMAGE_USAGE_PRESENT_V13 UINT32_C(0x40)
+#define RIN_VULKAN_PRODUCT_PROCESS_IMAGE_LAYOUT_UNDEFINED_V13 0u
+#define RIN_VULKAN_PRODUCT_PROCESS_IMAGE_ASPECT_COLOR_V13 UINT32_C(0x01)
+#define RIN_VULKAN_PRODUCT_PROCESS_IMAGE_ASPECT_DEPTH_V13 UINT32_C(0x02)
+#define RIN_VULKAN_PRODUCT_PROCESS_IMAGE_ASPECT_STENCIL_V13 UINT32_C(0x04)
+
+typedef int (*RinVulkanProductCreateProcessImageV13Fn)(
+    void* context, uint64_t image_token,
+    const RinVulkanProductProcessImageV13* descriptor);
+typedef int (*RinVulkanProductDestroyProcessImageV13Fn)(
+    void* context, uint64_t image_token);
+
+typedef struct RinVulkanProductPlatformV13 {
+    uint32_t struct_size;
+    uint32_t version;
+    RinVulkanProductPlatformV12* base;
+    void* context;
+    RinVulkanProductCreateProcessImageV13Fn create_process_image;
+    RinVulkanProductDestroyProcessImageV13Fn destroy_process_image;
+    uint64_t reserved[2];
+} RinVulkanProductPlatformV13;
+
 #ifdef __cplusplus
 static_assert(sizeof(RinVulkanProductResourceV1) == 16u,
               "Vulkan product resource ABI drift");
@@ -564,6 +632,8 @@ static_assert(sizeof(RinVulkanProductProcessQueryResultV9) == 88u,
               "Vulkan process query result V9 ABI drift");
 static_assert(sizeof(RinVulkanProductProcessGraphicsBindingV12) == 72u,
               "Vulkan process graphics binding V12 ABI drift");
+static_assert(sizeof(RinVulkanProductProcessImageV13) == 120u,
+              "Vulkan process image descriptor V13 ABI drift");
 static_assert(sizeof(RinVulkanProductReportV1) == 128u,
               "Vulkan product report ABI drift");
 static_assert(sizeof(RinVulkanProductStatusV1) == 128u,
@@ -585,6 +655,8 @@ _Static_assert(sizeof(RinVulkanProductProcessQueryResultV9) == 88u,
                "Vulkan process query result V9 ABI drift");
 _Static_assert(sizeof(RinVulkanProductProcessGraphicsBindingV12) == 72u,
                "Vulkan process graphics binding V12 ABI drift");
+_Static_assert(sizeof(RinVulkanProductProcessImageV13) == 120u,
+               "Vulkan process image descriptor V13 ABI drift");
 _Static_assert(sizeof(RinVulkanProductReportV1) == 128u,
                "Vulkan product report ABI drift");
 _Static_assert(sizeof(RinVulkanProductStatusV1) == 128u,
