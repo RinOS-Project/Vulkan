@@ -28,6 +28,31 @@ static int translation_info_valid(const RinSpirvTranslationInfoV1* info,
     return 1;
 }
 
+/* The current RSH1 shader ABI exposes each scalar component as an IO slot.
+ * Reject reflected interface ranges that alias after Vulkan vectors are
+ * flattened into those scalar slots; otherwise the plan can appear valid but
+ * bind two distinct SPIR-V interface declarations to the same backend slot. */
+static int graphics_io_ranges_valid(const RinSpirvIoV1* io, uint32_t count) {
+    if (count > RIN_SPIRV_MAX_IO || (count != 0u && !io)) return 0;
+    for (uint32_t index = 0u; index < count; ++index) {
+        const RinSpirvIoV1* current = &io[index];
+        uint32_t current_end;
+        if (current->width == 0u || current->width > 4u ||
+            (current->base_type != 1u && current->base_type != 2u) ||
+            current->location > RIN_SHADER_MAX_IO - current->width)
+            return 0;
+        current_end = current->location + current->width;
+        for (uint32_t prior = 0u; prior < index; ++prior) {
+            const RinSpirvIoV1* previous = &io[prior];
+            const uint32_t previous_end = previous->location + previous->width;
+            if (current->location < previous_end &&
+                previous->location < current_end)
+                return 0;
+        }
+    }
+    return 1;
+}
+
 static int shader_output_opcode(uint16_t opcode) {
     return opcode == RIN_SHADER_OP_STORE_OUTPUT ||
            opcode == RIN_SHADER_OP_STORE_OUTPUT_F32;
@@ -462,6 +487,9 @@ int ringpu_vulkan_graphics_build_pipeline(
         !validate_vertex_inputs(vertex, vertex_bindings, vertex_binding_count,
                                 vertex_attributes, vertex_attribute_count))
         return RIN_GPU_VULKAN_GRAPHICS_INVALID_ARGUMENT;
+    if (!graphics_io_ranges_valid(vertex->outputs, vertex->output_count) ||
+        !graphics_io_ranges_valid(fragment->inputs, fragment->input_count))
+        return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
 
     memset(&plan, 0, sizeof(plan));
     plan.struct_size = sizeof(plan);
