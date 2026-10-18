@@ -7,6 +7,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include <rinvulkan/icd.h>
+#include <rinvulkan/profile.h>
 #include <rin/contract_abi.h>
 #include <rinruntime/window.h>
 #include "rinos_native_window_completion.h"
@@ -852,6 +853,186 @@ static RinVkResult create_example_triangle_pipeline(
                                     pipeline_out);
 }
 
+typedef struct RinVulkanExampleProcessBufferCopy {
+    RinVkBuffer source;
+    RinVkBuffer destination;
+    RinVkDeviceMemory source_memory;
+    RinVkDeviceMemory destination_memory;
+} RinVulkanExampleProcessBufferCopy;
+
+static const uint8_t g_process_buffer_copy_payload[] = {
+    0x52u, 0x69u, 0x6eu, 0x4fu, 0x53u, 0x2du, 0x47u, 0x50u,
+    0x55u, 0x2du, 0x42u, 0x55u, 0x46u, 0x46u, 0x45u, 0x52u
+};
+
+static RinVkResult create_example_process_buffer_copy(
+        RinVkPhysicalDevice physical_device, RinVkDevice device,
+        RinVulkanExampleProcessBufferCopy* copy) {
+    RinVkPhysicalDeviceMemoryProperties memory_properties;
+    RinVkBufferCreateInfo buffer_info;
+    RinVkMemoryRequirements source_requirements;
+    RinVkMemoryRequirements destination_requirements;
+    RinVkMemoryAllocateInfo allocation_info;
+    uint32_t memory_type_bits;
+    uint32_t memory_type_index = UINT32_MAX;
+    RinVkDeviceMemory mapped_memory = 0u;
+    void* mapped = NULL;
+    RinVkResult result;
+
+    if (!physical_device || !device || !copy)
+        return RIN_VK_ERROR_INITIALIZATION_FAILED;
+    memset(copy, 0, sizeof(*copy));
+    memset(&memory_properties, 0, sizeof(memory_properties));
+    vkGetPhysicalDeviceMemoryProperties(physical_device, &memory_properties);
+    if (memory_properties.memoryTypeCount == 0u ||
+        memory_properties.memoryTypeCount > 32u)
+        return RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+
+    memset(&buffer_info, 0, sizeof(buffer_info));
+    buffer_info.sType = RIN_VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.size = sizeof(g_process_buffer_copy_payload);
+    buffer_info.usage = RIN_VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    buffer_info.sharingMode = RIN_VK_SHARING_MODE_EXCLUSIVE;
+    result = vkCreateBuffer(device, &buffer_info, NULL, &copy->source);
+    if (result != RIN_VK_SUCCESS || copy->source == 0u) {
+        if (result == RIN_VK_SUCCESS)
+            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        goto fail;
+    }
+    buffer_info.usage = RIN_VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    result = vkCreateBuffer(device, &buffer_info, NULL, &copy->destination);
+    if (result != RIN_VK_SUCCESS || copy->destination == 0u) {
+        if (result == RIN_VK_SUCCESS)
+            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        goto fail;
+    }
+
+    memset(&source_requirements, 0, sizeof(source_requirements));
+    memset(&destination_requirements, 0, sizeof(destination_requirements));
+    vkGetBufferMemoryRequirements(device, copy->source,
+                                  &source_requirements);
+    vkGetBufferMemoryRequirements(device, copy->destination,
+                                  &destination_requirements);
+    memory_type_bits = source_requirements.memoryTypeBits &
+                       destination_requirements.memoryTypeBits;
+    for (uint32_t index = 0u;
+         index < memory_properties.memoryTypeCount; ++index) {
+        const uint32_t required_properties =
+            RIN_GPU_VK_MEMORY_HOST_VISIBLE |
+            RIN_GPU_VK_MEMORY_HOST_COHERENT;
+        if ((memory_type_bits & (UINT32_C(1) << index)) != 0u &&
+            (memory_properties.memoryTypes[index].propertyFlags &
+             required_properties) == required_properties) {
+            memory_type_index = index;
+            break;
+        }
+    }
+    if (memory_type_index == UINT32_MAX || source_requirements.size == 0u ||
+        destination_requirements.size == 0u)
+        goto unsupported;
+
+    memset(&allocation_info, 0, sizeof(allocation_info));
+    allocation_info.sType = RIN_VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocation_info.memoryTypeIndex = memory_type_index;
+    allocation_info.allocationSize = source_requirements.size;
+    result = vkAllocateMemory(device, &allocation_info, NULL,
+                              &copy->source_memory);
+    if (result != RIN_VK_SUCCESS) goto fail;
+    allocation_info.allocationSize = destination_requirements.size;
+    result = vkAllocateMemory(device, &allocation_info, NULL,
+                              &copy->destination_memory);
+    if (result != RIN_VK_SUCCESS) goto fail;
+    result = vkBindBufferMemory(device, copy->source, copy->source_memory, 0u);
+    if (result != RIN_VK_SUCCESS) goto fail;
+    result = vkBindBufferMemory(device, copy->destination,
+                                copy->destination_memory, 0u);
+    if (result != RIN_VK_SUCCESS) goto fail;
+
+    result = vkMapMemory(device, copy->source_memory, 0u,
+                         sizeof(g_process_buffer_copy_payload), 0u, &mapped);
+    if (result != RIN_VK_SUCCESS || !mapped) {
+        if (result == RIN_VK_SUCCESS)
+            result = RIN_VK_ERROR_MEMORY_MAP_FAILED;
+        goto fail;
+    }
+    mapped_memory = copy->source_memory;
+    memcpy(mapped, g_process_buffer_copy_payload,
+           sizeof(g_process_buffer_copy_payload));
+    vkUnmapMemory(device, copy->source_memory);
+    mapped = NULL;
+    mapped_memory = 0u;
+
+    result = vkMapMemory(device, copy->destination_memory, 0u,
+                         sizeof(g_process_buffer_copy_payload), 0u, &mapped);
+    if (result != RIN_VK_SUCCESS || !mapped) {
+        if (result == RIN_VK_SUCCESS)
+            result = RIN_VK_ERROR_MEMORY_MAP_FAILED;
+        goto fail;
+    }
+    mapped_memory = copy->destination_memory;
+    memset(mapped, 0xa5, sizeof(g_process_buffer_copy_payload));
+    vkUnmapMemory(device, copy->destination_memory);
+    mapped = NULL;
+    mapped_memory = 0u;
+    return RIN_VK_SUCCESS;
+
+unsupported:
+    result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
+fail:
+    if (mapped && mapped_memory != 0u)
+        vkUnmapMemory(device, mapped_memory);
+    if (copy->source != 0u) vkDestroyBuffer(device, copy->source, NULL);
+    if (copy->destination != 0u)
+        vkDestroyBuffer(device, copy->destination, NULL);
+    if (copy->source_memory != 0u)
+        vkFreeMemory(device, copy->source_memory, NULL);
+    if (copy->destination_memory != 0u)
+        vkFreeMemory(device, copy->destination_memory, NULL);
+    memset(copy, 0, sizeof(*copy));
+    return result;
+}
+
+static void record_example_process_buffer_copy(
+        RinVkCommandBuffer command_buffer,
+        const RinVulkanExampleProcessBufferCopy* copy) {
+    RinVkBufferCopy region;
+    memset(&region, 0, sizeof(region));
+    region.size = sizeof(g_process_buffer_copy_payload);
+    vkCmdCopyBuffer(command_buffer, copy->source, copy->destination, 1u,
+                    &region);
+}
+
+static RinVkResult verify_example_process_buffer_copy(
+        RinVkDevice device,
+        const RinVulkanExampleProcessBufferCopy* copy) {
+    void* mapped = NULL;
+    RinVkResult result = vkMapMemory(
+        device, copy->destination_memory, 0u,
+        sizeof(g_process_buffer_copy_payload), 0u, &mapped);
+    if (result != RIN_VK_SUCCESS || !mapped)
+        return result == RIN_VK_SUCCESS ? RIN_VK_ERROR_MEMORY_MAP_FAILED
+                                        : result;
+    result = memcmp(mapped, g_process_buffer_copy_payload,
+                    sizeof(g_process_buffer_copy_payload)) == 0
+                 ? RIN_VK_SUCCESS
+                 : RIN_VK_ERROR_INITIALIZATION_FAILED;
+    vkUnmapMemory(device, copy->destination_memory);
+    return result;
+}
+
+static void destroy_example_process_buffer_copy(
+        RinVkDevice device, RinVulkanExampleProcessBufferCopy* copy) {
+    if (!device || !copy) return;
+    if (copy->source != 0u) vkDestroyBuffer(device, copy->source, NULL);
+    if (copy->destination != 0u)
+        vkDestroyBuffer(device, copy->destination, NULL);
+    if (copy->source_memory != 0u)
+        vkFreeMemory(device, copy->source_memory, NULL);
+    if (copy->destination_memory != 0u)
+        vkFreeMemory(device, copy->destination_memory, NULL);
+    memset(copy, 0, sizeof(*copy));
+}
+
 static int present_one_triangle_frame(RinVkPhysicalDevice physical_device,
                                    uint32_t queue_family,
                                    RinVkSurfaceKHR surface,
@@ -879,6 +1060,7 @@ static int present_one_triangle_frame(RinVkPhysicalDevice physical_device,
     RinVkCommandBufferBeginInfo begin_info;
     RinVkSubmitInfo submit_info;
     RinVkPresentInfoKHR present_info;
+    RinVulkanExampleProcessBufferCopy process_buffer_copy;
     RinVkImageViewCreateInfo image_view_info;
     RinVkRenderingAttachmentInfo rendering_attachment;
     RinVkRenderingInfo rendering_info;
@@ -889,6 +1071,7 @@ static int present_one_triangle_frame(RinVkPhysicalDevice physical_device,
     RinVkSwapchainKHR swapchain = 0u;
     RinVkFence image_acquired = 0u;
     RinVkCommandPool command_pool = NULL;
+    RinVkCommandBuffer copy_command_buffer = NULL;
     RinVkCommandBuffer command_buffer = NULL;
     RinVkImageView image_view = 0u;
     RinVkShaderModule vertex_module = 0u;
@@ -923,6 +1106,7 @@ static int present_one_triangle_frame(RinVkPhysicalDevice physical_device,
 #endif
 
     memset(&capabilities, 0, sizeof(capabilities));
+    memset(&process_buffer_copy, 0, sizeof(process_buffer_copy));
     vk_result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
         physical_device, surface, &capabilities);
     if (vk_result != RIN_VK_SUCCESS) {
@@ -1122,6 +1306,13 @@ static int present_one_triangle_frame(RinVkPhysicalDevice physical_device,
         fprintf(stderr, "vkGetDeviceQueue returned a null queue\n");
         goto cleanup;
     }
+    vk_result = create_example_process_buffer_copy(
+        physical_device, device, &process_buffer_copy);
+    if (vk_result != RIN_VK_SUCCESS) {
+        report_vk_failure("create process-owned buffer-copy resources",
+                          vk_result);
+        goto cleanup;
+    }
 
     memset(&swapchain_info, 0, sizeof(swapchain_info));
     swapchain_info.sType = RIN_VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
@@ -1218,12 +1409,63 @@ static int present_one_triangle_frame(RinVkPhysicalDevice physical_device,
     command_info.level = RIN_VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     command_info.commandBufferCount = 1u;
     vk_result = vkAllocateCommandBuffers(device, &command_info,
-                                        &command_buffer);
-    if (vk_result != RIN_VK_SUCCESS || !command_buffer) {
+                                        &copy_command_buffer);
+    if (vk_result != RIN_VK_SUCCESS || !copy_command_buffer) {
         if (vk_result != RIN_VK_SUCCESS)
             report_vk_failure("vkAllocateCommandBuffers", vk_result);
+        else fprintf(stderr, "buffer-copy command buffer is null\n");
+        goto cleanup;
+    }
+
+    /* Keep the real buffer-resource submit independent of the graphics
+     * profile. A provider that implements process buffer copy can consume
+     * this command even while graphics DRAW support is still incomplete. */
+    memset(&begin_info, 0, sizeof(begin_info));
+    begin_info.sType = RIN_VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = RIN_VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vk_result = vkBeginCommandBuffer(copy_command_buffer, &begin_info);
+    if (vk_result != RIN_VK_SUCCESS) {
+        report_vk_failure("vkBeginCommandBuffer(buffer copy)", vk_result);
+        goto cleanup;
+    }
+    record_example_process_buffer_copy(copy_command_buffer,
+                                       &process_buffer_copy);
+    vk_result = vkEndCommandBuffer(copy_command_buffer);
+    if (vk_result != RIN_VK_SUCCESS) {
+        report_vk_failure("vkEndCommandBuffer(buffer copy)", vk_result);
+        goto cleanup;
+    }
+    memset(&submit_info, 0, sizeof(submit_info));
+    submit_info.sType = RIN_VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1u;
+    submit_info.pCommandBuffers = &copy_command_buffer;
+    vk_result = vkQueueSubmit(queue, 1u, &submit_info, 0u);
+    if (vk_result != RIN_VK_SUCCESS) {
+        report_vk_failure("vkQueueSubmit(buffer copy)", vk_result);
+        goto cleanup;
+    }
+    submission_pending = 1;
+    vk_result = vkQueueWaitIdle(queue);
+    if (vk_result != RIN_VK_SUCCESS) {
+        report_vk_failure("vkQueueWaitIdle(buffer copy)", vk_result);
+        goto cleanup;
+    }
+    submission_pending = 0;
+    vk_result = verify_example_process_buffer_copy(device,
+                                                   &process_buffer_copy);
+    if (vk_result != RIN_VK_SUCCESS) {
+        report_vk_failure("verify process-owned buffer copy", vk_result);
+        goto cleanup;
+    }
+
+    vk_result = vkAllocateCommandBuffers(device, &command_info,
+                                         &command_buffer);
+    if (vk_result != RIN_VK_SUCCESS || !command_buffer) {
+        if (vk_result != RIN_VK_SUCCESS)
+            report_vk_failure("vkAllocateCommandBuffers(graphics)",
+                              vk_result);
         else
-            fprintf(stderr, "vkAllocateCommandBuffers returned null\n");
+            fprintf(stderr, "graphics command buffer is null\n");
         goto cleanup;
     }
 
@@ -1369,6 +1611,8 @@ cleanup:
     }
     if (device && command_pool != NULL)
         vkDestroyCommandPool(device, command_pool, NULL);
+    if (device)
+        destroy_example_process_buffer_copy(device, &process_buffer_copy);
     if (device && image_view != 0u)
         vkDestroyImageView(device, image_view, NULL);
     if (device && graphics_pipeline != 0u)
