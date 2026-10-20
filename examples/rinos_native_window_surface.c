@@ -809,8 +809,8 @@ static RinVkResult create_example_triangle_pipeline(
         RinVkShaderModule* vertex_module_out,
         RinVkShaderModule* fragment_module_out,
         RinVkPipelineLayout* layout_out, RinVkPipeline* pipeline_out) {
-    uint32_t vertex_words[128];
-    uint32_t fragment_words[96];
+    uint32_t vertex_words[256];
+    uint32_t fragment_words[256];
     RinVkShaderModuleCreateInfo shader_info;
     RinVkPipelineLayoutCreateInfo layout_info;
     RinVkPipelineShaderStageCreateInfo stages[2];
