@@ -16172,18 +16172,22 @@ RinVkResult RIN_VKAPI_CALL vkGetQueryPoolResults(
     }
     if (unavailable != 0u &&
         (flags & RIN_VK_QUERY_RESULT_WAIT_BIT) != 0u) {
-        RinVkResult maintained = rin_gpu_vulkan_icd_maintain(device);
-        if (maintained != RIN_VK_SUCCESS && maintained != RIN_VK_NOT_READY)
-            return maintained;
-        {
-            RinVkResult refreshed = refresh_process_query_range(
-                pool, first_query, query_count);
-            if (refreshed != RIN_VK_SUCCESS) return refreshed;
+        while (unavailable != 0u) {
+            RinVkResult maintained =
+                maintain_device_submissions_until_available(
+                    device_slot(device));
+            if (maintained != RIN_VK_SUCCESS) return maintained;
+            {
+                RinVkResult refreshed = refresh_process_query_range(
+                    pool, first_query, query_count);
+                if (refreshed != RIN_VK_SUCCESS) return refreshed;
+            }
+            unavailable = 0u;
+            for (index = 0u; index < query_count; ++index)
+                if (pool->queries[first_query + index].availability == 0u)
+                    unavailable = 1u;
+            if (unavailable != 0u) yield_thread();
         }
-        unavailable = 0u;
-        for (index = 0u; index < query_count; ++index)
-            if (pool->queries[first_query + index].availability == 0u)
-                unavailable = 1u;
     }
     if (unavailable != 0u &&
         (flags & RIN_VK_QUERY_RESULT_PARTIAL_BIT) == 0u)

@@ -152,6 +152,8 @@ typedef struct TestSdkProcessQuery {
     uint32_t active;
     uint32_t reserved;
     uint64_t token;
+    uint32_t result_reads;
+    uint32_t result_ready_after_reads;
     RinGpuProcessQueryDescV1 descriptor;
     RinGpuProcessQueryResultV1 result;
 } TestSdkProcessQuery;
@@ -2979,8 +2981,16 @@ RinResult rin_gpu_process_query_result_v1(
         result_out->version != RIN_GPU_PROCESS_QUERY_RESULT_VERSION_V1)
         return RIN_ERROR_INVALID_ARGUMENT;
     for (index = 0u; index < TEST_SDK_PROCESS_QUERY_CAPACITY; ++index) {
-        const TestSdkProcessQuery* query = &adapters->sdk_queries[index];
+        TestSdkProcessQuery* query = &adapters->sdk_queries[index];
         if (query->active == 1u && query->token == query_token) {
+            if (query->result.available == 0u &&
+                query->result_ready_after_reads != 0u) {
+                if (query->result_reads < UINT32_MAX)
+                    ++query->result_reads;
+                if (query->result_reads >=
+                    query->result_ready_after_reads)
+                    query->result.available = 1u;
+            }
             *result_out = query->result;
             ++adapters->sdk_query_result_calls;
             return RIN_SUCCESS;
@@ -4234,8 +4244,9 @@ static int test_process_timestamp_query(
             TestSdkProcessQuery* query = &adapters->sdk_queries[index];
             if (query->active == 1u &&
                 query->token == adapters->sdk_last_query_token) {
-                query->result.available = 1u;
+                query->result.available = 0u;
                 query->result.values[0] = expected_timestamp;
+                query->result_ready_after_reads = query->result_reads + 3u;
                 query_found = 1;
                 break;
             }
@@ -4244,12 +4255,14 @@ static int test_process_timestamp_query(
     }
     results[0] = 0u;
     results[1] = 0u;
+    query_result_before = adapters->sdk_query_result_calls;
     PROCESS_QUERY_CHECK(vkGetQueryPoolResults(
         device, query_pool, 0u, 1u, sizeof(results), results, sizeof(results),
         RIN_VK_QUERY_RESULT_64_BIT |
-            RIN_VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) == RIN_VK_SUCCESS);
+            RIN_VK_QUERY_RESULT_WITH_AVAILABILITY_BIT |
+            RIN_VK_QUERY_RESULT_WAIT_BIT) == RIN_VK_SUCCESS);
     PROCESS_QUERY_CHECK(adapters->sdk_query_result_calls ==
-                            query_result_before + 2u &&
+                            query_result_before + 3u &&
                         results[0] == expected_timestamp &&
                         results[1] == 1u);
 
