@@ -176,7 +176,8 @@ typedef struct TestProductAdapters {
     RinVulkanProductPlatformV13 v13;
     RinVulkanProductPlatformV14 v14;
     RinVulkanProductPlatformV6 software_v6;
-    RinVulkanRinOSProcessSubmitBackendV10 process_submit_backend;
+    RinVulkanRinOSProcessSubmitBackendV11 process_submit_backend;
+    RinVulkanProductPlatformV15 v15;
     RinVulkanRinOSProcessSubmitBackendV7* process_backend_v7;
     TestSdkProcessQueue sdk_queues[RIN_GPU_PROCESS_MAX_QUEUES_V1];
     TestSdkProcessResource sdk_resources[
@@ -258,7 +259,9 @@ typedef struct TestProductAdapters {
     uint32_t canonical_dispatch_calls;
     uint32_t canonical_graphics_draw_calls;
     RinGpuBackendCommandV1 canonical_last_command;
-    RinGpuBackendCommandV1 canonical_last_graphics_commands[3];
+    RinGpuBackendCommandV1 canonical_last_graphics_commands[
+        RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS * 2u + 3u];
+    uint32_t canonical_last_graphics_command_count;
     uint32_t canonical_resolve_command_count;
     uint32_t canonical_graphics_barrier_count;
     RinGpuBackendGraphicsBarrierV2 canonical_last_graphics_barrier;
@@ -1041,7 +1044,7 @@ static RinVulkanProductPlatformV13* test_process_backend_platform_v13(
     RinVulkanProductPlatformV14* platform_v14;
     if (!adapters) return NULL;
     platform_v14 = rin_vulkan_rinos_process_submit_backend_v10_platform_v14(
-        &adapters->process_submit_backend);
+        &adapters->process_submit_backend.submit_backend);
     return platform_v14 ? platform_v14->base : NULL;
 }
 
@@ -1143,7 +1146,7 @@ static int test_create_process_graphics_bind_group_v14(
         binding_count > RIN_GPU_PROCESS_GRAPHICS_BINDING_V2_MAX_COUNT)
         return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
     backend_v14 = rin_vulkan_rinos_process_submit_backend_v10_platform_v14(
-        &adapters->process_submit_backend);
+        &adapters->process_submit_backend.submit_backend);
     if (!backend_v14 || !backend_v14->create_process_graphics_bind_group)
         return RIN_VULKAN_PRODUCT_STATE;
     result = backend_v14->create_process_graphics_bind_group(
@@ -1169,7 +1172,7 @@ static int test_destroy_process_graphics_bind_group_v14(
     if (!adapters)
         return RIN_VULKAN_PRODUCT_INVALID_ARGUMENT;
     backend_v14 = rin_vulkan_rinos_process_submit_backend_v10_platform_v14(
-        &adapters->process_submit_backend);
+        &adapters->process_submit_backend.submit_backend);
     if (!backend_v14 || !backend_v14->destroy_process_graphics_bind_group)
         return RIN_VULKAN_PRODUCT_STATE;
     {
@@ -1193,6 +1196,111 @@ static const TestResourceBinding* test_find_resource_binding(
             return binding;
     }
     return NULL;
+}
+
+/* Execute the render-pass clear in the host reference provider used by the
+ * native-window integration test. This deliberately implements only the
+ * explicit RGBA8 test-image layout; it is not a production Vulkan fallback
+ * and does not claim to execute the submitted shader. */
+static int test_execute_native_window_clear(
+        TestProductAdapters* adapters,
+        const RinGpuBackendRenderPassBeginV1* begin) {
+    const TestResourceBinding* binding;
+    RinGpuVulkanSoftwareAllocationV1* allocation;
+    const TestProcessImageRecord* image = NULL;
+    uint64_t required_bytes;
+    uint64_t allocation_end;
+    uint32_t index;
+    uint32_t x;
+    uint32_t y;
+    uint32_t clear[4];
+    const float clear_float[4] = {
+        begin ? begin->clear_red : 0.0f,
+        begin ? begin->clear_green : 0.0f,
+        begin ? begin->clear_blue : 0.0f,
+        begin ? begin->clear_alpha : 0.0f
+    };
+    if (!adapters || !adapters->software || !begin ||
+        begin->color_target_cookie == 0u ||
+        begin->clear_region.enabled != 1u ||
+        begin->clear_region.reserved != 0u || begin->clear_region.x < 0 ||
+        begin->clear_region.y < 0 || begin->clear_region.width == 0u ||
+        begin->clear_region.height == 0u)
+        return 0;
+    binding = test_find_resource_binding(
+        adapters, begin->color_target_cookie);
+    if (!binding || binding->allocation_handle == 0u ||
+        binding->allocation_offset > UINT64_MAX - binding->size_bytes)
+        return 0;
+    allocation = test_find_allocation(
+        adapters->software, binding->allocation_handle);
+    if (!allocation || !allocation->bytes ||
+        binding->allocation_offset > allocation->size_bytes ||
+        binding->size_bytes > allocation->size_bytes -
+                                  binding->allocation_offset)
+        return 0;
+    for (index = 0u; index < 128u; ++index) {
+        const TestProcessImageRecord* candidate =
+            &adapters->process_images[index];
+        if (candidate->active == 1u &&
+            candidate->descriptor.resource_cookie ==
+                begin->color_target_cookie) {
+            image = candidate;
+            break;
+        }
+    }
+    if (!image ||
+        image->descriptor.format !=
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_FORMAT_RGBA8_UNORM_V13 ||
+        image->descriptor.dimension !=
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_DIMENSION_2D_V13 ||
+        image->descriptor.allocation_handle != binding->allocation_handle ||
+        image->descriptor.allocation_offset != binding->allocation_offset ||
+        image->descriptor.allocation_size_bytes != binding->size_bytes ||
+        image->descriptor.width == 0u || image->descriptor.height == 0u ||
+        image->descriptor.depth != 1u || image->descriptor.sample_count != 1u ||
+        image->descriptor.mip_levels != 1u ||
+        image->descriptor.array_layers != 1u ||
+        (uint32_t)begin->clear_region.x > image->descriptor.width ||
+        begin->clear_region.width >
+            image->descriptor.width - (uint32_t)begin->clear_region.x ||
+        (uint32_t)begin->clear_region.y > image->descriptor.height ||
+        begin->clear_region.height >
+            image->descriptor.height - (uint32_t)begin->clear_region.y ||
+        image->descriptor.width > UINT64_MAX / 4u / image->descriptor.height)
+        return 0;
+    required_bytes = (uint64_t)image->descriptor.width *
+                     image->descriptor.height * 4u;
+    if (required_bytes > image->descriptor.allocation_size_bytes ||
+        image->descriptor.allocation_offset >
+            UINT64_MAX - image->descriptor.allocation_size_bytes)
+        return 0;
+    allocation_end = image->descriptor.allocation_offset +
+                     image->descriptor.allocation_size_bytes;
+    if (allocation_end > allocation->size_bytes)
+        return 0;
+    for (index = 0u; index < 4u; ++index) {
+        float value = clear_float[index];
+        if (value != value) return 0;
+        if (value < 0.0f) value = 0.0f;
+        if (value > 1.0f) value = 1.0f;
+        clear[index] = (uint32_t)(value * 255.0f + 0.5f);
+    }
+    for (y = 0u; y < begin->clear_region.height; ++y) {
+        for (x = 0u; x < begin->clear_region.width; ++x) {
+            const uint64_t pixel_offset =
+                image->descriptor.allocation_offset +
+                (((uint64_t)(uint32_t)begin->clear_region.y + y) *
+                     image->descriptor.width +
+                 (uint32_t)begin->clear_region.x + x) * 4u;
+            uint8_t* pixel = allocation->bytes + pixel_offset;
+            pixel[0] = (uint8_t)clear[0];
+            pixel[1] = (uint8_t)clear[1];
+            pixel[2] = (uint8_t)clear[2];
+            pixel[3] = (uint8_t)clear[3];
+        }
+    }
+    return 1;
 }
 
 static int test_backend_state_to_vk_layout(uint32_t state,
@@ -1299,6 +1407,10 @@ static int test_submit_process_commands_v6(
     uint32_t index;
     uint64_t previous_completed_value;
     uint32_t defer_completion;
+    uint32_t render_begin_index = 0u;
+    uint32_t draw_index = 1u;
+    uint32_t render_end_index = 2u;
+    int has_graphics_image_barriers = 0;
     int result;
     if (!adapters || !adapters->software || !commands || !receipt_out ||
         command_count == 0u ||
@@ -1310,12 +1422,79 @@ static int test_submit_process_commands_v6(
         commands[0].type == RIN_GPU_BACKEND_COMMAND_BEGIN_RENDER_PASS &&
         commands[1].type == RIN_GPU_BACKEND_COMMAND_DRAW &&
         commands[2].type == RIN_GPU_BACKEND_COMMAND_END_RENDER_PASS) {
+        render_begin_index = 0u;
+        draw_index = 1u;
+        render_end_index = 2u;
+    } else if (command_count == 7u &&
+               commands[0].type == RIN_GPU_BACKEND_COMMAND_TRANSITION_IMAGE &&
+               commands[1].type ==
+                   RIN_GPU_BACKEND_COMMAND_GRAPHICS_BARRIER_V2 &&
+               commands[2].type ==
+                   RIN_GPU_BACKEND_COMMAND_BEGIN_RENDER_PASS &&
+               commands[3].type == RIN_GPU_BACKEND_COMMAND_DRAW &&
+               commands[4].type ==
+                   RIN_GPU_BACKEND_COMMAND_END_RENDER_PASS &&
+               commands[5].type == RIN_GPU_BACKEND_COMMAND_TRANSITION_IMAGE &&
+               commands[6].type ==
+                   RIN_GPU_BACKEND_COMMAND_GRAPHICS_BARRIER_V2) {
+        const RinGpuBackendImageTransitionDescV1* before =
+            &commands[0].value.image_transition.transition;
+        const RinGpuBackendImageTransitionDescV1* after =
+            &commands[5].value.image_transition.transition;
+        render_begin_index = 2u;
+        draw_index = 3u;
+        render_end_index = 4u;
+        has_graphics_image_barriers = 1;
+        if (commands[0].reserved != 0u || commands[1].reserved != 0u ||
+            commands[5].reserved != 0u || commands[6].reserved != 0u ||
+            commands[0].value.image_transition.image_cookie == 0u ||
+            commands[0].value.image_transition.image_cookie !=
+                commands[render_begin_index]
+                    .value.render_pass_begin.color_target_cookie ||
+            commands[5].value.image_transition.image_cookie !=
+                commands[0].value.image_transition.image_cookie ||
+            before->abi_version != RIN_GPU_ABI_VERSION ||
+            before->struct_size != sizeof(*before) ||
+            before->before_state != RIN_GPU_IMAGE_STATE_UNDEFINED ||
+            before->after_state != RIN_GPU_IMAGE_STATE_COLOR_TARGET ||
+            before->aspect_mask != RIN_GPU_IMAGE_ASPECT_COLOR ||
+            before->base_mip_level != 0u || before->mip_level_count != 1u ||
+            before->base_array_layer != 0u ||
+            before->array_layer_count != 1u || before->flags != 0u ||
+            after->abi_version != RIN_GPU_ABI_VERSION ||
+            after->struct_size != sizeof(*after) ||
+            after->before_state != RIN_GPU_IMAGE_STATE_COLOR_TARGET ||
+            after->after_state != RIN_GPU_IMAGE_STATE_PRESENT ||
+            after->aspect_mask != RIN_GPU_IMAGE_ASPECT_COLOR ||
+            after->base_mip_level != 0u || after->mip_level_count != 1u ||
+            after->base_array_layer != 0u ||
+            after->array_layer_count != 1u || after->flags != 0u ||
+            commands[1].value.graphics_barrier_v2.source_access != 0u ||
+            (commands[1].value.graphics_barrier_v2.destination_stage &
+             RIN_GPU_PIPELINE_STAGE_COLOR_OUTPUT) == 0u ||
+            commands[1].value.graphics_barrier_v2.destination_access !=
+                RIN_GPU_RESOURCE_WRITE ||
+            (commands[6].value.graphics_barrier_v2.source_stage &
+             RIN_GPU_PIPELINE_STAGE_COLOR_OUTPUT) == 0u ||
+            commands[6].value.graphics_barrier_v2.source_access !=
+                RIN_GPU_RESOURCE_WRITE ||
+            commands[6].value.graphics_barrier_v2.destination_access !=
+                RIN_GPU_RESOURCE_READ)
+            return RIN_VULKAN_PRODUCT_PROTOCOL;
+    }
+    if ((command_count == 3u || has_graphics_image_barriers) &&
+        commands[render_begin_index].type ==
+            RIN_GPU_BACKEND_COMMAND_BEGIN_RENDER_PASS &&
+        commands[draw_index].type == RIN_GPU_BACKEND_COMMAND_DRAW &&
+        commands[render_end_index].type ==
+            RIN_GPU_BACKEND_COMMAND_END_RENDER_PASS) {
         previous_completed_value =
             adapters->software->completed_values[queue_id];
         defer_completion = adapters->defer_next_process_completion;
         const RinGpuBackendRenderPassBeginV1* begin =
-            &commands[0].value.render_pass_begin;
-        const RinGpuBackendDrawV1* draw = &commands[1].value.draw;
+            &commands[render_begin_index].value.render_pass_begin;
+        const RinGpuBackendDrawV1* draw =
+            &commands[draw_index].value.draw;
         const TestResourceBinding* target_binding;
         uint64_t expected_allocations[
             RIN_GPU_PROCESS_GRAPHICS_BINDING_V2_MAX_COUNT + 1u];
@@ -1324,8 +1503,9 @@ static int test_submit_process_commands_v6(
         uint8_t expected_seen[
             RIN_GPU_PROCESS_GRAPHICS_BINDING_V2_MAX_COUNT + 1u] = {0};
         uint32_t expected_count = 0u;
-        if (commands[0].reserved != 0u || commands[1].reserved != 0u ||
-            commands[2].reserved != 0u ||
+        if (commands[render_begin_index].reserved != 0u ||
+            commands[draw_index].reserved != 0u ||
+            commands[render_end_index].reserved != 0u ||
             begin->color_target_cookie == 0u ||
             begin->load_op != RIN_GPU_RENDER_CLEAR ||
             begin->store_op != RIN_GPU_RENDER_STORE ||
@@ -1471,8 +1651,11 @@ static int test_submit_process_commands_v6(
         }
         for (index = 0u; index < expected_count; ++index)
             if (expected_seen[index] == 0u) return RIN_VULKAN_PRODUCT_PROTOCOL;
-        memcpy(adapters->canonical_last_graphics_commands, commands,
+        memset(adapters->canonical_last_graphics_commands, 0,
                sizeof(adapters->canonical_last_graphics_commands));
+        memcpy(adapters->canonical_last_graphics_commands, commands,
+               sizeof(commands[0]) * command_count);
+        adapters->canonical_last_graphics_command_count = command_count;
         adapters->canonical_resource_count = resource_count;
         memset(adapters->canonical_last_resources, 0,
                sizeof(adapters->canonical_last_resources));
@@ -1498,6 +1681,9 @@ static int test_submit_process_commands_v6(
         result = adapters->software->platform.submit(
             adapters->software->platform.context, &submission, NULL, 0u);
         if (result != RIN_VULKAN_PRODUCT_OK) return result;
+        if (has_graphics_image_barriers &&
+            !test_execute_native_window_clear(adapters, begin))
+            return RIN_VULKAN_PRODUCT_PROTOCOL;
         if (defer_completion != 0u) {
             const uint32_t report_index =
                 (adapters->software->report_tail +
@@ -3786,16 +3972,20 @@ static int initialize_product_adapters(
         queue_mappings[index].logical_queue_id = index;
         queue_mappings[index].physical_queue_id = index;
     }
-    result = rin_vulkan_rinos_process_submit_backend_v10_init(
+    result = rin_vulkan_rinos_process_submit_backend_v11_init(
         &adapters->process_submit_backend, &adapters->v5,
         TEST_PROCESS_SUBMIT_DEVICE_ID,
         TEST_PROCESS_SUBMIT_DEVICE_GENERATION, queue_mappings,
         software->queue_count);
     if (result != RIN_VULKAN_PRODUCT_OK) return result;
     {
+        RinVulkanProductPlatformV15* backend_v15 =
+            rin_vulkan_rinos_process_submit_backend_v11_platform_v15(
+                &adapters->process_submit_backend);
+        if (!backend_v15) return RIN_VULKAN_PRODUCT_STATE;
         backend_v14 =
             rin_vulkan_rinos_process_submit_backend_v10_platform_v14(
-                &adapters->process_submit_backend);
+                &adapters->process_submit_backend.submit_backend);
         backend_v13 = backend_v14 ? backend_v14->base : NULL;
         if (!backend_v13) return RIN_VULKAN_PRODUCT_STATE;
         adapters->v12 = backend_v13->base;
@@ -3807,7 +3997,7 @@ static int initialize_product_adapters(
         adapters->v6 = adapters->v7 ? adapters->v7->base : NULL;
         adapters->process_backend_v7 =
             &adapters->process_submit_backend.submit_backend
-                 .submit_backend.submit_backend;
+                 .submit_backend.submit_backend.submit_backend;
         if (!adapters->v6 || !adapters->v7 || !adapters->v8 ||
             !adapters->v9 || !adapters->v10 || !adapters->v11 ||
             !adapters->v12 ||
@@ -3829,6 +4019,8 @@ static int initialize_product_adapters(
             test_create_process_graphics_bind_group_v14;
         adapters->v14.destroy_process_graphics_bind_group =
             test_destroy_process_graphics_bind_group_v14;
+        adapters->v15 = *backend_v15;
+        adapters->v15.base = &adapters->v14;
         adapters->process_image_create_result = RIN_VULKAN_PRODUCT_OK;
         adapters->process_image_destroy_result = RIN_VULKAN_PRODUCT_OK;
     }
@@ -5279,6 +5471,8 @@ static int test_process_compute_pipeline_dispatch(
     RinVkPipeline pipeline = 0u;
     RinVkCommandPool pool = 0u;
     RinVkCommandBuffer command_buffer = NULL;
+    uint32_t sdk_shader_before;
+    uint32_t sdk_compute_pipeline_before;
     uint32_t sdk_submit_before;
     uint32_t canonical_submit_before;
     uint32_t canonical_dispatch_before;
@@ -5305,6 +5499,9 @@ static int test_process_compute_pipeline_dispatch(
     sdk_submit_before = adapters->sdk_process_submit_calls;
     canonical_submit_before = adapters->canonical_submit_calls;
     canonical_dispatch_before = adapters->canonical_dispatch_calls;
+    sdk_shader_before = adapters->sdk_shader_module_create_calls;
+    sdk_compute_pipeline_before =
+        adapters->sdk_compute_pipeline_create_calls;
     sdk_destroy_before = adapters->sdk_object_destroy_calls;
     memset(&shader_info, 0, sizeof(shader_info));
     shader_info.sType = RIN_VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -5332,8 +5529,10 @@ static int test_process_compute_pipeline_dispatch(
     expected_shader_token =
         ((uint64_t)RIN_VULKAN_RINOS_PROCESS_SHADER_MODULE_TOKEN_TAG << 48u) |
         (pipeline & UINT64_C(0x0000FFFFFFFFFFFF));
-    PROCESS_COMPUTE_CHECK(adapters->sdk_shader_module_create_calls == 1u &&
-        adapters->sdk_compute_pipeline_create_calls == 1u &&
+    PROCESS_COMPUTE_CHECK(
+        adapters->sdk_shader_module_create_calls == sdk_shader_before + 1u &&
+        adapters->sdk_compute_pipeline_create_calls ==
+            sdk_compute_pipeline_before + 1u &&
         adapters->sdk_last_pipeline_token == pipeline &&
         adapters->sdk_last_shader_module_token == expected_shader_token &&
         adapters->sdk_last_pipeline_shader_token == expected_shader_token);
@@ -7671,6 +7870,9 @@ int main(void) {
     uint32_t product_v10_bound = 0u;
     uint32_t product_v11_bound = 0u;
     uint32_t product_v12_bound = 0u;
+    uint32_t product_v13_bound = 0u;
+    uint32_t product_v14_bound = 0u;
+    uint32_t product_v15_bound = 0u;
     uint32_t process_backend_initialized = 0u;
     uint32_t surface_created = 0u;
     uint32_t device_created = 0u;
@@ -8148,7 +8350,6 @@ int main(void) {
         uint64_t imported_surface_generation = 0u;
         uint64_t imported_frame_sequence = 0u;
         uint32_t pixel;
-        int imported_pixels_nonzero = 0;
         CHECK(compositor_gpu_readback_runtime_core_reset(
                   77u, 2u, 2u, &imported_surface_id,
                   &imported_surface_generation) == 0);
@@ -8158,6 +8359,15 @@ int main(void) {
             imported_surface_id;
         g_native_window_app_surface.compositor_generation =
             imported_surface_generation;
+        CHECK(rin_gpu_vulkan_icd_bind_product_platform_v13(
+                  &product_adapters.v13) == RIN_GPU_VULKAN_OK);
+        product_v13_bound = 1u;
+        CHECK(rin_gpu_vulkan_icd_bind_product_platform_v14(
+                  &product_adapters.v14) == RIN_GPU_VULKAN_OK);
+        product_v14_bound = 1u;
+        CHECK(rin_gpu_vulkan_icd_bind_product_platform_v15(
+                  &product_adapters.v15) == RIN_GPU_VULKAN_OK);
+        product_v15_bound = 1u;
     {
         const int app_result = rinos_native_window_surface_main();
         if (app_result != 0)
@@ -8169,6 +8379,21 @@ int main(void) {
                     g_native_window_app_surface.last_import_result);
         CHECK(app_result == 0);
     }
+        CHECK(product_adapters.canonical_last_graphics_command_count == 7u &&
+              product_adapters.canonical_last_graphics_commands[0].type ==
+                  RIN_GPU_BACKEND_COMMAND_TRANSITION_IMAGE &&
+              product_adapters.canonical_last_graphics_commands[1].type ==
+                  RIN_GPU_BACKEND_COMMAND_GRAPHICS_BARRIER_V2 &&
+              product_adapters.canonical_last_graphics_commands[2].type ==
+                  RIN_GPU_BACKEND_COMMAND_BEGIN_RENDER_PASS &&
+              product_adapters.canonical_last_graphics_commands[3].type ==
+                  RIN_GPU_BACKEND_COMMAND_DRAW &&
+              product_adapters.canonical_last_graphics_commands[4].type ==
+                  RIN_GPU_BACKEND_COMMAND_END_RENDER_PASS &&
+              product_adapters.canonical_last_graphics_commands[5].type ==
+                  RIN_GPU_BACKEND_COMMAND_TRANSITION_IMAGE &&
+              product_adapters.canonical_last_graphics_commands[6].type ==
+                  RIN_GPU_BACKEND_COMMAND_GRAPHICS_BARRIER_V2);
     CHECK(g_native_window_app_surface.window_create_calls == 1u &&
           g_native_window_app_surface.surface_ops_calls == 1u &&
           g_native_window_app_surface.frame_import_calls == 1u &&
@@ -8206,13 +8431,20 @@ int main(void) {
                   &imported_frame_sequence) == 0);
         CHECK(imported_front_slot == imported_buffer_slot &&
               imported_frame_sequence == 1u);
+        /* The app imports RGBA8; RinRuntime's display buffer is BGRA8. */
+        CHECK(imported_pixels[0] == 107u && imported_pixels[1] == 46u &&
+              imported_pixels[2] == 20u && imported_pixels[3] == 255u);
         for (pixel = 0u; pixel < 4u; ++pixel)
-            if (imported_pixels[pixel * 4u] != 0u ||
-                imported_pixels[pixel * 4u + 1u] != 0u ||
-                imported_pixels[pixel * 4u + 2u] != 0u ||
-                imported_pixels[pixel * 4u + 3u] != 0u)
-                imported_pixels_nonzero = 1;
-        CHECK(imported_pixels_nonzero);
+            CHECK(imported_pixels[pixel * 4u + 3u] == 255u);
+        CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v15(
+                  &product_adapters.v15) == RIN_GPU_VULKAN_OK);
+        product_v15_bound = 0u;
+        CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v14(
+                  &product_adapters.v14) == RIN_GPU_VULKAN_OK);
+        product_v14_bound = 0u;
+        CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v13(
+                  &product_adapters.v13) == RIN_GPU_VULKAN_OK);
+        product_v13_bound = 0u;
     }
 #endif
 
@@ -8331,7 +8563,7 @@ int main(void) {
         CHECK(rin_gpu_vulkan_icd_unbind_product_platform_v6(
                   product_adapters.v6) == RIN_GPU_VULKAN_OK);
         product_v6_bound = 0u;
-        CHECK(rin_vulkan_rinos_process_submit_backend_v10_detach(
+        CHECK(rin_vulkan_rinos_process_submit_backend_v11_detach(
                   &product_adapters.process_submit_backend) ==
               RIN_VULKAN_PRODUCT_OK);
         process_backend_initialized = 0u;
@@ -8365,6 +8597,42 @@ cleanup:
     if (device_created) vkDestroyDevice(device, NULL);
     if (surface_created) vkDestroySurfaceKHR(instance, surface, NULL);
     if (instance) vkDestroyInstance(instance, NULL);
+    if (product_v15_bound) {
+        const int unbind_result =
+            rin_gpu_vulkan_icd_unbind_product_platform_v15(
+                &product_adapters.v15);
+        if (unbind_result == RIN_GPU_VULKAN_OK) {
+            product_v15_bound = 0u;
+        } else {
+            fprintf(stderr, "V15 process-graphics-pipeline unbind returned %d\n",
+                    unbind_result);
+            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
+    if (product_v14_bound) {
+        const int unbind_result =
+            rin_gpu_vulkan_icd_unbind_product_platform_v14(
+                &product_adapters.v14);
+        if (unbind_result == RIN_GPU_VULKAN_OK) {
+            product_v14_bound = 0u;
+        } else {
+            fprintf(stderr, "V14 graphics-bind-group unbind returned %d\n",
+                    unbind_result);
+            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
+    if (product_v13_bound) {
+        const int unbind_result =
+            rin_gpu_vulkan_icd_unbind_product_platform_v13(
+                &product_adapters.v13);
+        if (unbind_result == RIN_GPU_VULKAN_OK) {
+            product_v13_bound = 0u;
+        } else {
+            fprintf(stderr, "V13 process-image unbind returned %d\n",
+                    unbind_result);
+            result = RIN_VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
     if (product_v12_bound) {
         const int unbind_result =
             rin_gpu_vulkan_icd_unbind_product_platform_v12(
@@ -8459,7 +8727,7 @@ cleanup:
             result = RIN_VK_ERROR_INITIALIZATION_FAILED;
         } else {
             const int detach_result =
-                rin_vulkan_rinos_process_submit_backend_v10_detach(
+                rin_vulkan_rinos_process_submit_backend_v11_detach(
                     &product_adapters.process_submit_backend);
             if (detach_result != RIN_VULKAN_PRODUCT_OK) {
                 fprintf(stderr,

@@ -753,6 +753,8 @@ static size_t build_triangle_fragment_spirv(uint32_t* words,
     EXAMPLE_SPIRV_EMIT(71u, 3u);                    /* NoPerspective input */
     op[0] = 20u; op[1] = 30u; op[2] = 5u;
     EXAMPLE_SPIRV_EMIT(71u, 4u);                    /* integer input location 5 */
+    op[0] = 20u; op[1] = 14u;
+    EXAMPLE_SPIRV_EMIT(71u, 3u);                    /* flat integer input */
     op[0] = 1u;
     EXAMPLE_SPIRV_EMIT(19u, 2u);                    /* void */
     op[0] = 2u; op[1] = 32u;

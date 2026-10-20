@@ -752,6 +752,18 @@ static RinVkResult native_window_swapchain_present(
     struct RinVkQueue_T* queue, RinVkSwapchainSlot* swapchain,
     uint32_t image_index);
 
+static int process_image_layout_to_state(uint32_t layout,
+                                         uint32_t* state_out);
+static int process_vulkan_barrier_to_backend(
+    uint32_t source_stage_mask, uint32_t source_access_mask,
+    uint32_t destination_stage_mask, uint32_t destination_access_mask,
+    RinGpuBackendGraphicsBarrierV2* destination);
+static int graphics_submission_barriers_valid(
+    const RinGpuVulkanCommandBufferV1* command,
+    const RinVkImageSlot* image, uint32_t* layout_at_draw_out);
+static int image_barrier_layout_valid(const RinVkImageSlot* image,
+                                      uint32_t layout, int old_layout);
+
 static int command_buffer_runtime_index(
         const RinGpuVulkanCommandBufferV1* command_buffer,
         uint32_t* index_out) {
@@ -4542,6 +4554,7 @@ static int process_graphics_packet_v6_compatible(
     RinVkImageViewSlot* view;
     RinVkImageSlot* image;
     const RinGpuVulkanGraphicsPacketV1* packet;
+    uint32_t layout_at_draw;
     if (!slot || !slot->owner || !slot->graphics_packet ||
         slot->command_buffer_count != 1u || !slot->command_buffers[0] ||
         slot->resource_count == 0u ||
@@ -4611,18 +4624,30 @@ static int process_graphics_packet_v6_compatible(
         packet->clear_blue < 0.0f || packet->clear_blue > 1.0f ||
         packet->clear_alpha < 0.0f || packet->clear_alpha > 1.0f)
         return 0;
+    if (!graphics_submission_barriers_valid(
+            command, image, &layout_at_draw) ||
+        layout_at_draw != command->graphics_color_layout)
+        return 0;
     return 1;
 }
 
 static int build_process_graphics_commands_v1(
         const RinVkSubmissionSlot* slot,
-        RinGpuBackendCommandV1 commands[3], uint32_t* command_count_out) {
+        RinGpuBackendCommandV1
+            commands[RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS * 2u + 3u],
+        uint32_t* command_count_out) {
     RinGpuVulkanCommandBufferV1* command;
     RinVkPipelineSlot* pipeline;
     RinVkImageViewSlot* view;
     RinVkImageSlot* image;
     uint64_t image_cookie;
     uint32_t image_index;
+    uint32_t runtime_index;
+    uint32_t step_index;
+    uint32_t operation_index = 0u;
+    uint32_t draw_count = 0u;
+    uint32_t command_count = 0u;
+    uint32_t layout_at_draw;
     if (command_count_out) *command_count_out = 0u;
     if (!commands || !command_count_out ||
         !process_graphics_packet_v6_compatible(slot))
@@ -4640,44 +4665,135 @@ static int build_process_graphics_commands_v1(
     image_index = (uint32_t)(image - g_images);
     image_cookie = resource_handle(RIN_VK_IMAGE_TAG, image_index,
                                    image->generation);
-    memset(commands, 0, sizeof(*commands) * 3u);
-    commands[0].type = RIN_GPU_BACKEND_COMMAND_BEGIN_RENDER_PASS;
-    commands[0].value.render_pass_begin.color_target_cookie = image_cookie;
-    commands[0].value.render_pass_begin.load_op = RIN_GPU_RENDER_CLEAR;
-    commands[0].value.render_pass_begin.store_op = RIN_GPU_RENDER_STORE;
-    commands[0].value.render_pass_begin.clear_red =
-        slot->graphics_packet->clear_red;
-    commands[0].value.render_pass_begin.clear_green =
-        slot->graphics_packet->clear_green;
-    commands[0].value.render_pass_begin.clear_blue =
-        slot->graphics_packet->clear_blue;
-    commands[0].value.render_pass_begin.clear_alpha =
-        slot->graphics_packet->clear_alpha;
-    commands[0].value.render_pass_begin.color_write_mask =
-        RIN_GPU_COLOR_WRITE_ALL;
-    commands[0].value.render_pass_begin.clear_region.x = 0;
-    commands[0].value.render_pass_begin.clear_region.y = 0;
-    commands[0].value.render_pass_begin.clear_region.width = image->width;
-    commands[0].value.render_pass_begin.clear_region.height = image->height;
-    commands[0].value.render_pass_begin.clear_region.enabled = 1u;
+    if (!command_buffer_runtime_index(command, &runtime_index) ||
+        !graphics_submission_barriers_valid(command, image,
+                                             &layout_at_draw))
+        return RIN_VULKAN_PRODUCT_PROTOCOL;
+    memset(commands, 0, sizeof(*commands) *
+                           (RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS * 2u + 3u));
+    for (step_index = 0u;
+         step_index < g_command_stream_step_counts[runtime_index];
+         ++step_index) {
+        const RinGpuVulkanCommandStreamStepV1* step =
+            &g_command_stream_steps[runtime_index][step_index];
+        if (step->type == RIN_GPU_VULKAN_COMMAND_STREAM_TRANSFER_OPS) {
+            uint32_t barrier_index;
+            if (step->first_index != operation_index || step->count == 0u ||
+                step->count > command->transfer_op_count - operation_index)
+                return RIN_VULKAN_PRODUCT_PROTOCOL;
+            for (barrier_index = 0u; barrier_index < step->count;
+                 ++barrier_index) {
+                const RinGpuVulkanTransferOpV2* operation =
+                    &command->transfer_ops[operation_index++];
+                RinGpuBackendGraphicsBarrierV2 barrier;
+                if (operation->type !=
+                        RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER ||
+                    !process_vulkan_barrier_to_backend(
+                        operation->barrier.src_stage_mask,
+                        operation->barrier.src_access_mask,
+                        operation->barrier.dst_stage_mask,
+                        operation->barrier.dst_access_mask, &barrier))
+                    return RIN_VULKAN_PRODUCT_PROTOCOL;
+                if (operation->source_width != operation->source_height) {
+                    uint32_t before_state;
+                    uint32_t after_state;
+                    RinGpuBackendCommandV1* transition;
+                    if (!process_image_layout_to_state(
+                            operation->source_width, &before_state) ||
+                        !process_image_layout_to_state(
+                            operation->source_height, &after_state) ||
+                        command_count >=
+                            RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS * 2u + 3u)
+                        return RIN_VULKAN_PRODUCT_PROTOCOL;
+                    transition = &commands[command_count++];
+                    transition->type =
+                        RIN_GPU_BACKEND_COMMAND_TRANSITION_IMAGE;
+                    transition->value.image_transition.image_cookie =
+                        image_cookie;
+                    transition->value.image_transition.transition.abi_version =
+                        RIN_GPU_ABI_VERSION;
+                    transition->value.image_transition.transition.struct_size =
+                        sizeof(transition->value.image_transition.transition);
+                    transition->value.image_transition.transition.base_mip_level =
+                        0u;
+                    transition->value.image_transition.transition.mip_level_count =
+                        1u;
+                    transition->value.image_transition.transition.base_array_layer =
+                        0u;
+                    transition->value.image_transition.transition.array_layer_count =
+                        1u;
+                    transition->value.image_transition.transition.before_state =
+                        before_state;
+                    transition->value.image_transition.transition.after_state =
+                        after_state;
+                    transition->value.image_transition.transition.aspect_mask =
+                        operation->destination_width;
+                }
+                if (command_count >=
+                    RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS * 2u + 3u)
+                    return RIN_VULKAN_PRODUCT_LIMIT;
+                commands[command_count].type =
+                    RIN_GPU_BACKEND_COMMAND_GRAPHICS_BARRIER_V2;
+                commands[command_count++].value.graphics_barrier_v2 = barrier;
+            }
+        } else if (step->type ==
+                       RIN_GPU_VULKAN_COMMAND_STREAM_GRAPHICS_DRAW &&
+                   step->first_index == 0u && step->count == 1u &&
+                   draw_count == 0u) {
+            RinGpuBackendCommandV1* begin;
+            RinGpuBackendCommandV1* draw;
+            RinGpuBackendCommandV1* end;
+            if (command_count >
+                RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS * 2u)
+                return RIN_VULKAN_PRODUCT_LIMIT;
+            begin = &commands[command_count++];
+            begin->type = RIN_GPU_BACKEND_COMMAND_BEGIN_RENDER_PASS;
+            begin->value.render_pass_begin.color_target_cookie = image_cookie;
+            begin->value.render_pass_begin.load_op = RIN_GPU_RENDER_CLEAR;
+            begin->value.render_pass_begin.store_op = RIN_GPU_RENDER_STORE;
+            begin->value.render_pass_begin.clear_red =
+                slot->graphics_packet->clear_red;
+            begin->value.render_pass_begin.clear_green =
+                slot->graphics_packet->clear_green;
+            begin->value.render_pass_begin.clear_blue =
+                slot->graphics_packet->clear_blue;
+            begin->value.render_pass_begin.clear_alpha =
+                slot->graphics_packet->clear_alpha;
+            begin->value.render_pass_begin.color_write_mask =
+                RIN_GPU_COLOR_WRITE_ALL;
+            begin->value.render_pass_begin.clear_region.x = 0;
+            begin->value.render_pass_begin.clear_region.y = 0;
+            begin->value.render_pass_begin.clear_region.width = image->width;
+            begin->value.render_pass_begin.clear_region.height = image->height;
+            begin->value.render_pass_begin.clear_region.enabled = 1u;
 
-    commands[1].type = RIN_GPU_BACKEND_COMMAND_DRAW;
-    commands[1].value.draw.pipeline_cookie =
-        pipeline->process_graphics_pipeline_token;
-    commands[1].value.draw.color_target_cookie = image_cookie;
-    commands[1].value.draw.bind_group_cookie =
-        slot->process_graphics_bind_group_token;
-    commands[1].value.draw.vertex_count =
-        slot->graphics_packet->vertex_count;
-    commands[1].value.draw.instance_count =
-        slot->graphics_packet->instance_count;
-    commands[1].value.draw.first_vertex =
-        slot->graphics_packet->first_vertex;
-    commands[1].value.draw.first_instance =
-        slot->graphics_packet->first_instance;
+            draw = &commands[command_count++];
+            draw->type = RIN_GPU_BACKEND_COMMAND_DRAW;
+            draw->value.draw.pipeline_cookie =
+                pipeline->process_graphics_pipeline_token;
+            draw->value.draw.color_target_cookie = image_cookie;
+            draw->value.draw.bind_group_cookie =
+                slot->process_graphics_bind_group_token;
+            draw->value.draw.vertex_count =
+                slot->graphics_packet->vertex_count;
+            draw->value.draw.instance_count =
+                slot->graphics_packet->instance_count;
+            draw->value.draw.first_vertex =
+                slot->graphics_packet->first_vertex;
+            draw->value.draw.first_instance =
+                slot->graphics_packet->first_instance;
 
-    commands[2].type = RIN_GPU_BACKEND_COMMAND_END_RENDER_PASS;
-    *command_count_out = 3u;
+            end = &commands[command_count++];
+            end->type = RIN_GPU_BACKEND_COMMAND_END_RENDER_PASS;
+            ++draw_count;
+        } else {
+            return RIN_VULKAN_PRODUCT_UNSUPPORTED;
+        }
+    }
+    if (operation_index != command->transfer_op_count || draw_count != 1u ||
+        command_count > RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS * 2u + 3u)
+        return RIN_VULKAN_PRODUCT_PROTOCOL;
+    *command_count_out = command_count;
     return RIN_VULKAN_PRODUCT_OK;
 }
 
@@ -4943,6 +5059,102 @@ static int process_vulkan_barrier_to_backend(
     destination->destination_access = destination_access;
     destination->flags = 0u;
     destination->reserved = 0u;
+    return 1;
+}
+
+static int graphics_submission_barriers_valid(
+        const RinGpuVulkanCommandBufferV1* command,
+        const RinVkImageSlot* image, uint32_t* layout_at_draw_out) {
+    uint32_t runtime_index;
+    uint32_t step_index;
+    uint32_t operation_index = 0u;
+    uint32_t current_layout;
+    uint32_t layout_at_draw = RIN_VK_IMAGE_LAYOUT_UNDEFINED;
+    uint32_t draw_count = 0u;
+    int draw_seen = 0;
+    if (layout_at_draw_out) *layout_at_draw_out = 0u;
+    if (!command || !image || !layout_at_draw_out || !image->owner ||
+        !image->memory || command->barrier_count != 0u ||
+        command->reserved_barrier != 0u ||
+        command->transfer_op_count >
+            RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS ||
+        !command_buffer_runtime_index(command, &runtime_index) ||
+        g_command_stream_step_counts[runtime_index] == 0u ||
+        g_command_stream_step_counts[runtime_index] >
+            RIN_GPU_VULKAN_COMMAND_STREAM_MAX_STEPS)
+        return 0;
+    current_layout = __atomic_load_n(&image->current_layout, __ATOMIC_ACQUIRE);
+    for (step_index = 0u;
+         step_index < g_command_stream_step_counts[runtime_index];
+         ++step_index) {
+        const RinGpuVulkanCommandStreamStepV1* step =
+            &g_command_stream_steps[runtime_index][step_index];
+        if (step->reserved[0] != 0u || step->reserved[1] != 0u ||
+            step->reserved[2] != 0u)
+            return 0;
+        if (step->type == RIN_GPU_VULKAN_COMMAND_STREAM_TRANSFER_OPS) {
+            uint32_t barrier_index;
+            if (step->first_index != operation_index || step->count == 0u ||
+                operation_index > command->transfer_op_count ||
+                step->count > command->transfer_op_count - operation_index)
+                return 0;
+            for (barrier_index = 0u; barrier_index < step->count;
+                 ++barrier_index) {
+                const RinGpuVulkanTransferOpV2* operation =
+                    &command->transfer_ops[operation_index++];
+                RinGpuBackendGraphicsBarrierV2 translated_barrier;
+                uint64_t image_address;
+                if (operation->type !=
+                        RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER ||
+                    operation->reserved != 0u ||
+                    operation->source_allocation == 0u ||
+                    image_slot((RinVkDevice)(void*)image->owner,
+                               (RinVkImage)operation->source_allocation) !=
+                        image ||
+                    operation->source_gpu_address != 0u ||
+                    operation->destination_allocation !=
+                        image->memory->product_allocation ||
+                    !checked_image_address(image, 0u, image->memory_size,
+                                           &image_address) ||
+                    operation->destination_gpu_address != image_address ||
+                    operation->size_bytes != image->memory_size ||
+                    operation->destination_width !=
+                        image_format_aspects(image->format) ||
+                    operation->destination_height !=
+                        RIN_VK_QUEUE_FAMILY_IGNORED ||
+                    operation->filter != RIN_VK_QUEUE_FAMILY_IGNORED ||
+                    operation->sample_count != 0u ||
+                    !image_barrier_layout_valid(
+                        image, operation->source_width, 1) ||
+                    !image_barrier_layout_valid(
+                        image, operation->source_height, 0) ||
+                    !(operation->source_width ==
+                          RIN_VK_IMAGE_LAYOUT_UNDEFINED ||
+                      current_layout == operation->source_width) ||
+                    !process_vulkan_barrier_to_backend(
+                        operation->barrier.src_stage_mask,
+                        operation->barrier.src_access_mask,
+                        operation->barrier.dst_stage_mask,
+                        operation->barrier.dst_access_mask,
+                        &translated_barrier))
+                    return 0;
+                current_layout = operation->source_height;
+            }
+        } else if (step->type ==
+                       RIN_GPU_VULKAN_COMMAND_STREAM_GRAPHICS_DRAW &&
+                   step->first_index == 0u && step->count == 1u &&
+                   draw_count == 0u) {
+            layout_at_draw = current_layout;
+            draw_seen = 1;
+            ++draw_count;
+        } else {
+            return 0;
+        }
+    }
+    if (!draw_seen || draw_count != 1u ||
+        operation_index != command->transfer_op_count)
+        return 0;
+    *layout_at_draw_out = layout_at_draw;
     return 1;
 }
 
@@ -6018,7 +6230,8 @@ static int submit_canonical_process_commands(
         RinVulkanProductProcessSubmitReceiptV1* receipt_out) {
     RinGpuBackendCommandV1* commands = NULL;
     RinGpuBackendCommandV1 compute_command;
-    RinGpuBackendCommandV1 graphics_commands[3];
+    RinGpuBackendCommandV1 graphics_commands[
+        RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS * 2u + 3u];
     RinVulkanProductResourceV1 graphics_submit_resources[
         RIN_VULKAN_PRODUCT_MAX_RESOURCES_PER_SUBMISSION];
     RinVulkanProductPlatformV7* process_platform;
@@ -14736,12 +14949,34 @@ static int image_layout_transfer_destination_valid(uint32_t layout) {
            layout == RIN_VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 }
 
+static int command_image_layout_is(
+        const RinGpuVulkanCommandBufferV1* command_buffer,
+        const RinVkImageSlot* image, uint32_t requested_layout) {
+    uint32_t current_layout;
+    uint32_t operation_index;
+    if (!command_buffer || !image || !image->owner ||
+        command_buffer->transfer_op_count >
+            RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS)
+        return 0;
+    current_layout = __atomic_load_n(&image->current_layout,
+                                     __ATOMIC_ACQUIRE);
+    for (operation_index = 0u;
+         operation_index < command_buffer->transfer_op_count;
+         ++operation_index) {
+        const RinGpuVulkanTransferOpV2* operation =
+            &command_buffer->transfer_ops[operation_index];
+        if (operation->type == RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER &&
+            image_slot((RinVkDevice)(void*)image->owner,
+                       (RinVkImage)operation->source_allocation) == image)
+            current_layout = operation->source_height;
+    }
+    return current_layout == requested_layout;
+}
+
 static int command_image_layout_matches(
         const RinGpuVulkanCommandBufferV1* command_buffer,
         RinVkImage image_handle, const RinVkImageSlot* image,
         uint32_t requested_layout, int source_access) {
-    uint32_t current_layout;
-    uint32_t operation_index;
     if (!command_buffer || !image || image_handle == 0u ||
         (source_access
              ? !image_layout_transfer_source_valid(requested_layout)
@@ -14749,17 +14984,7 @@ static int command_image_layout_matches(
         command_buffer->transfer_op_count >
             RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS)
         return 0;
-    current_layout = __atomic_load_n(&image->current_layout, __ATOMIC_ACQUIRE);
-    for (operation_index = 0u;
-         operation_index < command_buffer->transfer_op_count;
-         ++operation_index) {
-        const RinGpuVulkanTransferOpV2* operation =
-            &command_buffer->transfer_ops[operation_index];
-        if (operation->type == RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER &&
-            operation->source_allocation == image_handle)
-            current_layout = operation->source_height;
-    }
-    return current_layout == requested_layout;
+    return command_image_layout_is(command_buffer, image, requested_layout);
 }
 
 static int image_subresource_valid(const RinVkImageSlot* image,
@@ -17563,6 +17788,7 @@ static RinVkResult snapshot_graphics_submission(
     uint64_t vertex_size = 0u, required_vertex_bytes = 0u;
     uint32_t resource_count = 0u;
     uint32_t ownership_update_count = 0u;
+    uint32_t layout_at_draw = RIN_VK_IMAGE_LAYOUT_UNDEFINED;
     uint8_t resource_indices[RIN_SHADER_MAX_RESOURCES] = {0};
     RinVkResult result = RIN_VK_ERROR_INITIALIZATION_FAILED;
     size_t prefix = offsetof(RinGpuVulkanGraphicsPacketV1, shader_ir);
@@ -17582,7 +17808,9 @@ static RinVkResult snapshot_graphics_submission(
     command = command_buffers[0];
     if (command->owner != (uintptr_t)device || !command->pool ||
         command->pool->queue_family_index != queue_family_index ||
-        command->copy_count != 0u || command->transfer_op_count != 0u ||
+        command->copy_count != 0u ||
+        command->transfer_op_count >
+            RIN_GPU_VULKAN_COMMAND_MAX_TRANSFER_OPS ||
         command->barrier_count != 0u || command->query_command_count != 0u ||
         command->event_command_count != 0u ||
         command->compute_dispatch_count != 0u ||
@@ -17673,7 +17901,9 @@ static RinVkResult snapshot_graphics_submission(
         (image->usage & RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) == 0u ||
         image->samples != RIN_VK_SAMPLE_COUNT_1_BIT ||
         image->width != command->graphics_width || image->height != command->graphics_height ||
-        __atomic_load_n(&image->current_layout, __ATOMIC_ACQUIRE) != command->graphics_color_layout ||
+        !graphics_submission_barriers_valid(command, image,
+                                             &layout_at_draw) ||
+        layout_at_draw != command->graphics_color_layout ||
         image->ownership.transfer_pending != 0u ||
         (image->ownership.owner_queue_family != RIN_VK_QUEUE_FAMILY_IGNORED &&
          image->ownership.owner_queue_family != queue_family_index) ||
@@ -19673,6 +19903,11 @@ RinVkResult RIN_VKAPI_CALL vkQueueSubmit(
         memset(&validation_packet_v2, 0, sizeof(validation_packet_v2));
         validation_packet_v2.struct_size = sizeof(validation_packet_v2);
         validation_packet_v2.version = RIN_GPU_VULKAN_TRANSFER_BATCH_VERSION_2;
+        validation_packet_v2.op_count = command_buffers[0]->transfer_op_count;
+        memcpy(validation_packet_v2.operations,
+               command_buffers[0]->transfer_ops,
+               sizeof(validation_packet_v2.operations[0]) *
+                   validation_packet_v2.op_count);
         resource_count = 0u;
     } else if (!snapshot_submission_packet_v2(
                    device, queue_slot_value->queue_family_index,
@@ -21649,8 +21884,7 @@ void RIN_VKAPI_CALL vkCmdBeginRendering(
         image->height == 0u ||
         rendering_info->renderArea.extent.width != image->width ||
         rendering_info->renderArea.extent.height != image->height ||
-        __atomic_load_n(&image->current_layout, __ATOMIC_ACQUIRE) !=
-            attachment->imageLayout ||
+        !command_image_layout_is(command, image, attachment->imageLayout) ||
         image->ownership.transfer_pending != 0u ||
         (image->ownership.owner_queue_family != RIN_VK_QUEUE_FAMILY_IGNORED &&
          image->ownership.owner_queue_family != command->pool->queue_family_index)) {
