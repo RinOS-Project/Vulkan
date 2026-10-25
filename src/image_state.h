@@ -12,6 +12,10 @@ static inline int rin_vk_image_usage_valid_for_format(int32_t format,
                                                        uint32_t usage)
 {
     if (usage == 0u || (usage & ~RIN_VK_IMAGE_USAGE_KNOWN) != 0u) return 0;
+    if ((usage & RIN_VK_IMAGE_USAGE_STORAGE_BIT) != 0u)
+        return format == RIN_VK_FORMAT_R8_UNORM &&
+               usage == RIN_VK_IMAGE_USAGE_STORAGE_BIT;
+    if (format == RIN_VK_FORMAT_R8_UNORM) return 0;
     if ((usage & RIN_VK_IMAGE_USAGE_SAMPLED_BIT) != 0u &&
         format != RIN_VK_FORMAT_R8G8B8A8_UNORM &&
         format != RIN_VK_FORMAT_D32_SFLOAT)
@@ -24,6 +28,8 @@ static inline int rin_vk_image_usage_valid_for_format(int32_t format,
 
 static inline uint32_t rin_vk_image_format_features(int32_t format)
 {
+    if (format == RIN_VK_FORMAT_R8_UNORM)
+        return RIN_VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
     if (format == RIN_VK_FORMAT_R8G8B8A8_UNORM)
         return RIN_VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
                RIN_VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
@@ -54,10 +60,11 @@ static inline int rin_vk_image_descriptor_layout_valid(
     uint32_t layout)
 {
     if (descriptor_type == RIN_VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
-        /* This bounded RinVk image profile has no STORAGE usage bit or
-         * storage-image format capability. GENERAL alone cannot make an
-         * otherwise unsupported image valid for a storage descriptor. */
-        return 0;
+        return format == RIN_VK_FORMAT_R8_UNORM &&
+               image_usage == RIN_VK_IMAGE_USAGE_STORAGE_BIT &&
+               layout == RIN_VK_IMAGE_LAYOUT_GENERAL &&
+               (rin_vk_image_format_features(format) &
+                RIN_VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0u;
     }
     if (descriptor_type != RIN_VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE &&
         descriptor_type != RIN_VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
@@ -166,7 +173,7 @@ static inline int rin_vk_image_layout_valid_for_usage(
     if (!rin_vk_image_layout_to_ringpu_state(layout, &state)) return 0;
     switch (state) {
     case RIN_GPU_IMAGE_STATE_GENERAL:
-        return image_usage != 0u;
+        return rin_vk_image_usage_valid_for_format(format, image_usage);
     case RIN_GPU_IMAGE_STATE_COPY_SOURCE:
         return (image_usage & RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0u;
     case RIN_GPU_IMAGE_STATE_COPY_DESTINATION:
