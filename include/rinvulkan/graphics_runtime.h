@@ -31,6 +31,13 @@ int rin_gpu_vulkan_graphics_runtime_init(
     RinGpuVulkanGraphicsRuntimeV1* runtime,
     const RinGpuRuntimeDescV1* desc,
     uint32_t queue_capabilities);
+/* Queue-aware V2 entry point. The returned runtime uses the same V1
+ * operation surface, while construction preserves the explicit queue owner
+ * identity and required backend submit callback from both V2 descriptors. */
+int rin_gpu_vulkan_graphics_runtime_init_v2(
+    RinGpuVulkanGraphicsRuntimeV1* runtime,
+    const RinGpuRuntimeDescV2* desc,
+    const RinGpuQueueDescV2* queue_desc);
 int rin_gpu_vulkan_graphics_runtime_shutdown(
     RinGpuVulkanGraphicsRuntimeV1* runtime);
 

@@ -281,6 +281,179 @@ static void make_surface(RinGpuRuntimeSoftwareSurfaceDescV1* surface,
     surface->acquire_image = acquire;
 }
 
+typedef struct QueueSubmitRouteFixture {
+    const RinGpuBackendOpsV1* backend_ops;
+    void* backend_context;
+    uint32_t call_count;
+    uint32_t family_index;
+    uint32_t engine_index;
+    uint32_t command_count;
+    uint32_t first_command_type;
+} QueueSubmitRouteFixture;
+
+static int queue_submit_route_v2(
+    void* context, uint32_t family_index, uint32_t engine_index,
+    const RinGpuBackendCommandV1* commands, uint32_t command_count)
+{
+    QueueSubmitRouteFixture* fixture = (QueueSubmitRouteFixture*)context;
+    if (!fixture || !fixture->backend_ops ||
+        !fixture->backend_ops->submit_commands ||
+        (command_count != 0u && !commands))
+        return RIN_GPU_ERROR_INVALID_ARGUMENT;
+    ++fixture->call_count;
+    fixture->family_index = family_index;
+    fixture->engine_index = engine_index;
+    fixture->command_count = command_count;
+    fixture->first_command_type =
+        command_count != 0u ? commands[0].type : 0u;
+    return fixture->backend_ops->submit_commands(
+        fixture->backend_context, commands, command_count);
+}
+
+static int queue_routed_graphics_runtime_v2_test(void)
+{
+    RinGpuRuntimeSoftwareSurfaceDescV1 base_desc;
+    RinGpuRuntimeDescV2 runtime_desc;
+    RinGpuQueueDescV2 queue_desc;
+    RinGpuSoftwareBackendDescV4 backend_desc;
+    RinGpuSoftwareBackend* backend = NULL;
+    RinGpuVulkanGraphicsRuntimeV1 runtime;
+    QueueSubmitRouteFixture fixture;
+    RinGpuBufferDescV1 buffer_desc;
+    RinGpuBufferClearV1 clear_desc;
+    RinGpuHandle buffer = 0u;
+    RinGpuHandle command_list = 0u;
+    RinGpuHandle fence = 0u;
+    uint8_t presented[64] = {0u};
+    uint32_t initial[4] = {0u, 0u, 0u, 0u};
+    uint32_t readback[4] = {0u, 0u, 0u, 0u};
+    uint32_t index;
+    uint32_t stage = 0u;
+    int result = 1;
+
+    memset(&base_desc, 0, sizeof(base_desc));
+    memset(&runtime_desc, 0, sizeof(runtime_desc));
+    memset(&queue_desc, 0, sizeof(queue_desc));
+    memset(&backend_desc, 0, sizeof(backend_desc));
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&fixture, 0, sizeof(fixture));
+    memset(&buffer_desc, 0, sizeof(buffer_desc));
+    memset(&clear_desc, 0, sizeof(clear_desc));
+
+    make_surface(&base_desc, presented);
+    base_desc.flags = RIN_GPU_RUNTIME_FLAG_HEADLESS;
+    memset(&base_desc.display, 0, sizeof(base_desc.display));
+    base_desc.present_callback = NULL;
+    base_desc.present_context = NULL;
+    base_desc.acquire_image = NULL;
+    base_desc.image_context = NULL;
+
+    backend_desc.base.base.base.struct_size = sizeof(backend_desc);
+    backend_desc.base.base.base.version =
+        RIN_GPU_SOFTWARE_BACKEND_VERSION_4;
+    backend_desc.base.base.base.max_total_bytes =
+        base_desc.max_total_allocation_size;
+    backend_desc.base.base.base.flags = RIN_GPU_SOFTWARE_BACKEND_FLAG_HEADLESS;
+    stage = 1u;
+    if (ringpu_software_backend_create(&backend_desc.base.base.base,
+                                       &backend) != RIN_GPU_OK)
+        goto cleanup;
+
+    fixture.backend_ops = ringpu_software_backend_ops();
+    fixture.backend_context = backend;
+    base_desc.backend_ops = fixture.backend_ops;
+    base_desc.backend_context = backend;
+    base_desc.backend_family = RIN_GPU_RUNTIME_BACKEND_FAMILY_VIRTIO;
+    runtime_desc.struct_size = sizeof(runtime_desc);
+    runtime_desc.version = RIN_GPU_RUNTIME_DESC_V2_VERSION;
+    runtime_desc.base = base_desc;
+    runtime_desc.submit_commands_for_queue = queue_submit_route_v2;
+    runtime_desc.submit_context = &fixture;
+
+    queue_desc.base.abi_version = RIN_GPU_ABI_VERSION;
+    queue_desc.base.struct_size = sizeof(queue_desc.base);
+    queue_desc.base.capabilities = RIN_GPU_QUEUE_COPY |
+                                   RIN_GPU_QUEUE_COMPUTE |
+                                   RIN_GPU_QUEUE_GRAPHICS;
+    queue_desc.family_index = 4u;
+    queue_desc.engine_index = 2u;
+    stage = 2u;
+    if (rin_gpu_vulkan_graphics_runtime_init_v2(
+            &runtime, &runtime_desc, &queue_desc) != RIN_GPU_OK)
+        goto cleanup;
+
+    buffer_desc.abi_version = RIN_GPU_ABI_VERSION;
+    buffer_desc.struct_size = sizeof(buffer_desc);
+    buffer_desc.size_bytes = sizeof(initial);
+    buffer_desc.usage = RIN_GPU_BUFFER_COPY_DESTINATION;
+    buffer_desc.flags = RIN_GPU_BUFFER_CPU_VISIBLE;
+    clear_desc.abi_version = RIN_GPU_ABI_VERSION;
+    clear_desc.struct_size = sizeof(clear_desc);
+    clear_desc.size_bytes = sizeof(initial);
+    clear_desc.pattern = UINT32_C(0xc001d00d);
+    stage = 3u;
+    if (rin_gpu_vulkan_graphics_runtime_create_buffer(
+            &runtime, &buffer_desc, &buffer) != RIN_GPU_OK)
+        goto cleanup;
+    stage = 4u;
+    if (ringpu_runtime_upload_buffer(runtime.runtime, buffer, 0u, initial,
+                                     sizeof(initial)) != RIN_GPU_OK)
+        goto cleanup;
+    stage = 5u;
+    if (rin_gpu_vulkan_graphics_runtime_create_command_list(
+            &runtime, &command_list) != RIN_GPU_OK)
+        goto cleanup;
+    stage = 6u;
+    if (ringpu_runtime_command_clear_buffer(runtime.runtime, command_list,
+                                            buffer, &clear_desc) != RIN_GPU_OK)
+        goto cleanup;
+    stage = 7u;
+    if (rin_gpu_vulkan_graphics_runtime_close_command_list(
+            &runtime, command_list) != RIN_GPU_OK)
+        goto cleanup;
+    stage = 8u;
+    if (ringpu_runtime_create_fence(runtime.runtime, 0u, &fence) != RIN_GPU_OK)
+        goto cleanup;
+    stage = 9u;
+    {
+        const int submit_result = rin_gpu_vulkan_graphics_runtime_submit(
+            &runtime, command_list, fence, 1u);
+        if (submit_result != RIN_GPU_OK) {
+            fprintf(stderr, "queue-route-v2 submit result %d\n",
+                    submit_result);
+            goto cleanup;
+        }
+    }
+    stage = 10u;
+    if (rin_gpu_vulkan_graphics_runtime_wait_fence(
+            &runtime, fence, 1u, UINT64_C(1000000000)) != RIN_GPU_OK)
+        goto cleanup;
+    stage = 11u;
+    if (ringpu_runtime_readback_buffer(runtime.runtime, buffer, 0u, readback,
+                                       sizeof(readback)) != RIN_GPU_OK)
+        goto cleanup;
+    stage = 12u;
+    if (fixture.call_count != 1u || fixture.family_index != 4u ||
+        fixture.engine_index != 2u || fixture.command_count != 1u ||
+        fixture.first_command_type != RIN_GPU_BACKEND_COMMAND_CLEAR_BUFFER)
+        goto cleanup;
+    stage = 13u;
+    for (index = 0u; index < 4u; ++index)
+        if (readback[index] != UINT32_C(0xc001d00d)) goto cleanup;
+    result = 0;
+
+cleanup:
+    if (result != 0)
+        fprintf(stderr, "queue-route-v2 test failed at stage %u\n", stage);
+    if (runtime.initialized == 1u &&
+        rin_gpu_vulkan_graphics_runtime_shutdown(&runtime) != RIN_GPU_OK)
+        result = 1;
+    else if (runtime.runtime != NULL)
+        ringpu_runtime_destroy(runtime.runtime);
+    if (backend) ringpu_software_backend_destroy(backend);
+    return result;
+}
+
 static int storage_image_descriptor_profile(void)
 {
     RinSpirvTranslationInfoV1 vertex = {0};
@@ -511,6 +684,7 @@ int main(void)
     uint8_t presented[64u] = {0};
     uint8_t readback[64u] = {0};
 
+    CHECK(queue_routed_graphics_runtime_v2_test() == 0);
     make_surface(&surface, presented);
     CHECK(rin_gpu_vulkan_graphics_runtime_init(
               &runtime, &surface,

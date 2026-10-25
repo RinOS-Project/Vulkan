@@ -56,6 +56,42 @@ int rin_gpu_vulkan_graphics_runtime_init(
     return RIN_GPU_OK;
 }
 
+int rin_gpu_vulkan_graphics_runtime_init_v2(
+    RinGpuVulkanGraphicsRuntimeV1* runtime,
+    const RinGpuRuntimeDescV2* desc,
+    const RinGpuQueueDescV2* queue_desc)
+{
+    int result;
+
+    if (!runtime || !desc || !queue_desc ||
+        queue_desc->base.abi_version != RIN_GPU_ABI_VERSION ||
+        queue_desc->base.struct_size != sizeof(queue_desc->base) ||
+        queue_desc->base.capabilities == 0u ||
+        (queue_desc->base.capabilities &
+         ~RIN_GPU_QUEUE_KNOWN_CAPABILITIES) != 0u ||
+        queue_desc->base.flags != 0u || queue_desc->reserved0 != 0u ||
+        queue_desc->reserved1 != 0u)
+        return RIN_GPU_ERROR_INVALID_ARGUMENT;
+
+    memset(runtime, 0, sizeof(*runtime));
+    runtime->struct_size = sizeof(*runtime);
+    runtime->version = RIN_GPU_VULKAN_GRAPHICS_RUNTIME_VERSION;
+    result = ringpu_runtime_create_v2(desc, &runtime->runtime);
+    if (result != RIN_GPU_OK) {
+        memset(runtime, 0, sizeof(*runtime));
+        return result;
+    }
+    result = ringpu_runtime_create_queue_v2(runtime->runtime, queue_desc,
+                                             &runtime->queue);
+    if (result != RIN_GPU_OK) {
+        ringpu_runtime_destroy(runtime->runtime);
+        memset(runtime, 0, sizeof(*runtime));
+        return result;
+    }
+    runtime->initialized = 1u;
+    return RIN_GPU_OK;
+}
+
 int rin_gpu_vulkan_graphics_runtime_shutdown(
     RinGpuVulkanGraphicsRuntimeV1* runtime)
 {
