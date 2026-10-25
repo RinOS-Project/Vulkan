@@ -4483,6 +4483,26 @@ static int test_process_timestamp_query(
                         results[0] == expected_timestamp &&
                         results[1] == 1u);
 
+    /* Without RESULT_64_BIT, both the timestamp and availability occupy
+     * 32-bit words; timestamp results preserve the low-order bits. */
+    {
+        uint32_t results32[2] = {UINT32_MAX, UINT32_MAX};
+        query_result_before = adapters->sdk_query_result_calls;
+        PROCESS_QUERY_CHECK(vkGetQueryPoolResults(
+            device, query_pool, 0u, 1u, sizeof(results32), results32,
+            sizeof(results32),
+            RIN_VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) == RIN_VK_SUCCESS);
+        PROCESS_QUERY_CHECK(adapters->sdk_query_result_calls ==
+                                query_result_before + 1u &&
+                            results32[0] == UINT32_C(0x9abcdef0) &&
+                            results32[1] == 1u);
+        PROCESS_QUERY_CHECK(vkGetQueryPoolResults(
+            device, query_pool, 0u, 1u, sizeof(results32) - 1u, results32,
+            sizeof(results32),
+            RIN_VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) ==
+            RIN_VK_ERROR_INITIALIZATION_FAILED);
+    }
+
     vkDestroyQueryPool(device, query_pool, NULL);
     query_pool = 0u;
     {

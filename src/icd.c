@@ -16489,16 +16489,20 @@ RinVkResult RIN_VKAPI_CALL vkGetQueryPoolResults(
     uint32_t index;
     uint32_t unavailable = 0u;
     if (!pool || (flags & ~RIN_VK_QUERY_RESULT_FLAGS_KNOWN) != 0u ||
-        (flags & RIN_VK_QUERY_RESULT_64_BIT) == 0u ||
         (query_count != 0u && !data) ||
         first_query > pool->query_count ||
         query_count > pool->query_count - first_query)
         return RIN_VK_ERROR_INITIALIZATION_FAILED;
     if (query_count == 0u) return RIN_VK_SUCCESS;
     value_count = query_value_count(pool);
-    per_query = (uint64_t)value_count * sizeof(uint64_t);
+    per_query = (uint64_t)value_count *
+        ((flags & RIN_VK_QUERY_RESULT_64_BIT) != 0u
+             ? sizeof(uint64_t)
+             : sizeof(uint32_t));
     if ((flags & RIN_VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) != 0u)
-        per_query += sizeof(uint64_t);
+        per_query += (flags & RIN_VK_QUERY_RESULT_64_BIT) != 0u
+                         ? sizeof(uint64_t)
+                         : sizeof(uint32_t);
     if (stride < per_query || stride > SIZE_MAX ||
         (uint64_t)(query_count - 1u) >
             (SIZE_MAX - per_query) / stride ||
@@ -16543,13 +16547,31 @@ RinVkResult RIN_VKAPI_CALL vkGetQueryPoolResults(
             uint64_t value = query->availability != 0u
                                  ? query->values[value_index]
                                  : 0u;
-            memcpy(destination + (size_t)value_index * sizeof(uint64_t),
-                   &value, sizeof(value));
+            if ((flags & RIN_VK_QUERY_RESULT_64_BIT) != 0u) {
+                memcpy(destination +
+                           (size_t)value_index * sizeof(uint64_t),
+                       &value, sizeof(value));
+            } else {
+                const uint32_t value32 = (uint32_t)value;
+                memcpy(destination +
+                           (size_t)value_index * sizeof(uint32_t),
+                       &value32, sizeof(value32));
+            }
         }
         if ((flags & RIN_VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) != 0u) {
-            uint64_t available = query->availability != 0u ? 1u : 0u;
-            memcpy(destination + (size_t)value_count * sizeof(uint64_t),
-                   &available, sizeof(available));
+            if ((flags & RIN_VK_QUERY_RESULT_64_BIT) != 0u) {
+                const uint64_t available =
+                    query->availability != 0u ? 1u : 0u;
+                memcpy(destination +
+                           (size_t)value_count * sizeof(uint64_t),
+                       &available, sizeof(available));
+            } else {
+                const uint32_t available =
+                    query->availability != 0u ? 1u : 0u;
+                memcpy(destination +
+                           (size_t)value_count * sizeof(uint32_t),
+                       &available, sizeof(available));
+            }
         }
     }
     return unavailable != 0u ? RIN_VK_NOT_READY : RIN_VK_SUCCESS;
