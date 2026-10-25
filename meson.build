@@ -4,6 +4,7 @@ project('RinVulkan', 'c', version: '1.0.0', meson_version: '>=1.3.0',
 ringpu_dep = dependency('ringpu', required: true)
 rinvulkan_inc = include_directories('include')
 rin_sdk_inc = include_directories('../../RinOS-SDK/include')
+rin_runtime_inc = include_directories('../rinruntime/include')
 rinvulkan_sources = files(
   'src/buffer_ownership.c',
   'src/command_runtime.c',
@@ -19,13 +20,13 @@ rinvulkan_sources = files(
   'src/wsi.c',
 )
 rinvulkan = library('rinvulkan', rinvulkan_sources,
-  include_directories: rinvulkan_inc,
+  include_directories: [rinvulkan_inc, rin_sdk_inc, rin_runtime_inc],
   dependencies: ringpu_dep,
   install: true,
 )
 rinvulkan_dep = declare_dependency(
   link_with: rinvulkan,
-  include_directories: rinvulkan_inc,
+  include_directories: [rinvulkan_inc, rin_sdk_inc, rin_runtime_inc],
   dependencies: ringpu_dep,
 )
 
@@ -35,6 +36,14 @@ rinvulkan_interpolation_v2_test = executable(
   dependencies: rinvulkan_dep,
 )
 test('rinvulkan-interpolation-v2', rinvulkan_interpolation_v2_test)
+
+rinvulkan_image_state_test = executable(
+  'rinvulkan-image-state-test',
+  'tests/rinvulkan_image_state_test.c',
+  include_directories: [include_directories('src'), rin_sdk_inc],
+  dependencies: rinvulkan_dep,
+)
+test('rinvulkan-image-state', rinvulkan_image_state_test)
 
 # RinOS's syscall-backed process-submit adapter is opt-in and stays separate
 # from the generic Vulkan ICD/shared library.

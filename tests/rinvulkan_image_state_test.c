@@ -228,6 +228,24 @@ int main(void)
             RIN_VK_FORMAT_R8_UNORM, RIN_VK_IMAGE_USAGE_STORAGE_BIT,
             RIN_VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
             RIN_VK_IMAGE_LAYOUT_GENERAL) ||
+        !rin_vk_image_usage_valid_for_format(
+            RIN_VK_FORMAT_R16G16B16A16_SFLOAT,
+            RIN_VK_IMAGE_USAGE_STORAGE_BIT) ||
+        rin_vk_image_usage_valid_for_format(
+            RIN_VK_FORMAT_R16G16B16A16_SFLOAT,
+            RIN_VK_IMAGE_USAGE_STORAGE_BIT |
+                RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
+        rin_vk_image_usage_valid_for_format(
+            RIN_VK_FORMAT_R16G16B16A16_SFLOAT,
+            RIN_VK_IMAGE_USAGE_SAMPLED_BIT) ||
+        rin_vk_image_format_features(
+            RIN_VK_FORMAT_R16G16B16A16_SFLOAT) !=
+            RIN_VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT ||
+        !rin_vk_image_descriptor_layout_valid(
+            RIN_VK_FORMAT_R16G16B16A16_SFLOAT,
+            RIN_VK_IMAGE_USAGE_STORAGE_BIT,
+            RIN_VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            RIN_VK_IMAGE_LAYOUT_GENERAL) ||
         rin_vk_image_descriptor_layout_valid(
             RIN_VK_FORMAT_R8_UNORM,
             RIN_VK_IMAGE_USAGE_STORAGE_BIT |

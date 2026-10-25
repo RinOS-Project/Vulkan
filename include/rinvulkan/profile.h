@@ -48,10 +48,12 @@
     UINT64_C(0x0000000000000080)
 #define RIN_GPU_VK_PROFILE_STORAGE_IMAGE_RGBA32_FLOAT \
     UINT64_C(0x0000000000000100)
+#define RIN_GPU_VK_PROFILE_STORAGE_IMAGE_RGBA16_FLOAT \
+    UINT64_C(0x0000000000000200)
 /* This profile bit describes one exact format capability. It is not the
  * Vulkan shaderStorageImageExtendedFormats feature, which guarantees a larger
  * set of formats and therefore remains unadvertised by this profile. */
-#define RIN_GPU_VK_FEATURE_KNOWN UINT64_C(0x00000000000001ff)
+#define RIN_GPU_VK_FEATURE_KNOWN UINT64_C(0x00000000000003ff)
 #define RIN_GPU_VK_FEATURE_REQUIRED_1_3 UINT64_C(0x000000000000000f)
 
 #define RIN_GPU_VK_HEAP_DEVICE_LOCAL UINT32_C(0x00000001)

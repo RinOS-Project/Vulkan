@@ -1299,6 +1299,9 @@ static int profile_supports_storage_format(
     if (format == RIN_VK_FORMAT_R32G32B32A32_SFLOAT)
         return (profile->features &
                 RIN_GPU_VK_PROFILE_STORAGE_IMAGE_RGBA32_FLOAT) != 0u;
+    if (format == RIN_VK_FORMAT_R16G16B16A16_SFLOAT)
+        return (profile->features &
+                RIN_GPU_VK_PROFILE_STORAGE_IMAGE_RGBA16_FLOAT) != 0u;
     return 0;
 }
 
@@ -1312,6 +1315,9 @@ static uint32_t profile_spirv_storage_image_features(
     if ((profile->features &
          RIN_GPU_VK_PROFILE_STORAGE_IMAGE_RGBA32_FLOAT) != 0u)
         features |= RIN_SPIRV_TRANSLATE_FEATURE_RGBA32F_STORAGE_IMAGE;
+    if ((profile->features &
+         RIN_GPU_VK_PROFILE_STORAGE_IMAGE_RGBA16_FLOAT) != 0u)
+        features |= RIN_SPIRV_TRANSLATE_FEATURE_RGBA16F_STORAGE_IMAGE;
     return features;
 }
 
@@ -3445,6 +3451,8 @@ static uint32_t image_format_bytes(int32_t format) {
                ? 1u
                : format == RIN_VK_FORMAT_R32G32B32A32_SFLOAT
                ? 16u
+               : format == RIN_VK_FORMAT_R16G16B16A16_SFLOAT
+               ? 8u
                : format == RIN_VK_FORMAT_R8G8B8A8_UNORM ||
                    format == RIN_VK_FORMAT_D32_SFLOAT
                ? 4u
@@ -3454,6 +3462,7 @@ static uint32_t image_format_bytes(int32_t format) {
 static uint32_t image_format_aspects(int32_t format) {
     if (format == RIN_VK_FORMAT_R8_UNORM ||
         format == RIN_VK_FORMAT_R32G32B32A32_SFLOAT ||
+        format == RIN_VK_FORMAT_R16G16B16A16_SFLOAT ||
         format == RIN_VK_FORMAT_R8G8B8A8_UNORM)
         return RIN_VK_IMAGE_ASPECT_COLOR_BIT;
     if (format == RIN_VK_FORMAT_D32_SFLOAT)
@@ -14978,6 +14987,9 @@ static int process_graphics_image_binding_from_vulkan(
         process_format =
             RIN_GPU_PROCESS_IMAGE_FORMAT_RGBA32_FLOAT_V1;
         required_aspect = RIN_GPU_PROCESS_IMAGE_ASPECT_COLOR;
+    } else if (image->format == RIN_VK_FORMAT_R16G16B16A16_SFLOAT) {
+        process_format = RIN_GPU_PROCESS_IMAGE_FORMAT_RGBA16_FLOAT_V1;
+        required_aspect = RIN_GPU_PROCESS_IMAGE_ASPECT_COLOR;
     } else if (image->format == RIN_VK_FORMAT_R8G8B8A8_UNORM) {
         process_format = RIN_GPU_PROCESS_IMAGE_FORMAT_RGBA8_UNORM_V1;
         required_aspect = RIN_GPU_PROCESS_IMAGE_ASPECT_COLOR;
@@ -20875,6 +20887,11 @@ static int process_image_descriptor_v13(
             RIN_VULKAN_PRODUCT_PROCESS_IMAGE_FORMAT_RGBA32_FLOAT_V13;
         descriptor.aspect_mask =
             RIN_VULKAN_PRODUCT_PROCESS_IMAGE_ASPECT_COLOR_V13;
+    } else if (image->format == RIN_VK_FORMAT_R16G16B16A16_SFLOAT) {
+        descriptor.format =
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_FORMAT_RGBA16_FLOAT_V13;
+        descriptor.aspect_mask =
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_ASPECT_COLOR_V13;
     } else if (image->format == RIN_VK_FORMAT_R8G8B8A8_UNORM) {
         descriptor.format =
             RIN_VULKAN_PRODUCT_PROCESS_IMAGE_FORMAT_RGBA8_UNORM_V13;
@@ -21053,7 +21070,8 @@ static RinVkResult create_image_with_storage_policy(
                                              request.usage) ||
         ((request.usage & RIN_VK_IMAGE_USAGE_STORAGE_BIT) != 0u &&
          ((request.format != RIN_VK_FORMAT_R8_UNORM &&
-           request.format != RIN_VK_FORMAT_R32G32B32A32_SFLOAT) ||
+           request.format != RIN_VK_FORMAT_R32G32B32A32_SFLOAT &&
+           request.format != RIN_VK_FORMAT_R16G16B16A16_SFLOAT) ||
           request.samples != RIN_VK_SAMPLE_COUNT_1_BIT ||
           !profile_supports_storage_format(
               &owner->physical_profile, request.format))) ||

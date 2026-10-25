@@ -14,10 +14,12 @@ static inline int rin_vk_image_usage_valid_for_format(int32_t format,
     if (usage == 0u || (usage & ~RIN_VK_IMAGE_USAGE_KNOWN) != 0u) return 0;
     if ((usage & RIN_VK_IMAGE_USAGE_STORAGE_BIT) != 0u)
         return (format == RIN_VK_FORMAT_R8_UNORM ||
-                format == RIN_VK_FORMAT_R32G32B32A32_SFLOAT) &&
+                format == RIN_VK_FORMAT_R32G32B32A32_SFLOAT ||
+                format == RIN_VK_FORMAT_R16G16B16A16_SFLOAT) &&
                usage == RIN_VK_IMAGE_USAGE_STORAGE_BIT;
     if (format == RIN_VK_FORMAT_R8_UNORM ||
-        format == RIN_VK_FORMAT_R32G32B32A32_SFLOAT)
+        format == RIN_VK_FORMAT_R32G32B32A32_SFLOAT ||
+        format == RIN_VK_FORMAT_R16G16B16A16_SFLOAT)
         return 0;
     if ((usage & RIN_VK_IMAGE_USAGE_SAMPLED_BIT) != 0u &&
         format != RIN_VK_FORMAT_R8G8B8A8_UNORM &&
@@ -34,6 +36,8 @@ static inline uint32_t rin_vk_image_format_features(int32_t format)
     if (format == RIN_VK_FORMAT_R8_UNORM)
         return RIN_VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
     if (format == RIN_VK_FORMAT_R32G32B32A32_SFLOAT)
+        return RIN_VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+    if (format == RIN_VK_FORMAT_R16G16B16A16_SFLOAT)
         return RIN_VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
     if (format == RIN_VK_FORMAT_R8G8B8A8_UNORM)
         return RIN_VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
@@ -66,7 +70,8 @@ static inline int rin_vk_image_descriptor_layout_valid(
 {
     if (descriptor_type == RIN_VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
         return (format == RIN_VK_FORMAT_R8_UNORM ||
-                format == RIN_VK_FORMAT_R32G32B32A32_SFLOAT) &&
+                format == RIN_VK_FORMAT_R32G32B32A32_SFLOAT ||
+                format == RIN_VK_FORMAT_R16G16B16A16_SFLOAT) &&
                image_usage == RIN_VK_IMAGE_USAGE_STORAGE_BIT &&
                layout == RIN_VK_IMAGE_LAYOUT_GENERAL &&
                (rin_vk_image_format_features(format) &

@@ -7654,6 +7654,8 @@ static int test_process_image_platform_v13(
     RinVkImageView view = 0u;
     RinVkDeviceMemory memory = 0u;
     const TestResourceBinding* storage_image_binding;
+    const TestSdkProcessImage* sdk_storage_image;
+    uint32_t sdk_image_index;
     uint32_t baseline_resources;
     uint32_t baseline_binds;
     uint32_t baseline_unbinds;
@@ -7794,8 +7796,24 @@ static int test_process_image_platform_v13(
         vkBindImageMemory(device, image, memory, 0u) != RIN_VK_SUCCESS)
         goto done;
     storage_image_binding = test_find_resource_binding(adapters, image);
+    sdk_storage_image = NULL;
+    for (sdk_image_index = 0u;
+         sdk_image_index < sizeof(adapters->sdk_process_images) /
+                               sizeof(adapters->sdk_process_images[0]);
+         ++sdk_image_index) {
+        const TestSdkProcessImage* candidate =
+            &adapters->sdk_process_images[sdk_image_index];
+        if (candidate->active == 1u &&
+            candidate->image.resource_cookie == image) {
+            sdk_storage_image = candidate;
+            break;
+        }
+    }
     if (adapters->process_image_descriptor.resource_cookie != image ||
         !storage_image_binding ||
+        !sdk_storage_image ||
+        sdk_storage_image->image.format !=
+            RIN_GPU_PROCESS_IMAGE_FORMAT_R8_UNORM_V1 ||
         storage_image_binding->required_gpu_access !=
             (RIN_VULKAN_PRODUCT_MEMORY_GPU_READ |
              RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE) ||
@@ -7825,9 +7843,85 @@ static int test_process_image_platform_v13(
     image = 0u;
     vkFreeMemory(device, memory, NULL);
     memory = 0u;
+
+    memset(&create_info, 0, sizeof(create_info));
+    create_info.sType = RIN_VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    create_info.imageType = RIN_VK_IMAGE_TYPE_2D;
+    create_info.format = RIN_VK_FORMAT_R16G16B16A16_SFLOAT;
+    create_info.extent.width = 128u;
+    create_info.extent.height = 4u;
+    create_info.extent.depth = 1u;
+    create_info.mipLevels = 1u;
+    create_info.arrayLayers = 1u;
+    create_info.samples = RIN_VK_SAMPLE_COUNT_1_BIT;
+    create_info.tiling = RIN_VK_IMAGE_TILING_OPTIMAL;
+    create_info.usage = RIN_VK_IMAGE_USAGE_STORAGE_BIT;
+    create_info.sharingMode = RIN_VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateImage(device, &create_info, NULL, &image) != RIN_VK_SUCCESS)
+        goto done;
+    vkGetImageMemoryRequirements(device, image, &requirements);
+    if (requirements.size != UINT64_C(128) * 4u * 8u ||
+        (requirements.memoryTypeBits & UINT32_C(1)) == 0u)
+        goto done;
+    memset(&allocation_info, 0, sizeof(allocation_info));
+    allocation_info.sType = RIN_VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocation_info.allocationSize = requirements.size;
+    allocation_info.memoryTypeIndex = 0u;
+    if (vkAllocateMemory(device, &allocation_info, NULL, &memory) !=
+        RIN_VK_SUCCESS ||
+        vkBindImageMemory(device, image, memory, 0u) != RIN_VK_SUCCESS)
+        goto done;
+    storage_image_binding = test_find_resource_binding(adapters, image);
+    sdk_storage_image = NULL;
+    for (sdk_image_index = 0u;
+         sdk_image_index < sizeof(adapters->sdk_process_images) /
+                               sizeof(adapters->sdk_process_images[0]);
+         ++sdk_image_index) {
+        const TestSdkProcessImage* candidate =
+            &adapters->sdk_process_images[sdk_image_index];
+        if (candidate->active == 1u &&
+            candidate->image.resource_cookie == image) {
+            sdk_storage_image = candidate;
+            break;
+        }
+    }
+    if (adapters->process_image_descriptor.resource_cookie != image ||
+        !storage_image_binding ||
+        !sdk_storage_image ||
+        sdk_storage_image->image.format !=
+            RIN_GPU_PROCESS_IMAGE_FORMAT_RGBA16_FLOAT_V1 ||
+        storage_image_binding->required_gpu_access !=
+            (RIN_VULKAN_PRODUCT_MEMORY_GPU_READ |
+             RIN_VULKAN_PRODUCT_MEMORY_GPU_WRITE) ||
+        adapters->process_image_descriptor.format !=
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_FORMAT_RGBA16_FLOAT_V13 ||
+        adapters->process_image_descriptor.usage !=
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_USAGE_STORAGE_V13 ||
+        adapters->process_image_descriptor.width != 128u ||
+        adapters->process_image_descriptor.height != 4u ||
+        adapters->process_image_descriptor.sample_count != 1u ||
+        adapters->process_image_active_count != 1u ||
+        adapters->sdk_process_image_active_count != 1u)
+        goto done;
+    memset(&view_info, 0, sizeof(view_info));
+    view_info.sType = RIN_VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image = image;
+    view_info.viewType = RIN_VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = RIN_VK_FORMAT_R16G16B16A16_SFLOAT;
+    view_info.subresourceRange.aspectMask = RIN_VK_IMAGE_ASPECT_COLOR_BIT;
+    view_info.subresourceRange.levelCount = 1u;
+    view_info.subresourceRange.layerCount = 1u;
+    if (vkCreateImageView(device, &view_info, NULL, &view) != RIN_VK_SUCCESS)
+        goto done;
+    vkDestroyImageView(device, view, NULL);
+    view = 0u;
+    vkDestroyImage(device, image, NULL);
+    image = 0u;
+    vkFreeMemory(device, memory, NULL);
+    memory = 0u;
     if (adapters->active_resource_count != baseline_resources ||
-        adapters->resource_bind_calls != baseline_binds + 3u ||
-        adapters->resource_unbind_calls != baseline_unbinds + 3u ||
+        adapters->resource_bind_calls != baseline_binds + 4u ||
+        adapters->resource_unbind_calls != baseline_unbinds + 4u ||
         adapters->process_image_active_count != 0u ||
         adapters->sdk_process_image_active_count != 0u)
         goto done;
@@ -7870,6 +7964,8 @@ int main(void) {
     RinVkPhysicalDeviceFeatures unsupported_storage_features;
     RinVkFormatProperties r8_format_properties;
     RinVkImageFormatProperties r8_storage_properties;
+    RinVkFormatProperties rgba16_format_properties;
+    RinVkImageFormatProperties rgba16_storage_properties;
     RinVkQueueFamilyProperties timestamp_queue_properties[2];
     RinRuntimeCompositorGpuSurfaceOpsV1 surface_ops;
 #if defined(RIN_VULKAN_NATIVE_WINDOW_RUNTIME_TEST)
@@ -8055,8 +8151,25 @@ int main(void) {
           r8_storage_properties.sampleCounts ==
               RIN_VK_SAMPLE_COUNT_1_BIT &&
           r8_storage_properties.maxResourceSize != 0u);
+    memset(&rgba16_format_properties, 0, sizeof(rgba16_format_properties));
+    vkGetPhysicalDeviceFormatProperties(
+        physical, RIN_VK_FORMAT_R16G16B16A16_SFLOAT,
+        &rgba16_format_properties);
+    CHECK((rgba16_format_properties.optimalTilingFeatures &
+           RIN_VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0u);
+    memset(&rgba16_storage_properties, 0, sizeof(rgba16_storage_properties));
+    CHECK(vkGetPhysicalDeviceImageFormatProperties(
+              physical, RIN_VK_FORMAT_R16G16B16A16_SFLOAT,
+              RIN_VK_IMAGE_TYPE_2D, RIN_VK_IMAGE_TILING_OPTIMAL,
+              RIN_VK_IMAGE_USAGE_STORAGE_BIT, 0u,
+              &rgba16_storage_properties) == RIN_VK_SUCCESS);
+    CHECK(rgba16_storage_properties.sampleCounts ==
+              RIN_VK_SAMPLE_COUNT_1_BIT &&
+          rgba16_storage_properties.maxResourceSize != 0u);
     {
         const uint64_t saved_features = runtime.physical_devices[0].features;
+        RinVkImageCreateInfo rejected_image_info;
+        RinVkImage rejected_image = 0u;
         runtime.physical_devices[0].features &=
             ~RIN_GPU_VK_PROFILE_STORAGE_IMAGE_R8_UNORM;
         vkGetPhysicalDeviceFormatProperties(
@@ -8069,6 +8182,39 @@ int main(void) {
                   RIN_VK_IMAGE_USAGE_STORAGE_BIT, 0u,
                   &r8_storage_properties) ==
               RIN_VK_ERROR_FORMAT_NOT_SUPPORTED);
+        runtime.physical_devices[0].features &=
+            ~RIN_GPU_VK_PROFILE_STORAGE_IMAGE_RGBA16_FLOAT;
+        vkGetPhysicalDeviceFormatProperties(
+            physical, RIN_VK_FORMAT_R16G16B16A16_SFLOAT,
+            &rgba16_format_properties);
+        CHECK((rgba16_format_properties.optimalTilingFeatures &
+               RIN_VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) == 0u);
+        CHECK(vkGetPhysicalDeviceImageFormatProperties(
+                  physical, RIN_VK_FORMAT_R16G16B16A16_SFLOAT,
+                  RIN_VK_IMAGE_TYPE_2D, RIN_VK_IMAGE_TILING_OPTIMAL,
+                  RIN_VK_IMAGE_USAGE_STORAGE_BIT, 0u,
+                  &rgba16_storage_properties) ==
+              RIN_VK_ERROR_FORMAT_NOT_SUPPORTED);
+        memset(&rejected_image_info, 0, sizeof(rejected_image_info));
+        rejected_image_info.sType =
+            RIN_VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        rejected_image_info.imageType = RIN_VK_IMAGE_TYPE_2D;
+        rejected_image_info.format =
+            RIN_VK_FORMAT_R16G16B16A16_SFLOAT;
+        rejected_image_info.extent.width = 8u;
+        rejected_image_info.extent.height = 4u;
+        rejected_image_info.extent.depth = 1u;
+        rejected_image_info.mipLevels = 1u;
+        rejected_image_info.arrayLayers = 1u;
+        rejected_image_info.samples = RIN_VK_SAMPLE_COUNT_1_BIT;
+        rejected_image_info.tiling = RIN_VK_IMAGE_TILING_OPTIMAL;
+        rejected_image_info.usage = RIN_VK_IMAGE_USAGE_STORAGE_BIT;
+        rejected_image_info.sharingMode =
+            RIN_VK_SHARING_MODE_EXCLUSIVE;
+        CHECK(vkCreateImage(device, &rejected_image_info, NULL,
+                            &rejected_image) ==
+                  RIN_VK_ERROR_INITIALIZATION_FAILED &&
+              rejected_image == 0u);
         runtime.physical_devices[0].features = saved_features;
     }
 
