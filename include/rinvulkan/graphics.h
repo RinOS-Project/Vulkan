@@ -167,6 +167,15 @@ int ringpu_vulkan_graphics_translate_shader_v2(
     void* rin_shader_out, size_t rin_shader_capacity,
     RinSpirvTranslationInfoV2* info_out);
 
+/* V3 adds exact-format storage-image authorization from the selected device
+ * profile while preserving V2 interpolation metadata. This is narrower than
+ * Vulkan's shaderStorageImageExtendedFormats feature. */
+int ringpu_vulkan_graphics_translate_shader_v3(
+    const uint32_t* words, size_t word_count, uint32_t expected_stage,
+    const RinSpirvSpecializationValueV1* overrides, uint32_t override_count,
+    uint32_t feature_flags, void* rin_shader_out,
+    size_t rin_shader_capacity, RinSpirvTranslationInfoV2* info_out);
+
 /* Build the pointer-free RinGPU graphics pipeline description from the
  * validated stage interfaces produced by ringpu_spirv_translate().  This is
  * the Vulkan-to-RinGPU assembly/raster/IO boundary; the returned descriptor

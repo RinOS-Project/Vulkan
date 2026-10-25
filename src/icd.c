@@ -1290,6 +1290,31 @@ static void publish_legacy_features(
         features->samplerAnisotropy = 1u;
 }
 
+static int profile_supports_storage_format(
+        const RinGpuVulkanPhysicalDeviceV2* profile, int32_t format) {
+    if (!profile) return 0;
+    if (format == RIN_VK_FORMAT_R8_UNORM)
+        return (profile->features &
+                RIN_GPU_VK_PROFILE_STORAGE_IMAGE_R8_UNORM) != 0u;
+    if (format == RIN_VK_FORMAT_R32G32B32A32_SFLOAT)
+        return (profile->features &
+                RIN_GPU_VK_PROFILE_STORAGE_IMAGE_RGBA32_FLOAT) != 0u;
+    return 0;
+}
+
+static uint32_t profile_spirv_storage_image_features(
+        const RinGpuVulkanPhysicalDeviceV2* profile) {
+    uint32_t features = 0u;
+    if (!profile) return features;
+    if ((profile->features &
+         RIN_GPU_VK_PROFILE_STORAGE_IMAGE_R8_UNORM) != 0u)
+        features |= RIN_SPIRV_TRANSLATE_FEATURE_R8_STORAGE_IMAGE;
+    if ((profile->features &
+         RIN_GPU_VK_PROFILE_STORAGE_IMAGE_RGBA32_FLOAT) != 0u)
+        features |= RIN_SPIRV_TRANSLATE_FEATURE_RGBA32F_STORAGE_IMAGE;
+    return features;
+}
+
 static int requested_synchronization2_feature(
         const RinVkPhysicalDeviceSynchronization2Features* features,
         uint64_t* required) {
@@ -3418,6 +3443,8 @@ static uint32_t memory_type_bits(const struct RinVkDevice_T* device) {
 static uint32_t image_format_bytes(int32_t format) {
     return format == RIN_VK_FORMAT_R8_UNORM
                ? 1u
+               : format == RIN_VK_FORMAT_R32G32B32A32_SFLOAT
+               ? 16u
                : format == RIN_VK_FORMAT_R8G8B8A8_UNORM ||
                    format == RIN_VK_FORMAT_D32_SFLOAT
                ? 4u
@@ -3426,6 +3453,7 @@ static uint32_t image_format_bytes(int32_t format) {
 
 static uint32_t image_format_aspects(int32_t format) {
     if (format == RIN_VK_FORMAT_R8_UNORM ||
+        format == RIN_VK_FORMAT_R32G32B32A32_SFLOAT ||
         format == RIN_VK_FORMAT_R8G8B8A8_UNORM)
         return RIN_VK_IMAGE_ASPECT_COLOR_BIT;
     if (format == RIN_VK_FORMAT_D32_SFLOAT)
@@ -3437,6 +3465,7 @@ static int image_memory_size(const struct RinVkDevice_T* device,
                              const RinVkImageCreateInfo* request,
                              uint64_t* size_out) {
     uint64_t pixels;
+    uint64_t size_bytes;
     uint32_t bytes_per_pixel;
 
     if (!device || !request || !size_out ||
@@ -3451,11 +3480,28 @@ static int image_memory_size(const struct RinVkDevice_T* device,
         request->extent.height > device->physical_profile.max_image_dimension_2d ||
         request->extent.width > UINT64_MAX / request->extent.height)
         return 0;
-    pixels = (uint64_t)request->extent.width * request->extent.height;
-    if (pixels > UINT64_MAX / bytes_per_pixel ||
-        pixels * bytes_per_pixel > UINT64_MAX / request->samples)
-        return 0;
-    *size_out = pixels * bytes_per_pixel * request->samples;
+    if ((request->usage & RIN_VK_IMAGE_USAGE_STORAGE_BIT) != 0u) {
+        uint64_t row_bytes =
+            (uint64_t)request->extent.width * bytes_per_pixel;
+        uint64_t row_pitch;
+        uint64_t storage_rows =
+            ((uint64_t)request->extent.height + UINT64_C(3)) &
+            ~UINT64_C(3);
+        if (request->samples != RIN_VK_SAMPLE_COUNT_1_BIT ||
+            row_bytes > UINT64_MAX - UINT64_C(127))
+            return 0;
+        row_pitch = (row_bytes + UINT64_C(127)) & ~UINT64_C(127);
+        if (row_pitch == 0u || storage_rows > UINT64_MAX / row_pitch)
+            return 0;
+        size_bytes = row_pitch * storage_rows;
+    } else {
+        pixels = (uint64_t)request->extent.width * request->extent.height;
+        if (pixels > UINT64_MAX / bytes_per_pixel ||
+            pixels * bytes_per_pixel > UINT64_MAX / request->samples)
+            return 0;
+        size_bytes = pixels * bytes_per_pixel * request->samples;
+    }
+    *size_out = size_bytes;
     return *size_out != 0u;
 }
 
@@ -13519,8 +13565,9 @@ void RIN_VKAPI_CALL vkGetPhysicalDeviceFormatProperties(
         RIN_GPU_VULKAN_OK)
         return;
     properties->optimalTilingFeatures = rin_vk_image_format_features(format);
-    if (format == RIN_VK_FORMAT_R8_UNORM &&
-        (profile.features & RIN_GPU_VK_PROFILE_STORAGE_IMAGE_R8_UNORM) == 0u)
+    if ((properties->optimalTilingFeatures &
+         RIN_VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0u &&
+        !profile_supports_storage_format(&profile, format))
         properties->optimalTilingFeatures &=
             ~RIN_VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
     properties->bufferFeatures = rin_vk_buffer_format_features(format);
@@ -13543,35 +13590,46 @@ RinVkResult RIN_VKAPI_CALL vkGetPhysicalDeviceImageFormatProperties(
         image_type != RIN_VK_IMAGE_TYPE_2D ||
         tiling != RIN_VK_IMAGE_TILING_OPTIMAL || flags != 0u ||
         !rin_vk_image_usage_valid_for_format(format, usage) ||
-        (format == RIN_VK_FORMAT_R8_UNORM &&
-         (usage & RIN_VK_IMAGE_USAGE_STORAGE_BIT) != 0u &&
-         (profile.features & RIN_GPU_VK_PROFILE_STORAGE_IMAGE_R8_UNORM) ==
-             0u) ||
+        ((usage & RIN_VK_IMAGE_USAGE_STORAGE_BIT) != 0u &&
+         !profile_supports_storage_format(&profile, format)) ||
         (format == RIN_VK_FORMAT_D32_SFLOAT &&
          (usage & RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0u) ||
         (bytes_per_pixel = image_format_bytes(format)) == 0u ||
         profile.max_image_dimension_2d == 0u)
         return RIN_VK_ERROR_FORMAT_NOT_SUPPORTED;
 
-    resource_size = profile.max_image_dimension_2d;
-    if (resource_size > UINT64_MAX / profile.max_image_dimension_2d)
-        resource_size = UINT64_MAX;
-    else
-        resource_size *= profile.max_image_dimension_2d;
-    if (resource_size > UINT64_MAX / bytes_per_pixel)
-        resource_size = UINT64_MAX;
-    else
-        resource_size *= bytes_per_pixel;
-    if (resource_size > UINT64_MAX /
-            ((usage & RIN_VK_IMAGE_USAGE_STORAGE_BIT) != 0u
-                 ? RIN_VK_SAMPLE_COUNT_1_BIT
-                 : RIN_VK_SAMPLE_COUNT_4_BIT))
-        resource_size = UINT64_MAX;
-    else
-        resource_size *=
-            (usage & RIN_VK_IMAGE_USAGE_STORAGE_BIT) != 0u
-                ? RIN_VK_SAMPLE_COUNT_1_BIT
-                : RIN_VK_SAMPLE_COUNT_4_BIT;
+    if ((usage & RIN_VK_IMAGE_USAGE_STORAGE_BIT) != 0u) {
+        uint64_t row_bytes =
+            (uint64_t)profile.max_image_dimension_2d * bytes_per_pixel;
+        uint64_t row_pitch;
+        uint64_t storage_rows =
+            ((uint64_t)profile.max_image_dimension_2d + UINT64_C(3)) &
+            ~UINT64_C(3);
+        if (row_bytes > UINT64_MAX - UINT64_C(127))
+            resource_size = UINT64_MAX;
+        else {
+            row_pitch =
+                (row_bytes + UINT64_C(127)) & ~UINT64_C(127);
+            resource_size = row_pitch != 0u &&
+                                    storage_rows <= UINT64_MAX / row_pitch
+                                ? row_pitch * storage_rows
+                                : UINT64_MAX;
+        }
+    } else {
+        resource_size = profile.max_image_dimension_2d;
+        if (resource_size > UINT64_MAX / profile.max_image_dimension_2d)
+            resource_size = UINT64_MAX;
+        else
+            resource_size *= profile.max_image_dimension_2d;
+        if (resource_size > UINT64_MAX / bytes_per_pixel)
+            resource_size = UINT64_MAX;
+        else
+            resource_size *= bytes_per_pixel;
+        if (resource_size > UINT64_MAX / RIN_VK_SAMPLE_COUNT_4_BIT)
+            resource_size = UINT64_MAX;
+        else
+            resource_size *= RIN_VK_SAMPLE_COUNT_4_BIT;
+    }
     for (index = 0u; index < profile.memory_heap_count; ++index) {
         if (profile.memory_heaps[index].size_bytes > largest_heap)
             largest_heap = profile.memory_heaps[index].size_bytes;
@@ -14915,6 +14973,10 @@ static int process_graphics_image_binding_from_vulkan(
         return 0;
     if (image->format == RIN_VK_FORMAT_R8_UNORM) {
         process_format = RIN_GPU_PROCESS_IMAGE_FORMAT_R8_UNORM_V1;
+        required_aspect = RIN_GPU_PROCESS_IMAGE_ASPECT_COLOR;
+    } else if (image->format == RIN_VK_FORMAT_R32G32B32A32_SFLOAT) {
+        process_format =
+            RIN_GPU_PROCESS_IMAGE_FORMAT_RGBA32_FLOAT_V1;
         required_aspect = RIN_GPU_PROCESS_IMAGE_ASPECT_COLOR;
     } else if (image->format == RIN_VK_FORMAT_R8G8B8A8_UNORM) {
         process_format = RIN_GPU_PROCESS_IMAGE_FORMAT_RGBA8_UNORM_V1;
@@ -20808,6 +20870,11 @@ static int process_image_descriptor_v13(
             RIN_VULKAN_PRODUCT_PROCESS_IMAGE_FORMAT_R8_UNORM_V13;
         descriptor.aspect_mask =
             RIN_VULKAN_PRODUCT_PROCESS_IMAGE_ASPECT_COLOR_V13;
+    } else if (image->format == RIN_VK_FORMAT_R32G32B32A32_SFLOAT) {
+        descriptor.format =
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_FORMAT_RGBA32_FLOAT_V13;
+        descriptor.aspect_mask =
+            RIN_VULKAN_PRODUCT_PROCESS_IMAGE_ASPECT_COLOR_V13;
     } else if (image->format == RIN_VK_FORMAT_R8G8B8A8_UNORM) {
         descriptor.format =
             RIN_VULKAN_PRODUCT_PROCESS_IMAGE_FORMAT_RGBA8_UNORM_V13;
@@ -20985,12 +21052,11 @@ static RinVkResult create_image_with_storage_policy(
         !rin_vk_image_usage_valid_for_format(request.format,
                                              request.usage) ||
         ((request.usage & RIN_VK_IMAGE_USAGE_STORAGE_BIT) != 0u &&
-         (request.format != RIN_VK_FORMAT_R8_UNORM ||
+         ((request.format != RIN_VK_FORMAT_R8_UNORM &&
+           request.format != RIN_VK_FORMAT_R32G32B32A32_SFLOAT) ||
           request.samples != RIN_VK_SAMPLE_COUNT_1_BIT ||
-          (request.extent.width & UINT32_C(127)) != 0u ||
-          (request.extent.height & UINT32_C(3)) != 0u ||
-          (owner->physical_profile.features &
-           RIN_GPU_VK_PROFILE_STORAGE_IMAGE_R8_UNORM) == 0u)) ||
+          !profile_supports_storage_format(
+              &owner->physical_profile, request.format))) ||
         request.sharingMode != RIN_VK_SHARING_MODE_EXCLUSIVE ||
         request.queueFamilyIndexCount != 0u ||
         request.pQueueFamilyIndices != NULL ||
@@ -22391,6 +22457,7 @@ static RinVkResult create_graphics_pipeline_one(
     uint32_t binding_count = 0u, attribute_count, index, slot_index = 0u;
     uint32_t graphics_descriptor_count = 0u;
     uint32_t graphics_set_layout_count = 0u;
+    uint32_t spirv_storage_image_features = 0u;
     uint64_t pipeline_cookie = 0u;
     int process_platform_required = 0;
     int process_result = RIN_VULKAN_PRODUCT_OK;
@@ -22515,6 +22582,8 @@ static RinVkResult create_graphics_pipeline_one(
     graphics_set_layout_count = layout->set_layout_count;
     memcpy(graphics_set_layouts, layout->set_layouts,
            sizeof(graphics_set_layouts[0]) * graphics_set_layout_count);
+    spirv_storage_image_features = profile_spirv_storage_image_features(
+        &owner->physical_profile);
     vertex_spirv_size = vertex_module->code_size; fragment_spirv_size = fragment_module->code_size;
     vertex_spirv = (uint32_t*)malloc(vertex_spirv_size); fragment_spirv = (uint32_t*)malloc(fragment_spirv_size);
     if (vertex_spirv) memcpy(vertex_spirv, vertex_module->code, vertex_spirv_size);
@@ -22525,9 +22594,10 @@ static RinVkResult create_graphics_pipeline_one(
     fragment_ir = (uint8_t*)malloc(RIN_SHADER_MAX_SOURCE_BYTES);
     if (!vertex_ir || !fragment_ir) { result = RIN_VK_ERROR_OUT_OF_HOST_MEMORY; goto done; }
     memset(&vertex_translation, 0, sizeof(vertex_translation));
-    translated = ringpu_vulkan_graphics_translate_shader_v2(
+    translated = ringpu_vulkan_graphics_translate_shader_v3(
         vertex_spirv, vertex_spirv_size / 4u, RIN_SHADER_STAGE_VERTEX,
-        NULL, 0u, vertex_ir, RIN_SHADER_MAX_SOURCE_BYTES,
+        NULL, 0u, spirv_storage_image_features, vertex_ir,
+        RIN_SHADER_MAX_SOURCE_BYTES,
         &vertex_translation_v2);
     if (translated != RIN_GPU_VULKAN_GRAPHICS_OK) {
         result = translated == RIN_GPU_VULKAN_GRAPHICS_LIMIT ? RIN_VK_ERROR_OUT_OF_HOST_MEMORY : RIN_VK_ERROR_FEATURE_NOT_PRESENT;
@@ -22535,9 +22605,10 @@ static RinVkResult create_graphics_pipeline_one(
     }
     vertex_translation = vertex_translation_v2.base;
     memset(&fragment_translation_v2, 0, sizeof(fragment_translation_v2));
-    translated = ringpu_vulkan_graphics_translate_shader_v2(
+    translated = ringpu_vulkan_graphics_translate_shader_v3(
         fragment_spirv, fragment_spirv_size / 4u, RIN_SHADER_STAGE_FRAGMENT,
-        NULL, 0u, fragment_ir, RIN_SHADER_MAX_SOURCE_BYTES,
+        NULL, 0u, spirv_storage_image_features, fragment_ir,
+        RIN_SHADER_MAX_SOURCE_BYTES,
         &fragment_translation_v2);
     if (translated != RIN_GPU_VULKAN_GRAPHICS_OK) {
         result = translated == RIN_GPU_VULKAN_GRAPHICS_LIMIT ? RIN_VK_ERROR_OUT_OF_HOST_MEMORY : RIN_VK_ERROR_FEATURE_NOT_PRESENT;
@@ -22864,6 +22935,7 @@ static RinVkResult create_compute_pipeline_one(
     RinVkPipelineLayoutSlot* layout;
     RinVkPipelineSlot* pipeline;
     RinSpirvTranslationInfoV1 translation;
+    RinSpirvTranslationInfoV2 translation_v2;
     RinVkDescriptorSetLayout set_layouts[
         RIN_GPU_VULKAN_COMMAND_MAX_DESCRIPTOR_SETS];
     uint32_t* spirv_copy = NULL;
@@ -22871,6 +22943,7 @@ static RinVkResult create_compute_pipeline_one(
     size_t spirv_size = 0u;
     size_t shader_size = 0u;
     uint32_t set_layout_count = 0u;
+    uint32_t spirv_storage_image_features = 0u;
     uint32_t index;
     uint32_t slot_index = 0u;
     uint64_t pipeline_cookie = 0u;
@@ -22908,6 +22981,8 @@ static RinVkResult create_compute_pipeline_one(
         memcpy(spirv_copy, module->code, module->code_size);
     memcpy(set_layouts, layout->set_layouts,
            sizeof(set_layouts[0]) * set_layout_count);
+    spirv_storage_image_features = profile_spirv_storage_image_features(
+        &owner->physical_profile);
     sync_unlock();
     if (!spirv_copy) return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
 
@@ -22916,12 +22991,14 @@ static RinVkResult create_compute_pipeline_one(
         free(spirv_copy);
         return RIN_VK_ERROR_OUT_OF_HOST_MEMORY;
     }
-    memset(&translation, 0, sizeof(translation));
-    translate_result = ringpu_vulkan_graphics_translate_shader(
+    memset(&translation_v2, 0, sizeof(translation_v2));
+    translate_result = ringpu_vulkan_graphics_translate_shader_v3(
         spirv_copy, spirv_size / sizeof(uint32_t),
-        RIN_SHADER_STAGE_COMPUTE, NULL, 0u, shader_ir,
-        RIN_SHADER_MAX_SOURCE_BYTES, &translation);
+        RIN_SHADER_STAGE_COMPUTE, NULL, 0u,
+        spirv_storage_image_features, shader_ir,
+        RIN_SHADER_MAX_SOURCE_BYTES, &translation_v2);
     free(spirv_copy);
+    translation = translation_v2.base;
     shader_header = (const RinShaderHeaderV1*)(const void*)shader_ir;
     if (translate_result != RIN_GPU_VULKAN_GRAPHICS_OK ||
         translation.descriptor_count > RIN_SPIRV_MAX_RESOURCES ||

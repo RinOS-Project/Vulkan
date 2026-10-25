@@ -379,6 +379,43 @@ int ringpu_vulkan_graphics_translate_shader_v2(
     return RIN_GPU_VULKAN_GRAPHICS_OK;
 }
 
+int ringpu_vulkan_graphics_translate_shader_v3(
+    const uint32_t* words, size_t word_count, uint32_t expected_stage,
+    const RinSpirvSpecializationValueV1* overrides, uint32_t override_count,
+    uint32_t feature_flags, void* rin_shader_out,
+    size_t rin_shader_capacity, RinSpirvTranslationInfoV2* info_out) {
+    int result;
+
+    if (!words || word_count == 0u || !rin_shader_out ||
+        rin_shader_capacity == 0u || !info_out ||
+        (expected_stage != RIN_SHADER_STAGE_VERTEX &&
+         expected_stage != RIN_SHADER_STAGE_FRAGMENT &&
+         expected_stage != RIN_SHADER_STAGE_COMPUTE) ||
+        (override_count != 0u && !overrides))
+        return RIN_GPU_VULKAN_GRAPHICS_INVALID_ARGUMENT;
+
+    result = ringpu_spirv_translate_v3(
+        words, word_count, expected_stage, overrides, override_count,
+        feature_flags, rin_shader_out, rin_shader_capacity, info_out);
+    if (result != RIN_SPIRV_OK) {
+        memset(info_out, 0, sizeof(*info_out));
+        return result == RIN_SPIRV_ERROR_NO_MEMORY
+                   ? RIN_GPU_VULKAN_GRAPHICS_LIMIT
+                   : RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
+    }
+    if (!translation_info_v2_valid(info_out, expected_stage)) {
+        memset(info_out, 0, sizeof(*info_out));
+        return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
+    }
+    if (expected_stage == RIN_SHADER_STAGE_VERTEX &&
+        !remap_vertex_outputs(words, word_count, rin_shader_out,
+                              rin_shader_capacity, &info_out->base)) {
+        memset(info_out, 0, sizeof(*info_out));
+        return RIN_GPU_VULKAN_GRAPHICS_INCOMPATIBLE;
+    }
+    return RIN_GPU_VULKAN_GRAPHICS_OK;
+}
+
 static uint32_t descriptor_resource_kind(uint32_t descriptor_type) {
     switch (descriptor_type) {
         case RIN_GPU_VULKAN_DESCRIPTOR_UNIFORM_BUFFER:
