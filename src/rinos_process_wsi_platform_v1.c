@@ -866,7 +866,8 @@ static int rinos_wsi_present_v2(
         (RinVulkanRinOSProcessWsiPlatformV1*)context;
     RinGpuProcessDirectDisplayRequestV1 request;
     RinGpuProcessDirectDisplayResponseV1 response;
-    RinGpuProcessDirectDisplayPresentRequestV1* present;
+    RinGpuProcessDirectDisplayPresentRequestV2 present_v2;
+    RinGpuProcessDirectDisplayPresentRequestV2* present;
     uint32_t sdk_format;
     int32_t sdk_schedule;
     int result;
@@ -923,11 +924,12 @@ static int rinos_wsi_present_v2(
             return RIN_VULKAN_WSI_PLATFORM_LIMIT;
         }
         memset(&request, 0, sizeof(request));
+        memset(&present_v2, 0, sizeof(present_v2));
         request.operation = RIN_GPU_PROCESS_DIRECT_DISPLAY_PRESENT_V1;
         request.device_generation = request_in->device_generation;
-        present = &request.present;
+        present = &present_v2;
         present->struct_size = sizeof(*present);
-        present->version = RIN_GPU_PROCESS_DIRECT_DISPLAY_PRESENT_VERSION_V1;
+        present->version = RIN_GPU_PROCESS_DIRECT_DISPLAY_PRESENT_VERSION_V2;
         present->display_cookie = request_in->display_cookie;
         present->mode_cookie = request_in->mode_cookie;
         present->allocation = request_in->allocation_handle;
@@ -959,6 +961,7 @@ static int rinos_wsi_present_v2(
             present->image_layout.planes[index].size_bytes =
                 request_in->image_layout.planes[index].size_bytes;
         }
+        memcpy(&request.present, &present_v2, sizeof(present_v2));
         result = rinos_wsi_device_request(
             adapter, request_in->device_generation, &request, &response);
         if (result == RIN_VULKAN_WSI_PLATFORM_OK) {
