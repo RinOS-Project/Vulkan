@@ -1165,7 +1165,8 @@ int main(void) {
     vkGetPhysicalDeviceFormatProperties(
         physical, RIN_VK_FORMAT_R32G32B32A32_SFLOAT,
         &image_format_features);
-    CHECK(image_format_features.optimalTilingFeatures == 0u &&
+    CHECK(image_format_features.optimalTilingFeatures ==
+              RIN_VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT &&
           image_format_features.linearTilingFeatures == 0u &&
           image_format_features.bufferFeatures ==
               RIN_VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT);
