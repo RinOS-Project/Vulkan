@@ -1,0 +1,8 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(RinGPU CONFIG REQUIRED)
+if(NOT TARGET RinVulkan::RinVulkan)
+  include("${CMAKE_CURRENT_LIST_DIR}/RinVulkanTargets.cmake")
+endif()
+check_required_components(RinVulkan)

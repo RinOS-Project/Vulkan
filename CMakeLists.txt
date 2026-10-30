@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
 project(RinVulkan VERSION 1.0.0 LANGUAGES C)
 
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
 set(RINGPU_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../RinGPU" CACHE PATH
     "RinGPU source directory")
 if(NOT EXISTS "${RINGPU_DIR}/CMakeLists.txt")
@@ -25,6 +28,11 @@ if(NOT TARGET RinGPU::RinGPU)
         "Disable RinGPU differential tests in RinVulkan" FORCE)
     add_subdirectory("${RINGPU_DIR}" "ringpu-build" EXCLUDE_FROM_ALL)
 endif()
+if(NOT TARGET RinGPU::RinGPUIpc)
+    message(FATAL_ERROR
+        "RinVulkan's RinOS process backend requires RinGPU's IPC adapter; "
+        "enable RINGPU_BUILD_RINOS_IPC_ADAPTER")
+endif()
 
 set(RINVULKAN_SOURCES
     src/buffer_ownership.c
@@ -43,7 +51,8 @@ add_library(RinVulkan STATIC ${RINVULKAN_SOURCES})
 add_library(RinVulkan::RinVulkan ALIAS RinVulkan)
 target_compile_features(RinVulkan PUBLIC c_std_11)
 target_include_directories(RinVulkan
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+           $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     PRIVATE ${RINRUNTIME_INCLUDE_DIR})
 target_link_libraries(RinVulkan PUBLIC RinGPU::RinGPU)
 if(MSVC)
@@ -64,14 +73,38 @@ add_library(RinVulkan::RinOSProcessBackend ALIAS
     RinVulkanRinOSProcessBackend)
 target_compile_features(RinVulkanRinOSProcessBackend PUBLIC c_std_11)
 target_include_directories(RinVulkanRinOSProcessBackend
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${RINOS_SDK_INCLUDE_DIR}
-           ${RINGPU_DIR}/include ${RINGPU_DIR}/../rinresource/include)
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+           $<BUILD_INTERFACE:${RINOS_SDK_INCLUDE_DIR}>
+           $<BUILD_INTERFACE:${RINGPU_DIR}/include>
+           $<BUILD_INTERFACE:${RINGPU_DIR}/../rinresource/include>
+           $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(RinVulkanRinOSProcessBackend
-    PUBLIC RinVulkan::RinVulkan)
-if(TARGET RinGPU::RinGPUIpc)
-    target_link_libraries(RinVulkanRinOSProcessBackend
-        PUBLIC RinGPU::RinGPUIpc)
-endif()
+    PUBLIC RinVulkan::RinVulkan RinGPU::RinGPUIpc)
+set_target_properties(RinVulkanRinOSProcessBackend PROPERTIES
+    EXPORT_NAME RinOSProcessBackend)
+
+install(TARGETS RinVulkan RinVulkanRinOSProcessBackend
+    EXPORT RinVulkanTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(EXPORT RinVulkanTargets
+    FILE RinVulkanTargets.cmake
+    NAMESPACE RinVulkan::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/RinVulkan)
+configure_package_config_file(
+    cmake/RinVulkanConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/RinVulkanConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/RinVulkan)
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/RinVulkanConfigVersion.cmake
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion)
+install(FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/RinVulkanConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/RinVulkanConfigVersion.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/RinVulkan)
 if(MSVC)
     target_compile_options(RinVulkanRinOSProcessBackend PRIVATE /W4)
 else()

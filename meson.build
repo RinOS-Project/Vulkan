@@ -2,6 +2,7 @@ project('RinVulkan', 'c', version: '1.0.0', meson_version: '>=1.3.0',
         default_options: ['warning_level=3'])
 
 ringpu_dep = dependency('ringpu', required: true)
+ringpu_ipc_dep = dependency('ringpu-ipc', required: true)
 rinvulkan_inc = include_directories('include')
 rin_sdk_inc = include_directories('../../RinOS-SDK/include')
 rin_runtime_inc = include_directories('../rinruntime/include')
@@ -29,6 +30,14 @@ rinvulkan_dep = declare_dependency(
   include_directories: [rinvulkan_inc, rin_sdk_inc, rin_runtime_inc],
   dependencies: ringpu_dep,
 )
+pkgconfig = import('pkgconfig')
+pkgconfig.generate(rinvulkan,
+  name: 'RinVulkan',
+  filebase: 'rinvulkan',
+  description: 'RinOS Vulkan runtime',
+  requires: 'ringpu',
+)
+install_subdir('include/rinvulkan', install_dir: get_option('includedir'))
 
 rinvulkan_interpolation_v2_test = executable(
   'rinvulkan-interpolation-v2-test',
@@ -58,7 +67,7 @@ rinvulkan_rinos_process_backend = static_library(
   include_directories: [rinvulkan_inc, rin_sdk_inc,
                          include_directories('../RinGPU/include',
                                              '../rinresource/include')],
-  dependencies: ringpu_dep,
+  dependencies: [ringpu_dep, ringpu_ipc_dep],
   install: true,
 )
 rinvulkan_rinos_process_backend_dep = declare_dependency(
@@ -66,7 +75,13 @@ rinvulkan_rinos_process_backend_dep = declare_dependency(
   include_directories: [rinvulkan_inc, rin_sdk_inc,
                         include_directories('../RinGPU/include',
                                             '../rinresource/include')],
-  dependencies: rinvulkan_dep,
+  dependencies: [rinvulkan_dep, ringpu_ipc_dep],
+)
+pkgconfig.generate(rinvulkan_rinos_process_backend,
+  name: 'RinVulkan RinOS Process Backend',
+  filebase: 'rinvulkan-rinos-process-backend',
+  description: 'RinVulkan authenticated RinOS process backend',
+  requires: ['rinvulkan', 'ringpu-ipc'],
 )
 
 rinvulkan_rinos_process_backend_test = executable(
