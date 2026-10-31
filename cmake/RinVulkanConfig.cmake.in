@@ -2,6 +2,11 @@
 
 include(CMakeFindDependencyMacro)
 find_dependency(RinGPU CONFIG REQUIRED)
+if(NOT TARGET RinGPU::RinGPUIpc)
+  message(FATAL_ERROR
+    "RinVulkan's installed RinOS process backend requires "
+    "RinGPU::RinGPUIpc; install RinGPU with its RinOS IPC adapter enabled")
+endif()
 if(NOT TARGET RinVulkan::RinVulkan)
   include("${CMAKE_CURRENT_LIST_DIR}/RinVulkanTargets.cmake")
 endif()
