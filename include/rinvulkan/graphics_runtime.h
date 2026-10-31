@@ -4,7 +4,7 @@
 
 #include <stdint.h>
 
-#include <rinvulkan/graphics.h>
+#include "graphics.h"
 #include <ringpu/runtime.h>
 
 #define RIN_GPU_VULKAN_GRAPHICS_RUNTIME_VERSION 1u

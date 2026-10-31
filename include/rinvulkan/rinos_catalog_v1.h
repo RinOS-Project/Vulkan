@@ -6,8 +6,8 @@
 
 #include <rin/device.h>
 #include <ringpu/cross_process_capability.h>
-#include <rinvulkan/runtime.h>
-#include <rinvulkan/rinos_process_submit_backend_v1.h>
+#include "runtime.h"
+#include "rinos_process_submit_backend_v1.h"
 
 #ifdef __cplusplus
 extern "C" {

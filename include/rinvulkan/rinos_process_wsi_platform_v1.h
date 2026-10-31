@@ -5,8 +5,8 @@
 
 #include <stdint.h>
 
-#include <rinvulkan/icd.h>
-#include <rinvulkan/rinos_catalog_v1.h>
+#include "icd.h"
+#include "rinos_catalog_v1.h"
 
 #ifdef __cplusplus
 extern "C" {

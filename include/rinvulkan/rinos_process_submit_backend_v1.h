@@ -6,7 +6,7 @@
 
 #include <rin/gpu.h>
 #include <rin/gpu_graphics_bind_group_owner_v2.h>
-#include <rinvulkan/platform.h>
+#include "platform.h"
 
 #ifdef __cplusplus
 extern "C" {

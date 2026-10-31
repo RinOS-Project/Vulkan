@@ -5,9 +5,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <rinvulkan/platform.h>
-#include <rinvulkan/runtime.h>
-#include <rinvulkan/wsi_platform.h>
+#include "platform.h"
+#include "runtime.h"
+#include "wsi_platform.h"
 
 #if defined(_WIN32) && !defined(_WIN64)
 #define RIN_VKAPI_CALL __stdcall

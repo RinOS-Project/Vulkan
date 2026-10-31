@@ -4,7 +4,7 @@
 
 #include <stdint.h>
 
-#include <rinvulkan/profile.h>
+#include "profile.h"
 
 #define RIN_GPU_VULKAN_RUNTIME_VERSION 1u
 #define RIN_GPU_VULKAN_MAX_PHYSICAL_DEVICES 8u

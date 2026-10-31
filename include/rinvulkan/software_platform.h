@@ -4,8 +4,8 @@
 
 #include <stdint.h>
 
-#include <rinvulkan/command_runtime.h>
-#include <rinvulkan/platform.h>
+#include "command_runtime.h"
+#include "platform.h"
 
 #define RIN_GPU_VULKAN_SOFTWARE_PLATFORM_VERSION 1u
 #define RIN_GPU_VULKAN_SOFTWARE_MAX_ALLOCATIONS 64u

@@ -5,7 +5,7 @@
 
 #include <stdint.h>
 
-#include <rinvulkan/platform.h>
+#include "platform.h"
 
 #ifdef __cplusplus
 extern "C" {

@@ -4,7 +4,7 @@
 
 #include <stdint.h>
 
-#include <rinvulkan/graphics.h>
+#include "graphics.h"
 
 #define RIN_GPU_VULKAN_DESCRIPTOR_RUNTIME_VERSION 1u
 #define RIN_GPU_VULKAN_DESCRIPTOR_MAX_LAYOUTS 64u
