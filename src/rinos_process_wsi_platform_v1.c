@@ -871,14 +871,18 @@ static int rinos_wsi_present_v2(
     uint32_t sdk_format;
     int32_t sdk_schedule;
     int result;
-    if (token_out) *token_out = 0u;
     if (!request_in || !token_out ||
         !rinos_wsi_range_valid(request_in, sizeof(*request_in)) ||
+        !rinos_wsi_range_valid(token_out, sizeof(*token_out)) ||
+        rinos_wsi_overlap(request_in, sizeof(*request_in), token_out,
+                          sizeof(*token_out)) ||
         rinos_wsi_overlap(adapter, sizeof(*adapter), request_in,
                           sizeof(*request_in)) ||
         rinos_wsi_overlap(adapter, sizeof(*adapter), token_out,
-                          sizeof(*token_out)) ||
-        request_in->struct_size != sizeof(*request_in) ||
+                          sizeof(*token_out)))
+        return RIN_VULKAN_WSI_PLATFORM_INVALID_ARGUMENT;
+    *token_out = 0u;
+    if (request_in->struct_size != sizeof(*request_in) ||
         request_in->version != RIN_VULKAN_WSI_PRESENT_REQUEST_V2_VERSION ||
         request_in->display_cookie == 0u || request_in->mode_cookie == 0u ||
         request_in->allocation_handle == 0u ||

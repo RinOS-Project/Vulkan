@@ -299,6 +299,31 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME rinvulkan-rinos-process-submit-backend
         COMMAND rinvulkan-rinos-process-submit-backend-test)
+    add_executable(rinvulkan-rinos-process-wsi-platform-test
+        tests/rinvulkan_rinos_process_wsi_platform_test.c
+        src/rinos_process_wsi_platform_v1.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../RinOS-SDK/src/rinsdk_v1.c)
+    target_compile_features(rinvulkan-rinos-process-wsi-platform-test
+        PRIVATE c_std_11)
+    target_compile_definitions(rinvulkan-rinos-process-wsi-platform-test
+        PRIVATE RINSDK_SPLIT_BUILD=1 RINSDK_BUILD_CORE=1 RINSDK_BUILD_GPU=1)
+    target_include_directories(rinvulkan-rinos-process-wsi-platform-test
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+                ${RINOS_SDK_INCLUDE_DIR}
+                ${RINGPU_DIR}/include
+                ${RINGPU_DIR}/../rinresource/include)
+    if(MSVC)
+        target_compile_options(rinvulkan-rinos-process-wsi-platform-test
+            PRIVATE /W4)
+    else()
+        target_compile_options(rinvulkan-rinos-process-wsi-platform-test
+            PRIVATE -Wall -Wextra -Wpedantic -Werror
+                    -ffunction-sections -fdata-sections)
+        target_link_options(rinvulkan-rinos-process-wsi-platform-test
+            PRIVATE -Wl,--gc-sections)
+    endif()
+    add_test(NAME rinvulkan-rinos-process-wsi-platform
+        COMMAND rinvulkan-rinos-process-wsi-platform-test)
     add_executable(rinvulkan-rinos-catalog-test
         tests/rinvulkan_rinos_catalog_test.c
         src/rinos_catalog_v1.c)
