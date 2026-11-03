@@ -117,7 +117,7 @@ test('rinvulkan-native-window-process-submit',
 if host_machine.system() == 'linux'
   rinvulkan_icd = shared_library(
     'rin-vulkan-icd', rinvulkan_sources,
-    include_directories: rinvulkan_inc,
+    include_directories: [rinvulkan_inc, rin_sdk_inc, rin_runtime_inc],
     dependencies: ringpu_dep,
     link_args: ['-Wl,-Bsymbolic'],
     install: true,
