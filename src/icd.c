@@ -1309,6 +1309,7 @@ static int profile_supports_storage_format(
 static int profile_supports_linear_buffer_to_image_v1(
         const RinGpuVulkanPhysicalDeviceV2* profile, int32_t format) {
     if (!profile || profile->vendor_id != RIN_GPU_PCI_VENDOR_INTEL ||
+        profile->device_id > UINT16_MAX ||
         !rin_gpu_pci_intel_mtl_device_id_valid(
             (uint16_t)profile->device_id))
         return 0;
