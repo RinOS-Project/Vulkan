@@ -21337,6 +21337,41 @@ void RIN_VKAPI_CALL vkGetImageMemoryRequirements(
     requirements->memoryTypeBits = memory_type_bits(image->owner);
 }
 
+void RIN_VKAPI_CALL vkGetImageSubresourceLayout(
+        RinVkDevice device, RinVkImage handle,
+        const RinVkImageSubresource* subresource,
+        RinVkSubresourceLayout* layout) {
+    RinVkImageSlot* image;
+    const RinVulkanWsiImagePlaneLayoutV1* plane;
+    if (!layout) return;
+    memset(layout, 0, sizeof(*layout));
+    image = image_slot(device, handle);
+    if (!image || !subresource ||
+        subresource->aspectMask != RIN_VK_IMAGE_ASPECT_COLOR_BIT ||
+        subresource->mipLevel != 0u || subresource->arrayLayer != 0u ||
+        image->storage_layout.version !=
+            RIN_VULKAN_WSI_IMAGE_LAYOUT_V1_VERSION ||
+        image->storage_layout.kind !=
+            RIN_VULKAN_WSI_IMAGE_LAYOUT_KIND_LINEAR ||
+        image->storage_layout.plane_count != 1u)
+        return;
+    plane = &image->storage_layout.planes[0];
+    if (plane->row_pitch_bytes == 0u || plane->size_bytes == 0u ||
+        plane->offset_bytes > image->memory_size ||
+        plane->size_bytes > image->memory_size - plane->offset_bytes ||
+        image->height > UINT64_MAX / plane->row_pitch_bytes ||
+        plane->row_pitch_bytes * image->height != plane->size_bytes)
+        return;
+    layout->offset = plane->offset_bytes;
+    layout->size = plane->size_bytes;
+    layout->rowPitch = plane->row_pitch_bytes;
+    /* These images are 2D, single-layer, and single-mip. Their one complete
+     * slice is the stride that would separate adjacent layers or depth slices
+     * if those dimensions were present. */
+    layout->arrayPitch = plane->size_bytes;
+    layout->depthPitch = plane->size_bytes;
+}
+
 RinVkResult RIN_VKAPI_CALL vkBindImageMemory(
         RinVkDevice device, RinVkImage image_handle,
         RinVkDeviceMemory memory_handle, uint64_t memory_offset) {
@@ -23692,6 +23727,8 @@ RinVkVoidFunction RIN_VKAPI_CALL vkGetDeviceProcAddr(
         return (RinVkVoidFunction)vkDestroyImage;
     if (name_equal(name, "vkGetImageMemoryRequirements"))
         return (RinVkVoidFunction)vkGetImageMemoryRequirements;
+    if (name_equal(name, "vkGetImageSubresourceLayout"))
+        return (RinVkVoidFunction)vkGetImageSubresourceLayout;
     if (name_equal(name, "vkBindImageMemory"))
         return (RinVkVoidFunction)vkBindImageMemory;
     if (name_equal(name, "vkCreateImageView"))

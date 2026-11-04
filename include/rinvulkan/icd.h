@@ -1359,6 +1359,20 @@ typedef struct RinVkImageSubresourceLayers {
     uint32_t layerCount;
 } RinVkImageSubresourceLayers;
 
+typedef struct RinVkImageSubresource {
+    uint32_t aspectMask;
+    uint32_t mipLevel;
+    uint32_t arrayLayer;
+} RinVkImageSubresource;
+
+typedef struct RinVkSubresourceLayout {
+    uint64_t offset;
+    uint64_t size;
+    uint64_t rowPitch;
+    uint64_t arrayPitch;
+    uint64_t depthPitch;
+} RinVkSubresourceLayout;
+
 typedef struct RinVkOffset3D {
     int32_t x;
     int32_t y;
@@ -2662,6 +2676,10 @@ vkDestroyImage(RinVkDevice device, RinVkImage image, const void* allocator);
 RIN_VKAPI_ATTR void RIN_VKAPI_CALL
 vkGetImageMemoryRequirements(RinVkDevice device, RinVkImage image,
                              RinVkMemoryRequirements* requirements);
+RIN_VKAPI_ATTR void RIN_VKAPI_CALL
+vkGetImageSubresourceLayout(RinVkDevice device, RinVkImage image,
+                            const RinVkImageSubresource* subresource,
+                            RinVkSubresourceLayout* layout);
 RIN_VKAPI_ATTR RinVkResult RIN_VKAPI_CALL
 vkBindImageMemory(RinVkDevice device, RinVkImage image,
                    RinVkDeviceMemory memory, uint64_t memory_offset);
