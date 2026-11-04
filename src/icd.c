@@ -5,6 +5,7 @@
 #include <rinvulkan/descriptor_runtime.h>
 #include <rinvulkan/graphics.h>
 #include <rin/contract_abi.h>
+#include <rin/driver/gpu/pci_catalog_v1.h>
 #include <rinruntime/window.h>
 #if defined(__rinos__)
 #include <rin/base.h>
@@ -1303,6 +1304,14 @@ static int profile_supports_storage_format(
         return (profile->features &
                 RIN_GPU_VK_PROFILE_STORAGE_IMAGE_RGBA16_FLOAT) != 0u;
     return 0;
+}
+
+static int profile_supports_linear_buffer_to_image_v1(
+        const RinGpuVulkanPhysicalDeviceV2* profile, int32_t format) {
+    return profile && profile->vendor_id == RIN_GPU_PCI_VENDOR_INTEL &&
+           rin_gpu_pci_intel_mtl_device_id_valid(
+               (uint16_t)profile->device_id) &&
+           format == RIN_VK_FORMAT_R8G8B8A8_UNORM;
 }
 
 static uint32_t profile_spirv_storage_image_features(
@@ -5929,8 +5938,7 @@ static int translate_routed_process_commands(
                 copy_v2->storage_layout =
                     RIN_GPU_BACKEND_IMAGE_STORAGE_LINEAR_V1;
             } else {
-                command->type =
-                    RIN_GPU_BACKEND_COMMAND_COPY_BUFFER_TO_IMAGE;
+                command->type = RIN_GPU_BACKEND_COMMAND_COPY_BUFFER_TO_IMAGE;
                 copy_v1 = &command->value.buffer_to_image_copy;
                 copy_v1->buffer_cookie = buffer_use->resource_handle;
                 copy_v1->buffer_offset = buffer_use->offset;
@@ -13623,6 +13631,9 @@ void RIN_VKAPI_CALL vkGetPhysicalDeviceFormatProperties(
         RIN_GPU_VULKAN_OK)
         return;
     properties->optimalTilingFeatures = rin_vk_image_format_features(format);
+    if (profile_supports_linear_buffer_to_image_v1(&profile, format))
+        properties->linearTilingFeatures =
+            RIN_VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
     if ((properties->optimalTilingFeatures &
          RIN_VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0u &&
         !profile_supports_storage_format(&profile, format))
@@ -13645,8 +13656,7 @@ RinVkResult RIN_VKAPI_CALL vkGetPhysicalDeviceImageFormatProperties(
     memset(properties, 0, sizeof(*properties));
     if (get_physical_profile(physical_device, &profile) !=
             RIN_GPU_VULKAN_OK ||
-        image_type != RIN_VK_IMAGE_TYPE_2D ||
-        tiling != RIN_VK_IMAGE_TILING_OPTIMAL || flags != 0u ||
+        image_type != RIN_VK_IMAGE_TYPE_2D || flags != 0u ||
         !rin_vk_image_usage_valid_for_format(format, usage) ||
         ((usage & RIN_VK_IMAGE_USAGE_STORAGE_BIT) != 0u &&
          !profile_supports_storage_format(&profile, format)) ||
@@ -13655,6 +13665,14 @@ RinVkResult RIN_VKAPI_CALL vkGetPhysicalDeviceImageFormatProperties(
         (bytes_per_pixel = image_format_bytes(format)) == 0u ||
         profile.max_image_dimension_2d == 0u)
         return RIN_VK_ERROR_FORMAT_NOT_SUPPORTED;
+
+    if (tiling == RIN_VK_IMAGE_TILING_LINEAR) {
+        if (!profile_supports_linear_buffer_to_image_v1(&profile, format) ||
+            usage != RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+            return RIN_VK_ERROR_FORMAT_NOT_SUPPORTED;
+    } else if (tiling != RIN_VK_IMAGE_TILING_OPTIMAL) {
+        return RIN_VK_ERROR_FORMAT_NOT_SUPPORTED;
+    }
 
     if ((usage & RIN_VK_IMAGE_USAGE_STORAGE_BIT) != 0u) {
         uint64_t row_bytes =
@@ -13683,9 +13701,10 @@ RinVkResult RIN_VKAPI_CALL vkGetPhysicalDeviceImageFormatProperties(
             resource_size = UINT64_MAX;
         else
             resource_size *= bytes_per_pixel;
-        if (resource_size > UINT64_MAX / RIN_VK_SAMPLE_COUNT_4_BIT)
+        if (tiling != RIN_VK_IMAGE_TILING_LINEAR &&
+            resource_size > UINT64_MAX / RIN_VK_SAMPLE_COUNT_4_BIT)
             resource_size = UINT64_MAX;
-        else
+        else if (tiling != RIN_VK_IMAGE_TILING_LINEAR)
             resource_size *= RIN_VK_SAMPLE_COUNT_4_BIT;
     }
     for (index = 0u; index < profile.memory_heap_count; ++index) {
@@ -13708,8 +13727,9 @@ RinVkResult RIN_VKAPI_CALL vkGetPhysicalDeviceImageFormatProperties(
     properties->maxExtent.depth = 1u;
     properties->maxMipLevels = 1u;
     properties->maxArrayLayers = 1u;
-    properties->sampleCounts =
-        (usage & RIN_VK_IMAGE_USAGE_STORAGE_BIT) != 0u
+    properties->sampleCounts = tiling == RIN_VK_IMAGE_TILING_LINEAR
+            ? RIN_VK_SAMPLE_COUNT_1_BIT
+            : (usage & RIN_VK_IMAGE_USAGE_STORAGE_BIT) != 0u
             ? RIN_VK_SAMPLE_COUNT_1_BIT
             : RIN_VK_SAMPLE_COUNT_1_BIT | RIN_VK_SAMPLE_COUNT_2_BIT |
                   RIN_VK_SAMPLE_COUNT_4_BIT;
@@ -21132,10 +21152,14 @@ static RinVkResult create_image_with_storage_policy(
           request.samples != RIN_VK_SAMPLE_COUNT_2_BIT &&
           request.samples != RIN_VK_SAMPLE_COUNT_4_BIT) ||
         (request.tiling != RIN_VK_IMAGE_TILING_OPTIMAL &&
-         !(allow_internal_linear == 1u &&
-           request.tiling == RIN_VK_IMAGE_TILING_LINEAR &&
+         !(request.tiling == RIN_VK_IMAGE_TILING_LINEAR &&
            request.format == RIN_VK_FORMAT_R8G8B8A8_UNORM &&
-           request.samples == RIN_VK_SAMPLE_COUNT_1_BIT)) ||
+           request.samples == RIN_VK_SAMPLE_COUNT_1_BIT &&
+           (allow_internal_linear == 1u ||
+            (allow_internal_linear == 0u &&
+             request.usage == RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT &&
+             profile_supports_linear_buffer_to_image_v1(
+                 &owner->physical_profile, request.format))))) ||
         allow_internal_linear > 1u ||
         !rin_vk_image_usage_valid_for_format(request.format,
                                              request.usage) ||
@@ -21171,9 +21195,9 @@ static RinVkResult create_image_with_storage_policy(
         RIN_VULKAN_WSI_IMAGE_LAYOUT_V1_VERSION;
     image->storage_layout.kind = RIN_VULKAN_WSI_IMAGE_LAYOUT_KIND_UNKNOWN;
     if (request.tiling == RIN_VK_IMAGE_TILING_LINEAR) {
-        /* The direct-display WSI path explicitly selects RinVk's private
-         * tightly packed linear storage policy. Ordinary OPTIMAL images do
-         * not acquire a guessed layout from their allocation size. */
+        /* RinVk's supported MTL linear transfer destination and its direct
+         * display WSI images both use an explicit tightly packed layout.
+         * OPTIMAL images never infer a storage layout from allocation size. */
         const uint64_t row_pitch =
             (uint64_t)request.extent.width *
             image_format_bytes(request.format);
