@@ -17,6 +17,12 @@ static inline int rin_vk_image_usage_valid_for_format(int32_t format,
                 format == RIN_VK_FORMAT_R32G32B32A32_SFLOAT ||
                 format == RIN_VK_FORMAT_R16G16B16A16_SFLOAT) &&
                usage == RIN_VK_IMAGE_USAGE_STORAGE_BIT;
+    if (format == RIN_VK_FORMAT_B8G8R8A8_UNORM ||
+        format == RIN_VK_FORMAT_R5G6B5_UNORM_PACK16)
+        return (usage & (RIN_VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                         RIN_VK_IMAGE_USAGE_SAMPLED_BIT)) == 0u &&
+               (usage & (RIN_VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                         RIN_VK_IMAGE_USAGE_TRANSFER_DST_BIT)) != 0u;
     if (format == RIN_VK_FORMAT_R8_UNORM ||
         format == RIN_VK_FORMAT_R32G32B32A32_SFLOAT ||
         format == RIN_VK_FORMAT_R16G16B16A16_SFLOAT)
@@ -43,6 +49,10 @@ static inline uint32_t rin_vk_image_format_features(int32_t format)
         return RIN_VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
                RIN_VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
                RIN_VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+               RIN_VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    if (format == RIN_VK_FORMAT_B8G8R8A8_UNORM ||
+        format == RIN_VK_FORMAT_R5G6B5_UNORM_PACK16)
+        return RIN_VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
                RIN_VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
     if (format == RIN_VK_FORMAT_D32_SFLOAT)
         return RIN_VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |

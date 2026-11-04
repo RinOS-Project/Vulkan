@@ -2703,7 +2703,9 @@ static int wsi_display_record_valid(
            display->device_generation == device_generation &&
            display->current_mode_cookie != 0u && display->width != 0u &&
            display->height != 0u && display->refresh_millihertz != 0u &&
-           (display->format == RIN_VK_FORMAT_R8G8B8A8_UNORM) &&
+           (display->format == RIN_VK_FORMAT_R8G8B8A8_UNORM ||
+            display->format == RIN_VK_FORMAT_B8G8R8A8_UNORM ||
+            display->format == RIN_VK_FORMAT_R5G6B5_UNORM_PACK16) &&
            (display->flags & ~RIN_VULKAN_WSI_DISPLAY_FLAGS_KNOWN) == 0u &&
            display->plane_count != 0u && display->mode_count != 0u &&
            display->mode_count <= RIN_VULKAN_WSI_MAX_MODES &&
@@ -2722,7 +2724,7 @@ static int wsi_mode_record_valid(const RinVulkanWsiModeV1* mode,
            mode->output_generation == display->output_generation &&
            mode->width != 0u && mode->height != 0u &&
            mode->refresh_millihertz != 0u &&
-           mode->format == RIN_VK_FORMAT_R8G8B8A8_UNORM &&
+           mode->format == display->format &&
            mode->flags == 0u && wsi_zero_words(mode->reserved, 1u);
 }
 
@@ -3449,11 +3451,14 @@ static uint32_t memory_type_bits(const struct RinVkDevice_T* device) {
 static uint32_t image_format_bytes(int32_t format) {
     return format == RIN_VK_FORMAT_R8_UNORM
                ? 1u
+               : format == RIN_VK_FORMAT_R5G6B5_UNORM_PACK16
+               ? 2u
                : format == RIN_VK_FORMAT_R32G32B32A32_SFLOAT
                ? 16u
                : format == RIN_VK_FORMAT_R16G16B16A16_SFLOAT
                ? 8u
                : format == RIN_VK_FORMAT_R8G8B8A8_UNORM ||
+                   format == RIN_VK_FORMAT_B8G8R8A8_UNORM ||
                    format == RIN_VK_FORMAT_D32_SFLOAT
                ? 4u
                : 0u;
@@ -3463,7 +3468,9 @@ static uint32_t image_format_aspects(int32_t format) {
     if (format == RIN_VK_FORMAT_R8_UNORM ||
         format == RIN_VK_FORMAT_R32G32B32A32_SFLOAT ||
         format == RIN_VK_FORMAT_R16G16B16A16_SFLOAT ||
-        format == RIN_VK_FORMAT_R8G8B8A8_UNORM)
+        format == RIN_VK_FORMAT_R8G8B8A8_UNORM ||
+        format == RIN_VK_FORMAT_B8G8R8A8_UNORM ||
+        format == RIN_VK_FORMAT_R5G6B5_UNORM_PACK16)
         return RIN_VK_IMAGE_ASPECT_COLOR_BIT;
     if (format == RIN_VK_FORMAT_D32_SFLOAT)
         return RIN_VK_IMAGE_ASPECT_DEPTH_BIT;
@@ -5862,7 +5869,7 @@ static int translate_routed_process_commands(
                 operation->filter != 0u || operation->sample_count != 0u)
                 goto unsupported;
             bytes_per_texel = image_format_bytes(image->format);
-            if (bytes_per_texel != 4u ||
+            if (bytes_per_texel == 0u ||
                 copy_width > UINT64_MAX / bytes_per_texel ||
                 copy_height > UINT64_MAX / copy_width / bytes_per_texel)
                 goto unsupported;
@@ -12050,7 +12057,9 @@ static int surface_properties_valid(
     for (index = 0u; index < properties->format_count; ++index) {
         const RinVulkanWsiSurfaceFormatV4* format =
             &properties->formats[index];
-        if (format->format != RIN_VK_FORMAT_R8G8B8A8_UNORM ||
+        if ((format->format != RIN_VK_FORMAT_R8G8B8A8_UNORM &&
+             format->format != RIN_VK_FORMAT_B8G8R8A8_UNORM &&
+             format->format != RIN_VK_FORMAT_R5G6B5_UNORM_PACK16) ||
             format->color_space != RIN_VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
             return 0;
         for (prior = 0u; prior < index; ++prior)
@@ -13317,12 +13326,12 @@ RinVkResult RIN_VKAPI_CALL vkQueuePresentKHR(
             goto present_result;
         }
         {
-            if (image->format != RIN_VK_FORMAT_R8G8B8A8_UNORM ||
+            if (image->format != (int32_t)request.format ||
                 image->width != request.width ||
                 image->height != request.height ||
-                !rin_vk_wsi_linear_rgba8_layout_valid(
-                    &image->storage_layout, image->width, image->height,
-                    request.allocation_size)) {
+                !rin_vk_wsi_linear_plane_layout_valid(
+                    &image->storage_layout, image->format, image->width,
+                    image->height, request.allocation_size)) {
                 release_wsi();
                 memset(pending, 0, sizeof(*pending));
                 result = RIN_VK_ERROR_FEATURE_NOT_PRESENT;
@@ -21125,7 +21134,9 @@ static RinVkResult create_image_with_storage_policy(
         /* The direct-display WSI path explicitly selects RinVk's private
          * tightly packed linear storage policy. Ordinary OPTIMAL images do
          * not acquire a guessed layout from their allocation size. */
-        const uint64_t row_pitch = (uint64_t)request.extent.width * 4u;
+        const uint64_t row_pitch =
+            (uint64_t)request.extent.width *
+            image_format_bytes(request.format);
         if (request.extent.height > UINT64_MAX / row_pitch ||
             row_pitch * request.extent.height != memory_size) {
             clear_image_slot(image);

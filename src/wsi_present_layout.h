@@ -6,15 +6,27 @@
 
 #include <rinvulkan/wsi_platform.h>
 
-static inline int rin_vk_wsi_linear_rgba8_layout_valid(
-    const RinVulkanWsiImageLayoutV1* layout, uint32_t width,
-    uint32_t height, uint64_t allocation_size) {
+static inline uint32_t rin_vk_wsi_linear_format_bytes_per_pixel(
+    int32_t format) {
+    if (format == RIN_VK_FORMAT_R5G6B5_UNORM_PACK16) return 2u;
+    if (format == RIN_VK_FORMAT_R8G8B8A8_UNORM ||
+        format == RIN_VK_FORMAT_B8G8R8A8_UNORM)
+        return 4u;
+    return 0u;
+}
+
+static inline int rin_vk_wsi_linear_plane_layout_valid(
+    const RinVulkanWsiImageLayoutV1* layout, int32_t format,
+    uint32_t width, uint32_t height, uint64_t allocation_size) {
+    const uint32_t bytes_per_pixel =
+        rin_vk_wsi_linear_format_bytes_per_pixel(format);
     uint64_t minimum_row_bytes;
     uint64_t row_pitch_bytes;
     uint64_t plane_size_bytes;
     uint32_t index;
 
-    if (!layout || width == 0u || height == 0u || allocation_size == 0u ||
+    if (!layout || bytes_per_pixel == 0u || width == 0u || height == 0u ||
+        allocation_size == 0u ||
         layout->struct_size != sizeof(*layout) ||
         layout->version != RIN_VULKAN_WSI_IMAGE_LAYOUT_V1_VERSION ||
         layout->kind != RIN_VULKAN_WSI_IMAGE_LAYOUT_KIND_LINEAR ||
@@ -31,7 +43,7 @@ static inline int rin_vk_wsi_linear_rgba8_layout_valid(
             return 0;
     }
 
-    minimum_row_bytes = (uint64_t)width * UINT64_C(4);
+    minimum_row_bytes = (uint64_t)width * bytes_per_pixel;
     row_pitch_bytes = layout->planes[0].row_pitch_bytes;
     if (row_pitch_bytes < minimum_row_bytes ||
         row_pitch_bytes > UINT64_MAX / (uint64_t)height)
@@ -39,6 +51,14 @@ static inline int rin_vk_wsi_linear_rgba8_layout_valid(
     plane_size_bytes = row_pitch_bytes * (uint64_t)height;
     return layout->planes[0].size_bytes == plane_size_bytes &&
            plane_size_bytes <= allocation_size;
+}
+
+static inline int rin_vk_wsi_linear_rgba8_layout_valid(
+    const RinVulkanWsiImageLayoutV1* layout, uint32_t width,
+    uint32_t height, uint64_t allocation_size) {
+    return rin_vk_wsi_linear_plane_layout_valid(
+        layout, RIN_VK_FORMAT_R8G8B8A8_UNORM, width, height,
+        allocation_size);
 }
 
 #endif
