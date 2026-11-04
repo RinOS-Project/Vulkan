@@ -5822,7 +5822,8 @@ static int translate_routed_process_commands(
                     RIN_VK_COMMAND_RESOURCE_ACCESS_WRITE);
             RinVkBufferSlot* buffer;
             RinVkImageSlot* image;
-            RinGpuBackendBufferToImageCopyV1* copy;
+            RinGpuBackendBufferToImageCopyV1* copy_v1;
+            RinGpuBackendBufferToImageCopyV2* copy_v2;
             uint32_t bytes_per_texel;
             uint64_t row_bytes;
             uint64_t row_pitch;
@@ -5891,23 +5892,62 @@ static int translate_routed_process_commands(
                 image_address != operation->destination_gpu_address)
                 goto unsupported;
             command = &commands[command_count++];
-            command->type = RIN_GPU_BACKEND_COMMAND_COPY_BUFFER_TO_IMAGE;
-            copy = &command->value.buffer_to_image_copy;
-            copy->buffer_cookie = buffer_use->resource_handle;
-            copy->buffer_offset = buffer_use->offset;
-            copy->buffer_size_bytes = source_span;
-            copy->buffer_row_pitch_bytes = row_pitch;
-            copy->image_cookie = image_use->resource_handle;
-            copy->image_mip_level = 0u;
-            copy->image_array_layer = 0u;
-            copy->image_width = image->width;
-            copy->image_height = image->height;
-            copy->image_offset_x = image_offset_x;
-            copy->image_offset_y = image_offset_y;
-            copy->copy_width = copy_width;
-            copy->copy_height = copy_height;
-            copy->buffer_image_height_texels = image_height;
-            copy->bytes_per_texel = bytes_per_texel;
+            if (image->storage_layout.version ==
+                    RIN_VULKAN_WSI_IMAGE_LAYOUT_V1_VERSION &&
+                image->storage_layout.kind ==
+                    RIN_VULKAN_WSI_IMAGE_LAYOUT_KIND_LINEAR &&
+                image->storage_layout.plane_count == 1u &&
+                image->storage_layout.planes[0].size_bytes ==
+                    image->memory_size &&
+                image->storage_layout.planes[0].row_pitch_bytes != 0u) {
+                command->type =
+                    RIN_GPU_BACKEND_COMMAND_COPY_BUFFER_TO_IMAGE_V2;
+                copy_v2 = &command->value.buffer_to_image_copy_v2;
+                copy_v2->abi_version =
+                    RIN_GPU_BACKEND_BUFFER_TO_IMAGE_COPY_V2_VERSION;
+                copy_v2->struct_size = sizeof(*copy_v2);
+                copy_v2->buffer_cookie = buffer_use->resource_handle;
+                copy_v2->buffer_offset = buffer_use->offset;
+                copy_v2->buffer_size_bytes = source_span;
+                copy_v2->buffer_row_pitch_bytes = row_pitch;
+                copy_v2->image_cookie = image_use->resource_handle;
+                copy_v2->image_offset_bytes =
+                    image->storage_layout.planes[0].offset_bytes;
+                copy_v2->image_size_bytes = image->memory_size;
+                copy_v2->image_row_pitch_bytes =
+                    image->storage_layout.planes[0].row_pitch_bytes;
+                copy_v2->image_mip_level = 0u;
+                copy_v2->image_array_layer = 0u;
+                copy_v2->image_width = image->width;
+                copy_v2->image_height = image->height;
+                copy_v2->image_offset_x = image_offset_x;
+                copy_v2->image_offset_y = image_offset_y;
+                copy_v2->copy_width = copy_width;
+                copy_v2->copy_height = copy_height;
+                copy_v2->buffer_image_height_texels = image_height;
+                copy_v2->bytes_per_texel = bytes_per_texel;
+                copy_v2->storage_layout =
+                    RIN_GPU_BACKEND_IMAGE_STORAGE_LINEAR_V1;
+            } else {
+                command->type =
+                    RIN_GPU_BACKEND_COMMAND_COPY_BUFFER_TO_IMAGE;
+                copy_v1 = &command->value.buffer_to_image_copy;
+                copy_v1->buffer_cookie = buffer_use->resource_handle;
+                copy_v1->buffer_offset = buffer_use->offset;
+                copy_v1->buffer_size_bytes = source_span;
+                copy_v1->buffer_row_pitch_bytes = row_pitch;
+                copy_v1->image_cookie = image_use->resource_handle;
+                copy_v1->image_mip_level = 0u;
+                copy_v1->image_array_layer = 0u;
+                copy_v1->image_width = image->width;
+                copy_v1->image_height = image->height;
+                copy_v1->image_offset_x = image_offset_x;
+                copy_v1->image_offset_y = image_offset_y;
+                copy_v1->copy_width = copy_width;
+                copy_v1->copy_height = copy_height;
+                copy_v1->buffer_image_height_texels = image_height;
+                copy_v1->bytes_per_texel = bytes_per_texel;
+            }
         } else if (operation->type ==
                    RIN_GPU_VULKAN_TRANSFER_OP_IMAGE_BARRIER) {
             RinVkImageSlot* image;
